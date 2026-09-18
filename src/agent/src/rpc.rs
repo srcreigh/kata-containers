@@ -90,9 +90,6 @@ const ERR_INVALID_BLOCK_SIZE: &str = "Invalid block size";
 const ERR_NO_LINUX_FIELD: &str = "Spec does not contain linux field";
 const ERR_NO_SANDBOX_PIDNS: &str = "Sandbox does not have sandbox_pidns";
 
-/// This mask is applied to parent directories implicitly created for CopyFile requests.
-const IMPLICIT_DIRECTORY_PERMISSION_MASK: u32 = 0o777;
-
 /// This mask is applied to files and directories created for CopyFile requests.
 /// In addition to the permissions, it allows setuid/setgid/sticky bits.
 /// Note that the setuid bit does not have an effect on Linux, though.
@@ -1129,7 +1126,7 @@ impl agent_ttrpc::AgentService for AgentService {
             let mut s = self.sandbox.lock().await;
 
             let _ = fs::remove_dir_all(CONTAINER_BASE);
-            let _ = fs::create_dir_all(CONTAINER_BASE);
+            fs::create_dir_all(KATA_GUEST_SHARE_DIR).map_ttrpc_err(same)?;
 
             s.hostname = req.hostname.clone();
             s.running = true;
@@ -1679,9 +1676,9 @@ fn is_signal_handled(proc_status_file: &str, signum: u32) -> bool {
 /// directory need to consider whether they trust the host, or handle the directory with the same
 /// care as do_copy_file.
 ///
-/// Parent directories are created, if they don't exist already. For these implicit operations, the
-/// permissions are set with req.dir_mode. The actual target is created with permissions from
-/// req.file_mode, even if it's a directory.
+/// The shared root and all parent directories must already exist. Only the requested target
+/// receives req.file_mode and ownership; req.dir_mode is unused. Directories must be explicitly
+/// created before copying their children.
 ///
 /// If req.file_mode requests a symbolic link, the link is created pointing to the path in
 /// req.data. In that case, req.file_mode is ignored because symlinks don't have permissions on
@@ -1699,29 +1696,7 @@ fn do_copy_file(req: &CopyFileRequest, shared_dir: &PathBuf) -> Result<()> {
             shared_dir, req.path
         ))?;
 
-    // The shared directory might not exist yet, but we need to create it in order to open the root.
-    std::fs::create_dir_all(shared_dir)?;
     let root = pathrs::Root::open(shared_dir)?;
-
-    // Create parent directories if missing
-    if let Some(parent) = path.parent() {
-        let dir = root
-            .mkdir_all(
-                parent,
-                &std::fs::Permissions::from_mode(req.dir_mode & IMPLICIT_DIRECTORY_PERMISSION_MASK),
-            )
-            .context("mkdir_all parent")?
-            .reopen(OpenFlags::O_DIRECTORY)
-            .context("reopen parent")?;
-
-        // TODO(burgerdev): why are we only applying this to the immediate parent?
-        unistd::fchown(
-            dir,
-            Some(Uid::from_raw(req.uid as u32)),
-            Some(Gid::from_raw(req.gid as u32)),
-        )
-        .context("fchown parent")?
-    }
 
     let sflag = stat::SFlag::from_bits_truncate(req.file_mode);
 
@@ -1738,16 +1713,20 @@ fn do_copy_file(req: &CopyFileRequest, shared_dir: &PathBuf) -> Result<()> {
             _ => Err(e),
         })?;
 
-        // mkdir_all does not support the setuid/setgid/sticky bits, so we first create the
-        // directory with the stricter mask and then change permissions with the correct mask.
+        // Create only the requested directory; never synthesize its parents.
+        root.create(
+            path,
+            &pathrs::InodeType::Directory(std::fs::Permissions::from_mode(
+                req.file_mode & FILE_PERMISSION_MASK,
+            )),
+        )
+        .or_else(|e| match e.kind() {
+            pathrs::error::ErrorKind::OsError(Some(libc::EEXIST)) => Ok(()),
+            _ => Err(e),
+        })
+        .context("create dir")?;
         let dir = root
-            .mkdir_all(
-                path,
-                &std::fs::Permissions::from_mode(
-                    req.file_mode & IMPLICIT_DIRECTORY_PERMISSION_MASK,
-                ),
-            )
-            .context("mkdir_all dir")?
+            .resolve(path)?
             .reopen(OpenFlags::O_DIRECTORY)
             .context("reopen dir")?;
         dir.set_permissions(std::fs::Permissions::from_mode(
@@ -2966,12 +2945,87 @@ OtherField:other
         assert_eq!(ids, vec!["container-1", "container-2"]);
     }
 
+    #[test]
+    fn test_do_copy_file_requires_existing_parents() {
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path().join("shared");
+        for file_mode in [libc::S_IFREG, libc::S_IFDIR, libc::S_IFLNK] {
+            let mut req = CopyFileRequest {
+                path: base.join("target").to_string_lossy().into(),
+                file_mode: file_mode | 0o755,
+                data: b"destination".to_vec(),
+                file_size: 11,
+                uid: unistd::getuid().as_raw() as i32,
+                gid: unistd::getgid().as_raw() as i32,
+                ..Default::default()
+            };
+            // CopyFile must not bootstrap even the fixed shared root.
+            assert!(do_copy_file(&req, &base).is_err());
+            assert!(!base.exists());
+            fs::create_dir(&base).unwrap();
+            req.path = base.join("missing/nested/target").to_string_lossy().into();
+            assert!(do_copy_file(&req, &base).is_err());
+            assert!(!base.join("missing").exists());
+            assert_eq!(fs::read_dir(&base).unwrap().count(), 0);
+            fs::remove_dir(&base).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_do_copy_file_preserves_parent_metadata() {
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path().to_path_buf();
+        let parent = base.join("parent");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o751)).unwrap();
+        // Exercise a different parent owner when run as root, as in the Linux builder.
+        if unistd::getuid().is_root() {
+            unistd::chown(
+                &parent,
+                Some(Uid::from_raw(1234)),
+                Some(Gid::from_raw(1234)),
+            )
+            .unwrap();
+        }
+        let before = stat::stat(&parent).unwrap();
+        for (name, kind) in [
+            ("file", libc::S_IFREG),
+            ("dir", libc::S_IFDIR),
+            ("link", libc::S_IFLNK),
+        ] {
+            let req = CopyFileRequest {
+                path: parent.join(name).to_string_lossy().into(),
+                file_mode: kind | 0o700,
+                dir_mode: 0o777,
+                uid: unistd::getuid().as_raw() as i32,
+                gid: unistd::getgid().as_raw() as i32,
+                data: b"destination".to_vec(),
+                file_size: 11,
+                ..Default::default()
+            };
+            do_copy_file(&req, &base).unwrap();
+            let after = stat::stat(&parent).unwrap();
+            assert_eq!(
+                (after.st_uid, after.st_gid, after.st_mode),
+                (before.st_uid, before.st_gid, before.st_mode)
+            );
+            let target = stat::lstat(&parent.join(name)).unwrap();
+            assert_eq!(
+                (target.st_uid, target.st_gid),
+                (req.uid as u32, req.gid as u32)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_do_copy_file() {
         let temp_dir = tempdir().expect("creating temp dir failed");
-        // We start one directory deeper such that we catch problems when the shared directory does
-        // not exist yet.
         let base = temp_dir.path().join("shared");
+        fs::create_dir(&base).unwrap();
+        for parent in ["a", "x"] {
+            fs::create_dir(base.join(parent)).unwrap();
+            fs::set_permissions(base.join(parent), fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         type Assertions = Box<dyn Fn(&Path) -> Result<()>>;
         struct TestCase {
@@ -3025,7 +3079,7 @@ OtherField:other
                 }),
             },
             TestCase {
-                name: "Creating a file implicitly creates parent directories".into(),
+                name: "Creating a file preserves its existing parent".into(),
                 request: CopyFileRequest {
                     path: base.join("a/b").to_string_lossy().into(),
                     dir_mode: 0o755 | libc::S_IFDIR,
@@ -3161,7 +3215,7 @@ OtherField:other
                 },
                 should_fail: false,
                 assertions: Box::new(|base| -> Result<()> {
-                    // Implicitly created directories should not get a sticky bit.
+                    // Existing parents must retain their permissions.
                     let x_stat = fs::metadata(base.join("x")).context("stat ./x failed")?;
                     ensure!(x_stat.is_dir());
                     ensure!(0o755 == x_stat.permissions().mode() & 0o7777);
