@@ -1,1553 +1,294 @@
 // Copyright (c) 2019 Ant Financial
-//
 // SPDX-License-Identifier: Apache-2.0
-//
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+//! The complete supported guest configuration. Unknown agent options fail closed.
+use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
-use std::env;
-use std::fs;
-use std::str::FromStr;
-use std::time;
-use strum_macros::{Display, EnumString};
-use tracing::instrument;
-use url::Url;
-
-use kata_types::config::default::DEFAULT_AGENT_VSOCK_PORT;
-
-const DEBUG_CONSOLE_FLAG: &str = "agent.debug_console";
-const DEV_MODE_FLAG: &str = "agent.devmode";
-const TRACE_MODE_OPTION: &str = "agent.trace";
-const LOG_LEVEL_OPTION: &str = "agent.log";
-const SERVER_ADDR_OPTION: &str = "agent.server_addr";
-const PASSFD_LISTENER_PORT: &str = "agent.passfd_listener_port";
-const HOTPLUG_TIMOUT_OPTION: &str = "agent.hotplug_timeout";
-const CDH_API_TIMOUT_OPTION: &str = "agent.cdh_api_timeout";
-const CDH_IMAGE_PULL_TIMEOUT_OPTION: &str = "agent.image_pull_timeout";
-const LAUNCH_PROCESS_TIMEOUT_OPTION: &str = "agent.launch_process_timeout";
-const DEBUG_CONSOLE_VPORT_OPTION: &str = "agent.debug_console_vport";
-const LOG_VPORT_OPTION: &str = "agent.log_vport";
-const CONTAINER_PIPE_SIZE_OPTION: &str = "agent.container_pipe_size";
-const CGROUP_NO_V1: &str = "cgroup_no_v1";
-const UNIFIED_CGROUP_HIERARCHY_OPTION: &str = "systemd.unified_cgroup_hierarchy";
-const CONFIG_FILE: &str = "agent.config_file";
-const GUEST_COMPONENTS_REST_API_OPTION: &str = "agent.guest_components_rest_api";
-const GUEST_COMPONENTS_PROCS_OPTION: &str = "agent.guest_components_procs";
-const SECURE_STORAGE_INTEGRITY_OPTION: &str = "agent.secure_storage_integrity";
-
-// Configure the proxy settings for HTTPS requests in the guest,
-// to solve the problem of not being able to access the specified image in some cases.
-const HTTPS_PROXY: &str = "agent.https_proxy";
-const NO_PROXY: &str = "agent.no_proxy";
-
-const DEFAULT_LOG_LEVEL: slog::Level = slog::Level::Info;
-const DEFAULT_HOTPLUG_TIMEOUT: time::Duration = time::Duration::from_secs(3);
-const DEFAULT_CDH_API_TIMEOUT: time::Duration = time::Duration::from_secs(50);
-const DEFAULT_IMAGE_PULL_TIMEOUT: time::Duration = time::Duration::from_secs(1200);
-const DEFAULT_LAUNCH_PROCESS_TIMEOUT: time::Duration = time::Duration::from_secs(6);
-const DEFAULT_CONTAINER_PIPE_SIZE: i32 = 0;
-const VSOCK_ADDR: &str = "vsock://-1";
-
-// Environment variables used for development and testing
-const SERVER_ADDR_ENV_VAR: &str = "KATA_AGENT_SERVER_ADDR";
-const LOG_LEVEL_ENV_VAR: &str = "KATA_AGENT_LOG_LEVEL";
-const TRACING_ENV_VAR: &str = "KATA_AGENT_TRACING";
-#[cfg(feature = "agent-policy")]
-// Policy file environment variable to pass a policy document
-// to initialize agent policy engine.
-const POLICY_FILE_VAR: &str = "KATA_AGENT_POLICY_FILE";
-
-const ERR_INVALID_LOG_LEVEL: &str = "invalid log level";
-const ERR_INVALID_LOG_LEVEL_PARAM: &str = "invalid log level parameter";
-const ERR_INVALID_GET_VALUE_PARAM: &str = "expected name=value";
-const ERR_INVALID_GET_VALUE_NO_NAME: &str = "name=value parameter missing name";
-const ERR_INVALID_GET_VALUE_NO_VALUE: &str = "name=value parameter missing value";
-const ERR_INVALID_LOG_LEVEL_KEY: &str = "invalid log level key name";
-const ERR_INVALID_TIMEOUT: &str = "invalid timeout parameter";
-const ERR_INVALID_TIMEOUT_PARAM: &str = "unable to parse timeout";
-const ERR_INVALID_TIMEOUT_KEY: &str = "invalid timeout key name";
-
-const ERR_INVALID_CONTAINER_PIPE_SIZE: &str = "invalid container pipe size parameter";
-const ERR_INVALID_CONTAINER_PIPE_SIZE_PARAM: &str = "unable to parse container pipe size";
-const ERR_INVALID_CONTAINER_PIPE_SIZE_KEY: &str = "invalid container pipe size key name";
-const ERR_INVALID_CONTAINER_PIPE_NEGATIVE: &str = "container pipe size should not be negative";
-
-const ERR_INVALID_GUEST_COMPONENTS_REST_API_VALUE: &str = "invalid guest components rest api feature given. Valid values are `all`, `attestation`, `resource`";
-const ERR_INVALID_GUEST_COMPONENTS_PROCS_VALUE: &str = "invalid guest components process param given. Valid values are `attestation-agent`, `confidential-data-hub`, `api-server-rest`, or `none`";
-
-#[derive(Clone, Copy, Debug, Default, Display, Deserialize, EnumString, PartialEq)]
-// Features seem to typically be in kebab-case format, but we only have single words at the moment
-#[strum(serialize_all = "kebab-case")]
-#[serde(rename_all = "kebab-case")]
-pub enum GuestComponentsFeatures {
-    All,
-    Attestation,
-    #[default]
-    Resource,
-}
-
-#[derive(Clone, Copy, Debug, Default, Display, Deserialize, EnumString, PartialEq, Eq)]
-/// Attestation-related processes that we want to spawn as children of the agent
-#[strum(serialize_all = "kebab-case")]
-#[serde(rename_all = "kebab-case")]
-pub enum GuestComponentsProcs {
-    None,
-    /// ApiServerRest implies ConfidentialDataHub and AttestationAgent
-    #[default]
-    ApiServerRest,
-    AttestationAgent,
-    /// ConfidentialDataHub implies AttestationAgent
-    ConfidentialDataHub,
-}
+use std::{env, fs, str::FromStr, time::Duration};
 
 #[derive(Debug)]
 pub struct AgentConfig {
-    pub debug_console: bool,
-    pub dev_mode: bool,
     pub log_level: slog::Level,
-    pub hotplug_timeout: time::Duration,
-    pub cdh_api_timeout: time::Duration,
-    pub image_pull_timeout: time::Duration,
-    pub launch_process_timeout: time::Duration,
-    pub debug_console_vport: i32,
-    pub log_vport: i32,
+    pub hotplug_timeout: Duration,
+    pub log_vport: u32,
     pub container_pipe_size: i32,
     pub server_addr: String,
-    pub passfd_listener_port: i32,
     pub cgroup_no_v1: String,
     pub unified_cgroup_hierarchy: bool,
-    pub tracing: bool,
-    pub https_proxy: String,
-    pub no_proxy: String,
-    pub guest_components_rest_api: GuestComponentsFeatures,
-    pub guest_components_procs: GuestComponentsProcs,
-    pub secure_storage_integrity: bool,
-    #[cfg(feature = "agent-policy")]
-    pub policy_file: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentConfigBuilder {
-    pub debug_console: Option<bool>,
-    pub dev_mode: Option<bool>,
-    pub log_level: Option<String>,
-    pub hotplug_timeout: Option<time::Duration>,
-    pub cdh_api_timeout: Option<time::Duration>,
-    pub image_pull_timeout: Option<time::Duration>,
-    pub launch_process_timeout: Option<time::Duration>,
-    pub debug_console_vport: Option<i32>,
-    pub log_vport: Option<i32>,
-    pub container_pipe_size: Option<i32>,
-    pub server_addr: Option<String>,
-    pub passfd_listener_port: Option<i32>,
-    pub unified_cgroup_hierarchy: Option<bool>,
-    pub tracing: Option<bool>,
-    pub https_proxy: Option<String>,
-    pub no_proxy: Option<String>,
-    pub guest_components_rest_api: Option<GuestComponentsFeatures>,
-    pub guest_components_procs: Option<GuestComponentsProcs>,
-    pub secure_storage_integrity: Option<bool>,
-    #[cfg(feature = "agent-policy")]
-    pub policy_file: Option<String>,
-}
-
-macro_rules! config_override {
-    ($builder:ident, $config:ident, $field:ident) => {
-        if let Some(v) = $builder.$field {
-            $config.$field = v;
-        }
-    };
-
-    ($builder:ident, $config:ident, $field:ident, $func:ident) => {
-        if let Some(v) = $builder.$field {
-            $config.$field = $func(&v)?;
-        }
-    };
-}
-
-// parse_cmdline_param parse commandline parameters.
-macro_rules! parse_cmdline_param {
-    // commandline flags, without func to parse the option values
-    ($param:ident, $key:ident, $field:expr) => {
-        if $param.eq(&$key) {
-            $field = true;
-            continue;
-        }
-    };
-    // commandline options, with func to parse the option values
-    ($param:ident, $key:ident, $field:expr, $func:ident) => {
-        if $param.starts_with(format!("{}=", $key).as_str()) {
-            let val = $func($param)?;
-            $field = val;
-            continue;
-        }
-    };
-    // commandline options, with func to parse the option values, and match func
-    // to valid the values
-    ($param:ident, $key:ident, $field:expr, $func:ident, $guard:expr) => {
-        if $param.starts_with(format!("{}=", $key).as_str()) {
-            let val = $func($param)?;
-            if $guard(&val) {
-                $field = val;
-            }
-            continue;
-        }
-    };
+struct ConfigFile {
+    log_level: Option<String>,
+    hotplug_timeout: Option<Duration>,
+    log_vport: Option<u32>,
+    container_pipe_size: Option<i32>,
+    server_addr: Option<String>,
+    cgroup_no_v1: Option<String>,
+    unified_cgroup_hierarchy: Option<bool>,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        AgentConfig {
-            debug_console: false,
-            dev_mode: false,
-            log_level: DEFAULT_LOG_LEVEL,
-            hotplug_timeout: DEFAULT_HOTPLUG_TIMEOUT,
-            cdh_api_timeout: DEFAULT_CDH_API_TIMEOUT,
-            image_pull_timeout: DEFAULT_IMAGE_PULL_TIMEOUT,
-            launch_process_timeout: DEFAULT_LAUNCH_PROCESS_TIMEOUT,
-            debug_console_vport: 0,
+        Self {
+            log_level: slog::Level::Info,
+            hotplug_timeout: Duration::from_secs(3),
             log_vport: 0,
-            container_pipe_size: DEFAULT_CONTAINER_PIPE_SIZE,
-            server_addr: format!("{VSOCK_ADDR}:{DEFAULT_AGENT_VSOCK_PORT}"),
-            passfd_listener_port: 0,
-            cgroup_no_v1: String::from(""),
+            container_pipe_size: 0,
+            server_addr: "vsock://-1:1024".into(),
+            cgroup_no_v1: String::new(),
             unified_cgroup_hierarchy: false,
-            tracing: false,
-            https_proxy: String::from(""),
-            no_proxy: String::from(""),
-            guest_components_rest_api: GuestComponentsFeatures::default(),
-            guest_components_procs: GuestComponentsProcs::default(),
-            secure_storage_integrity: true,
-            #[cfg(feature = "agent-policy")]
-            policy_file: String::from(""),
         }
     }
 }
 
 impl FromStr for AgentConfig {
     type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let agent_config_builder: AgentConfigBuilder =
-            toml::from_str(s).map_err(anyhow::Error::new)?;
-        let mut agent_config: AgentConfig = Default::default();
-
-        // Overwrite default values with the configuration files ones.
-        config_override!(agent_config_builder, agent_config, debug_console);
-        config_override!(agent_config_builder, agent_config, dev_mode);
-        config_override!(
-            agent_config_builder,
-            agent_config,
-            log_level,
-            logrus_to_slog_level
+    fn from_str(s: &str) -> Result<Self> {
+        let file: ConfigFile = toml::from_str(s)?;
+        let mut config = Self::default();
+        if let Some(level) = file.log_level {
+            config.log_level = log_level(&level)?;
+        }
+        macro_rules! copy {
+            ($($field:ident),*) => { $(if let Some(v) = file.$field { config.$field = v; })* };
+        }
+        copy!(
+            hotplug_timeout,
+            log_vport,
+            container_pipe_size,
+            server_addr,
+            cgroup_no_v1,
+            unified_cgroup_hierarchy
         );
-        config_override!(agent_config_builder, agent_config, hotplug_timeout);
-        config_override!(agent_config_builder, agent_config, cdh_api_timeout);
-        config_override!(agent_config_builder, agent_config, image_pull_timeout);
-        config_override!(agent_config_builder, agent_config, launch_process_timeout);
-        config_override!(agent_config_builder, agent_config, debug_console_vport);
-        config_override!(agent_config_builder, agent_config, log_vport);
-        config_override!(agent_config_builder, agent_config, container_pipe_size);
-        config_override!(agent_config_builder, agent_config, server_addr);
-        config_override!(agent_config_builder, agent_config, passfd_listener_port);
-        config_override!(agent_config_builder, agent_config, unified_cgroup_hierarchy);
-        config_override!(agent_config_builder, agent_config, tracing);
-        config_override!(agent_config_builder, agent_config, https_proxy);
-        config_override!(agent_config_builder, agent_config, no_proxy);
-        config_override!(
-            agent_config_builder,
-            agent_config,
-            guest_components_rest_api
-        );
-        config_override!(agent_config_builder, agent_config, guest_components_procs);
-        config_override!(agent_config_builder, agent_config, secure_storage_integrity);
-
-        #[cfg(feature = "agent-policy")]
-        config_override!(agent_config_builder, agent_config, policy_file);
-
-        Ok(agent_config)
+        config.validate()?;
+        Ok(config)
     }
 }
 
 impl AgentConfig {
-    #[instrument]
-    #[allow(clippy::redundant_closure_call)]
-    pub fn from_cmdline(file: &str, args: Vec<String>) -> Result<AgentConfig> {
-        // If config file specified in the args, generate our config from it
-        let config_position = args.iter().position(|a| a == "--config" || a == "-c");
-        if let Some(config_position) = config_position {
-            if let Some(config_file) = args.get(config_position + 1) {
-                let mut config =
-                    AgentConfig::from_config_file(config_file).context("AgentConfig from args")?;
-                config.override_config_from_envs();
-                return Ok(config);
-            } else {
-                panic!("The config argument wasn't formed properly: {:?}", args);
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.hotplug_timeout.is_zero(),
+            "hotplug_timeout must be positive"
+        );
+        ensure!(
+            self.container_pipe_size >= 0,
+            "container_pipe_size must not be negative"
+        );
+        ensure!(
+            !self.server_addr.is_empty(),
+            "server_addr must not be empty"
+        );
+        Ok(())
+    }
+
+    pub fn from_cmdline(file: &str, args: Vec<String>) -> Result<Self> {
+        // Validate all kernel options before choosing any config file. A config-file
+        // option must not hide an unsupported option appearing before or after it.
+        let cmdline = fs::read_to_string(file).context("read kernel command line")?;
+        let mut config = Self::default();
+        let mut config_file = None;
+        for param in cmdline.split_ascii_whitespace() {
+            let (key, value) = param.split_once('=').unwrap_or((param, ""));
+            match key {
+                "agent.log" => config.log_level = log_level(value)?,
+                "agent.hotplug_timeout" => {
+                    config.hotplug_timeout = Duration::from_secs(value.parse()?)
+                }
+                "agent.log_vport" => config.log_vport = value.parse()?,
+                "agent.container_pipe_size" => config.container_pipe_size = value.parse()?,
+                "agent.server_addr" => {
+                    ensure!(!value.is_empty(), "empty server address");
+                    config.server_addr = value.into();
+                }
+                "agent.config_file" => {
+                    ensure!(!value.is_empty(), "empty config file path");
+                    config_file = Some(value.to_owned());
+                }
+                "cgroup_no_v1" => config.cgroup_no_v1 = value.into(),
+                "systemd.unified_cgroup_hierarchy" => {
+                    config.unified_cgroup_hierarchy = match value {
+                        "1" | "true" => true,
+                        "0" | "false" => false,
+                        _ => bail!("invalid unified_cgroup_hierarchy value"),
+                    }
+                }
+                _ if key.starts_with("agent.") => bail!("kata-fc: unsupported agent option {key}"),
+                _ => {} // Ordinary Linux kernel arguments are not agent configuration.
             }
         }
-
-        let mut config: AgentConfig = Default::default();
-        let cmdline = fs::read_to_string(file)?;
-        let params: Vec<&str> = cmdline.split_ascii_whitespace().collect();
-        for param in params.iter() {
-            let key = param.split('=').next().unwrap_or_default();
-            ensure!(
-                !matches!(key, "agent.cdi_timeout" | "agent.visible_cdi_devices")
-                    && !key.starts_with("agent.mem_agent_"),
-                "kata-fc: CDI/memory-agent configuration is unsupported"
+        config.validate()?;
+        if let Some(position) = args.iter().position(|a| a == "--config" || a == "-c") {
+            config_file = Some(
+                args.get(position + 1)
+                    .context("missing agent config path")?
+                    .clone(),
             );
         }
-        for param in params.iter() {
-            // If we get a configuration file path from the command line, we
-            // generate our config from it.
-            // The agent will fail to start if the configuration file is not present,
-            // or if it can't be parsed properly.
-            if param.starts_with(format!("{CONFIG_FILE}=").as_str()) {
-                let config_file = get_string_value(param)?;
-                return AgentConfig::from_config_file(&config_file)
-                    .context("AgentConfig from kernel cmdline");
-            }
-
-            // parse cmdline flags
-            parse_cmdline_param!(param, DEBUG_CONSOLE_FLAG, config.debug_console);
-            parse_cmdline_param!(param, DEV_MODE_FLAG, config.dev_mode);
-
-            // Support "bare" tracing option for backwards compatibility with
-            // Kata 1.x.
-            if param == &TRACE_MODE_OPTION {
-                config.tracing = true;
-                continue;
-            }
-
-            parse_cmdline_param!(param, TRACE_MODE_OPTION, config.tracing, get_bool_value);
-
-            // parse cmdline options
-            parse_cmdline_param!(param, LOG_LEVEL_OPTION, config.log_level, get_log_level);
-            parse_cmdline_param!(
-                param,
-                SERVER_ADDR_OPTION,
-                config.server_addr,
-                get_string_value
-            );
-
-            // ensure the timeout is a positive value
-            parse_cmdline_param!(
-                param,
-                HOTPLUG_TIMOUT_OPTION,
-                config.hotplug_timeout,
-                get_timeout,
-                |hotplug_timeout: &time::Duration| hotplug_timeout.as_secs() > 0
-            );
-
-            // ensure the timeout is a positive value
-            parse_cmdline_param!(
-                param,
-                CDH_API_TIMOUT_OPTION,
-                config.cdh_api_timeout,
-                get_timeout,
-                |cdh_api_timeout: &time::Duration| cdh_api_timeout.as_secs() > 0
-            );
-
-            // ensure the timeout is a positive value
-            parse_cmdline_param!(
-                param,
-                CDH_IMAGE_PULL_TIMEOUT_OPTION,
-                config.image_pull_timeout,
-                get_timeout,
-                |image_pull_timeout: &time::Duration| image_pull_timeout.as_secs() > 0
-            );
-
-            // ensure the timeout is a positive value
-
-            parse_cmdline_param!(
-                param,
-                LAUNCH_PROCESS_TIMEOUT_OPTION,
-                config.launch_process_timeout,
-                get_timeout,
-                |launch_process_timeout: &time::Duration| launch_process_timeout.as_secs() > 0
-            );
-
-            // vsock port should be positive values
-            parse_cmdline_param!(
-                param,
-                DEBUG_CONSOLE_VPORT_OPTION,
-                config.debug_console_vport,
-                get_number_value,
-                |port: &i32| *port > 0
-            );
-            parse_cmdline_param!(
-                param,
-                LOG_VPORT_OPTION,
-                config.log_vport,
-                get_number_value,
-                |port: &i32| *port > 0
-            );
-            parse_cmdline_param!(
-                param,
-                PASSFD_LISTENER_PORT,
-                config.passfd_listener_port,
-                get_number_value,
-                |port: &i32| *port > 0
-            );
-            parse_cmdline_param!(
-                param,
-                CONTAINER_PIPE_SIZE_OPTION,
-                config.container_pipe_size,
-                get_container_pipe_size
-            );
-            parse_cmdline_param!(
-                param,
-                CGROUP_NO_V1,
-                config.cgroup_no_v1,
-                get_string_value,
-                |no_v1| no_v1 == "all"
-            );
-            parse_cmdline_param!(
-                param,
-                UNIFIED_CGROUP_HIERARCHY_OPTION,
-                config.unified_cgroup_hierarchy,
-                get_bool_value
-            );
-            parse_cmdline_param!(param, HTTPS_PROXY, config.https_proxy, get_url_value);
-            parse_cmdline_param!(param, NO_PROXY, config.no_proxy, get_string_value);
-            parse_cmdline_param!(
-                param,
-                GUEST_COMPONENTS_REST_API_OPTION,
-                config.guest_components_rest_api,
-                get_guest_components_features_value
-            );
-            parse_cmdline_param!(
-                param,
-                GUEST_COMPONENTS_PROCS_OPTION,
-                config.guest_components_procs,
-                get_guest_components_procs_value
-            );
-            parse_cmdline_param!(
-                param,
-                SECURE_STORAGE_INTEGRITY_OPTION,
-                config.secure_storage_integrity,
-                get_bool_value
-            );
+        if let Some(path) = config_file {
+            config = fs::read_to_string(&path)
+                .with_context(|| format!("read agent config {path}"))?
+                .parse()?;
         }
-
-        config.override_config_from_envs();
-
+        config.apply_env(env::vars().filter(|(k, _)| k.starts_with("KATA_AGENT_")))?;
+        config.validate()?;
         Ok(config)
     }
 
-    #[instrument]
-    pub fn from_config_file(file: &str) -> Result<AgentConfig> {
-        let config = fs::read_to_string(file)
-            .with_context(|| format!("Failed to read config file {file}"))?;
-        AgentConfig::from_str(&config)
-    }
-
-    #[instrument]
-    fn override_config_from_envs(&mut self) {
-        if let Ok(addr) = env::var(SERVER_ADDR_ENV_VAR) {
-            self.server_addr = addr;
-        }
-
-        if let Ok(level) = env::var(LOG_LEVEL_ENV_VAR) {
-            if let Ok(level) = logrus_to_slog_level(&level) {
-                self.log_level = level;
+    fn apply_env(&mut self, vars: impl Iterator<Item = (String, String)>) -> Result<()> {
+        for (key, value) in vars {
+            match key.as_str() {
+                "KATA_AGENT_SERVER_ADDR" => self.server_addr = value,
+                "KATA_AGENT_LOG_LEVEL" => self.log_level = log_level(&value)?,
+                _ => bail!("kata-fc: unsupported agent environment option {key}"),
             }
         }
-
-        if let Ok(value) = env::var(TRACING_ENV_VAR) {
-            let name_value = format!("{TRACING_ENV_VAR}={value}");
-
-            self.tracing = get_bool_value(&name_value).unwrap_or(false);
-        }
-
-        #[cfg(feature = "agent-policy")]
-        if let Ok(policy_file) = env::var(POLICY_FILE_VAR) {
-            self.policy_file = policy_file;
-        }
+        self.validate()
     }
 }
 
-#[instrument]
-fn get_number_value<T>(p: &str) -> Result<T>
-where
-    T: std::str::FromStr,
-    <T as std::str::FromStr>::Err: std::fmt::Debug,
-{
-    let fields: Vec<&str> = p.split('=').collect();
-    if fields.len() != 2 {
-        return Err(anyhow!("format of {} is invalid", p));
-    }
-
-    fields[1]
-        .parse::<T>()
-        .map_err(|e| anyhow!("parse from {} failed: {:?}", fields[1], e))
-}
-
-// Map logrus (https://godoc.org/github.com/sirupsen/logrus)
-// log level to the equivalent slog log levels.
-//
-// Note: Logrus names are used for compatability with the previous
-// golang-based agent.
-#[instrument]
-fn logrus_to_slog_level(logrus_level: &str) -> Result<slog::Level> {
-    let level = match logrus_level {
-        // Note: different semantics to logrus: log, but don't panic.
-        "fatal" | "panic" => slog::Level::Critical,
-
-        "critical" => slog::Level::Critical,
+fn log_level(value: &str) -> Result<slog::Level> {
+    Ok(match value {
+        "fatal" | "panic" | "critical" => slog::Level::Critical,
         "error" => slog::Level::Error,
         "warn" | "warning" => slog::Level::Warning,
         "info" => slog::Level::Info,
         "debug" => slog::Level::Debug,
-
-        // Not in logrus
         "trace" => slog::Level::Trace,
-
-        _ => bail!(ERR_INVALID_LOG_LEVEL),
-    };
-
-    Ok(level)
-}
-
-#[instrument]
-fn get_log_level(param: &str) -> Result<slog::Level> {
-    let fields: Vec<&str> = param.split('=').collect();
-    ensure!(fields.len() == 2, ERR_INVALID_LOG_LEVEL_PARAM);
-    ensure!(fields[0] == LOG_LEVEL_OPTION, ERR_INVALID_LOG_LEVEL_KEY);
-
-    logrus_to_slog_level(fields[1])
-}
-
-#[instrument]
-fn get_timeout(param: &str) -> Result<time::Duration> {
-    let fields: Vec<&str> = param.split('=').collect();
-    ensure!(fields.len() == 2, ERR_INVALID_TIMEOUT);
-    ensure!(
-        matches!(
-            fields[0],
-            HOTPLUG_TIMOUT_OPTION
-                | CDH_API_TIMOUT_OPTION
-                | CDH_IMAGE_PULL_TIMEOUT_OPTION
-                | LAUNCH_PROCESS_TIMEOUT_OPTION
-        ),
-        ERR_INVALID_TIMEOUT_KEY
-    );
-
-    let value = fields[1]
-        .parse::<u64>()
-        .with_context(|| ERR_INVALID_TIMEOUT_PARAM)?;
-
-    Ok(time::Duration::from_secs(value))
-}
-
-#[instrument]
-fn get_bool_value(param: &str) -> Result<bool> {
-    let fields: Vec<&str> = param.split('=').collect();
-
-    if fields.len() != 2 {
-        return Ok(false);
-    }
-
-    let v = fields[1];
-
-    // first try to parse as bool value
-    v.parse::<bool>().or_else(|_err1| {
-        // then try to parse as integer value
-        v.parse::<u64>().or(Ok(0)).map(|v| !matches!(v, 0))
+        _ => bail!("invalid log level"),
     })
-}
-
-// Return the value from a "name=value" string.
-//
-// Note:
-//
-// - A name *and* a value is required.
-// - A value can contain any number of equal signs.
-// - We could/should maybe check if the name is pure whitespace
-//   since this is considered to be invalid.
-#[instrument]
-fn get_string_value(param: &str) -> Result<String> {
-    let fields: Vec<&str> = param.split('=').collect();
-    ensure!(fields.len() >= 2, ERR_INVALID_GET_VALUE_PARAM);
-
-    // We need name (but the value can be blank)
-    ensure!(!fields[0].is_empty(), ERR_INVALID_GET_VALUE_NO_NAME);
-
-    let value = fields[1..].join("=");
-    ensure!(!value.is_empty(), ERR_INVALID_GET_VALUE_NO_VALUE);
-
-    Ok(value)
-}
-
-#[instrument]
-fn get_container_pipe_size(param: &str) -> Result<i32> {
-    let fields: Vec<&str> = param.split('=').collect();
-    ensure!(fields.len() == 2, ERR_INVALID_CONTAINER_PIPE_SIZE);
-
-    let key = fields[0];
-    ensure!(
-        key == CONTAINER_PIPE_SIZE_OPTION,
-        ERR_INVALID_CONTAINER_PIPE_SIZE_KEY
-    );
-
-    let value = fields[1]
-        .parse::<i32>()
-        .with_context(|| ERR_INVALID_CONTAINER_PIPE_SIZE_PARAM)?;
-
-    ensure!(value >= 0, ERR_INVALID_CONTAINER_PIPE_NEGATIVE);
-
-    Ok(value)
-}
-
-#[instrument]
-fn get_url_value(param: &str) -> Result<String> {
-    let value = get_string_value(param)?;
-    Ok(Url::parse(&value)?.to_string())
-}
-
-#[instrument]
-fn get_guest_components_features_value(param: &str) -> Result<GuestComponentsFeatures> {
-    let fields: Vec<&str> = param.split('=').collect();
-    ensure!(fields.len() >= 2, ERR_INVALID_GET_VALUE_PARAM);
-    // We need name (but the value can be blank)
-    ensure!(!fields[0].is_empty(), ERR_INVALID_GET_VALUE_NO_NAME);
-    let value = fields[1..].join("=");
-    GuestComponentsFeatures::from_str(&value)
-        .map_err(|_| anyhow!(ERR_INVALID_GUEST_COMPONENTS_REST_API_VALUE))
-}
-
-#[instrument]
-fn get_guest_components_procs_value(param: &str) -> Result<GuestComponentsProcs> {
-    let fields: Vec<&str> = param.split('=').collect();
-    ensure!(fields.len() >= 2, ERR_INVALID_GET_VALUE_PARAM);
-
-    // We need name (but the value can be blank)
-    ensure!(!fields[0].is_empty(), ERR_INVALID_GET_VALUE_NO_NAME);
-
-    let value = fields[1..].join("=");
-    GuestComponentsProcs::from_str(&value)
-        .map_err(|_| anyhow!(ERR_INVALID_GUEST_COMPONENTS_PROCS_VALUE))
 }
 
 #[cfg(test)]
 mod tests {
-    use test_utils::assert_result;
-
     use super::*;
-    use anyhow::anyhow;
-    use rstest::*;
-    use serial_test::serial;
-    use std::fs::File;
-    use std::io::Write;
-    use std::time;
-    use tempfile::tempdir;
+
+    fn parse_kernel(contents: &str, args: Vec<String>) -> Result<AgentConfig> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(tmp.path(), contents).unwrap();
+        AgentConfig::from_cmdline(tmp.path().to_str().unwrap(), args)
+    }
 
     #[test]
-    fn minimal_removed_configuration_is_rejected() {
-        let dir = tempdir().unwrap();
-        let cmdline = dir.path().join("cmdline");
+    fn supported_boot_config() {
+        let config = parse_kernel("console=ttyS0 root=/dev/vda agent.log_vport=1025 systemd.unified_cgroup_hierarchy=1 cgroup_no_v1=all agent.log=debug agent.hotplug_timeout=9 agent.container_pipe_size=4096", vec![]).unwrap();
+        assert_eq!(config.log_vport, 1025);
+        assert_eq!(config.log_level, slog::Level::Debug);
+        assert_eq!(config.hotplug_timeout, Duration::from_secs(9));
+        assert_eq!(config.container_pipe_size, 4096);
+        assert!(config.unified_cgroup_hierarchy);
+        assert_eq!(config.cgroup_no_v1, "all");
+        assert_eq!(config.server_addr, "vsock://-1:1024");
+    }
+
+    #[test]
+    fn removed_options_fail_even_when_disabled_or_shadowed() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), "log_level = 'info'").unwrap();
         for key in [
+            "debug_console",
+            "devmode",
+            "trace",
+            "passfd_listener_port",
+            "cdh_api_timeout",
+            "image_pull_timeout",
+            "launch_process_timeout",
+            "guest_components_procs",
+            "guest_components_rest_api",
+            "secure_storage_integrity",
+            "https_proxy",
+            "no_proxy",
             "cdi_timeout",
             "visible_cdi_devices",
             "mem_agent_enable",
-            "mem_agent_compact_order",
-            "mem_agent_unknown",
+            "unknown",
         ] {
-            assert!(AgentConfig::from_str(&format!("{key} = 1")).is_err());
-            fs::write(&cmdline, format!("agent.{key}=1")).unwrap();
-            assert!(AgentConfig::from_cmdline(cmdline.to_str().unwrap(), vec![]).is_err());
-        }
-        let config_file = dir.path().join("agent.toml");
-        fs::write(&config_file, "log_level = 'info'").unwrap();
-        fs::write(
-            &cmdline,
-            format!(
-                "agent.config_file={} agent.mem_agent_enable=1",
-                config_file.display()
-            ),
-        )
-        .unwrap();
-        assert!(AgentConfig::from_cmdline(cmdline.to_str().unwrap(), vec![]).is_err());
-        assert!(AgentConfig::from_str("unknown_option = true").is_err());
-        AgentConfig::from_str("log_level = 'info'").unwrap();
-        fs::write(
-            &cmdline,
-            "console=ttyS0 agent.log_vport=1025 cgroup_no_v1=all",
-        )
-        .unwrap();
-        AgentConfig::from_cmdline(cmdline.to_str().unwrap(), vec![]).unwrap();
-    }
-
-    #[test]
-    fn test_new() {
-        let config: AgentConfig = Default::default();
-        assert!(!config.debug_console);
-        assert!(!config.dev_mode);
-        assert_eq!(config.log_level, DEFAULT_LOG_LEVEL);
-        assert_eq!(config.hotplug_timeout, DEFAULT_HOTPLUG_TIMEOUT);
-    }
-
-    #[test]
-    // Run in serial to stop the env set interfering with test_from_cmdline_with_args_overwrites
-    #[serial]
-    fn test_from_cmdline() {
-        const TEST_SERVER_ADDR: &str = "vsock://-1:1024";
-
-        #[derive(Debug)]
-        struct TestData<'a> {
-            contents: &'a str,
-            env_vars: Vec<&'a str>,
-            debug_console: bool,
-            dev_mode: bool,
-            log_level: slog::Level,
-            hotplug_timeout: time::Duration,
-            container_pipe_size: i32,
-            server_addr: &'a str,
-            cgroup_no_v1: &'a str,
-            unified_cgroup_hierarchy: bool,
-            tracing: bool,
-            https_proxy: &'a str,
-            no_proxy: &'a str,
-            guest_components_rest_api: GuestComponentsFeatures,
-            guest_components_procs: GuestComponentsProcs,
-            secure_storage_integrity: bool,
-            #[cfg(feature = "agent-policy")]
-            policy_file: &'a str,
-        }
-
-        impl Default for TestData<'_> {
-            fn default() -> Self {
-                TestData {
-                    contents: "",
-                    env_vars: Vec::new(),
-                    debug_console: false,
-                    dev_mode: false,
-                    log_level: DEFAULT_LOG_LEVEL,
-                    hotplug_timeout: DEFAULT_HOTPLUG_TIMEOUT,
-                    container_pipe_size: DEFAULT_CONTAINER_PIPE_SIZE,
-                    server_addr: TEST_SERVER_ADDR,
-                    cgroup_no_v1: "",
-                    unified_cgroup_hierarchy: false,
-                    tracing: false,
-                    https_proxy: "",
-                    no_proxy: "",
-                    guest_components_rest_api: GuestComponentsFeatures::default(),
-                    guest_components_procs: GuestComponentsProcs::default(),
-                    secure_storage_integrity: true,
-                    #[cfg(feature = "agent-policy")]
-                    policy_file: "",
+            for suffix in ["", "=0", "=false"] {
+                let option = format!("agent.{key}{suffix}");
+                for contents in [
+                    option.clone(),
+                    format!("agent.config_file={} {option}", file.path().display()),
+                    format!("{option} agent.config_file={}", file.path().display()),
+                ] {
+                    assert!(parse_kernel(&contents, vec![]).is_err(), "{contents}");
+                    assert!(parse_kernel(
+                        &contents,
+                        vec!["--config".into(), file.path().display().to_string()]
+                    )
+                    .is_err());
                 }
             }
+            assert!(format!("{key} = false").parse::<AgentConfig>().is_err());
         }
-
-        let tests = &[
-            TestData {
-                contents: "agent.debug_consolex agent.devmode",
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.debug_console agent.devmodex",
-                debug_console: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.logx=debug",
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.log=debug",
-                log_level: slog::Level::Debug,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.log=debug",
-                env_vars: vec!["KATA_AGENT_LOG_LEVEL=trace"],
-                log_level: slog::Level::Trace,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo",
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo bar",
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo bar",
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo agent bar",
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo debug_console agent bar devmode",
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.debug_console",
-                debug_console: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "   agent.debug_console ",
-                debug_console: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.debug_console foo",
-                debug_console: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: " agent.debug_console foo",
-                debug_console: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo agent.debug_console bar",
-                debug_console: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo agent.debug_console",
-                debug_console: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo agent.debug_console ",
-                debug_console: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.devmode",
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "   agent.devmode ",
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.devmode foo",
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: " agent.devmode foo",
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo agent.devmode bar",
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo agent.devmode",
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "foo agent.devmode ",
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.devmode agent.debug_console",
-                debug_console: true,
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "cgroup_no_v1=1",
-                cgroup_no_v1: "",
-                ..Default::default()
-            },
-            TestData {
-                contents: "cgroup_no_v1=all",
-                cgroup_no_v1: "all",
-                ..Default::default()
-            },
-            TestData {
-                contents: "cgroup_no_v1=0 systemd.unified_cgroup_hierarchy=1",
-                cgroup_no_v1: "",
-                unified_cgroup_hierarchy: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.devmode agent.debug_console agent.hotplug_timeout=100 systemd.unified_cgroup_hierarchy=a",
-                debug_console: true,
-                dev_mode: true,
-                hotplug_timeout: time::Duration::from_secs(100),
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.devmode agent.debug_console agent.hotplug_timeout=0 systemd.unified_cgroup_hierarchy=11",
-                debug_console: true,
-                dev_mode: true,
-                unified_cgroup_hierarchy: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.devmode agent.debug_console agent.container_pipe_size=2097152 systemd.unified_cgroup_hierarchy=false",
-                debug_console: true,
-                dev_mode: true,
-                container_pipe_size: 2097152,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.devmode agent.debug_console agent.container_pipe_size=100 systemd.unified_cgroup_hierarchy=true",
-                debug_console: true,
-                dev_mode: true,
-                container_pipe_size: 100,
-                unified_cgroup_hierarchy: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.devmode agent.debug_console agent.container_pipe_size=0 systemd.unified_cgroup_hierarchy=0",
-                debug_console: true,
-                dev_mode: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.devmode agent.debug_console agent.container_pip_siz=100 systemd.unified_cgroup_hierarchy=1",
-                debug_console: true,
-                dev_mode: true,
-                unified_cgroup_hierarchy: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_SERVER_ADDR=foo"],
-                server_addr: "foo",
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_SERVER_ADDR=="],
-                server_addr: "=",
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_SERVER_ADDR==foo"],
-                server_addr: "=foo",
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_SERVER_ADDR=foo=bar=baz="],
-                server_addr: "foo=bar=baz=",
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_SERVER_ADDR=unix:///tmp/foo.socket"],
-                server_addr: "unix:///tmp/foo.socket",
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_SERVER_ADDR=unix://@/tmp/foo.socket"],
-                server_addr: "unix://@/tmp/foo.socket",
-                ..Default::default()
-            },
-            // Test that env_var has precedence over the command line (which is the current behaviour)
-            TestData {
-                contents: "agent.server_addr=unix:///tmp/ignored.socket",
-                env_vars: vec!["KATA_AGENT_SERVER_ADDR=unix:///tmp/foo.socket"],
-                server_addr: "unix:///tmp/foo.socket",
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_LOG_LEVEL="],
-                log_level: DEFAULT_LOG_LEVEL,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_LOG_LEVEL=invalid"],
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_LOG_LEVEL=debug"],
-                log_level: slog::Level::Debug,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_LOG_LEVEL=debugger"],
-                log_level: DEFAULT_LOG_LEVEL,
-                ..Default::default()
-            },
-            TestData {
-                contents: "server_addr=unix:///tmp/foo.socket",
-                server_addr: TEST_SERVER_ADDR,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.server_address=unix:///tmp/foo.socket",
-                server_addr: TEST_SERVER_ADDR,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.server_addr=unix:///tmp/foo.socket",
-                server_addr: "unix:///tmp/foo.socket",
-                ..Default::default()
-            },
-            TestData {
-                contents: " agent.server_addr=unix:///tmp/foo.socket",
-                server_addr: "unix:///tmp/foo.socket",
-                ..Default::default()
-            },
-            TestData {
-                contents: " agent.server_addr=unix:///tmp/foo.socket a",
-                server_addr: "unix:///tmp/foo.socket",
-                ..Default::default()
-            },
-            TestData {
-                contents: "trace",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: ".trace",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.tracer",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trac",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trace",
-                tracing: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trace=true",
-                tracing: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trace=false",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trace=0",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trace=1",
-                tracing: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trace=a",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trace=foo",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trace=.",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.trace=,",
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_TRACING="],
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_TRACING=''"],
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_TRACING=0"],
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_TRACING=."],
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_TRACING=,"],
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_TRACING=foo"],
-                tracing: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_TRACING=1"],
-                tracing: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_TRACING=true"],
-                tracing: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.https_proxy=http://proxy.url.com:81/",
-                https_proxy: "http://proxy.url.com:81/",
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.https_proxy=http://192.168.1.100:81/",
-                https_proxy: "http://192.168.1.100:81/",
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.no_proxy=*.internal.url.com",
-                no_proxy: "*.internal.url.com",
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.no_proxy=192.168.1.0/24,172.16.0.0/12",
-                no_proxy: "192.168.1.0/24,172.16.0.0/12",
-                ..Default::default()
-            },
-            TestData {
-               contents: "agent.guest_components_rest_api=attestation",
-               guest_components_rest_api: GuestComponentsFeatures::Attestation,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.guest_components_rest_api=resource",
-                guest_components_rest_api: GuestComponentsFeatures::Resource,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.guest_components_rest_api=all",
-                guest_components_rest_api: GuestComponentsFeatures::All,
-                ..Default::default()
-            },
-            TestData {
-               contents: "agent.guest_components_procs=api-server-rest",
-               guest_components_procs: GuestComponentsProcs::ApiServerRest,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.guest_components_procs=confidential-data-hub",
-                guest_components_procs: GuestComponentsProcs::ConfidentialDataHub,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.guest_components_procs=attestation-agent",
-                guest_components_procs: GuestComponentsProcs::AttestationAgent,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.guest_components_procs=none",
-                guest_components_procs: GuestComponentsProcs::None,
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                secure_storage_integrity: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.secure_storage_integrity=true",
-                secure_storage_integrity: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.secure_storage_integrity=false",
-                secure_storage_integrity: false,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.secure_storage_integrity=1",
-                secure_storage_integrity: true,
-                ..Default::default()
-            },
-            TestData {
-                contents: "agent.secure_storage_integrity=0",
-                secure_storage_integrity: false,
-                ..Default::default()
-            },
-            #[cfg(feature = "agent-policy")]
-            // Test environment
-            TestData {
-                contents: "",
-                env_vars: vec!["KATA_AGENT_POLICY_FILE=/tmp/policy.rego"],
-                policy_file: "/tmp/policy.rego",
-                ..Default::default()
-            },
-            TestData {
-                contents: "",
-                ..Default::default()
-            },
-        ];
-
-        let dir = tempdir().expect("failed to create tmpdir");
-
-        // Now, test various combinations of file contents and environment
-        // variables.
-        for (i, d) in tests.iter().enumerate() {
-            let msg = format!("test[{i}]: {d:?}");
-
-            let file_path = dir.path().join("cmdline");
-
-            let filename = file_path.to_str().expect("failed to create filename");
-
-            let mut file =
-                File::create(filename).unwrap_or_else(|_| panic!("{}: failed to create file", msg));
-
-            file.write_all(d.contents.as_bytes())
-                .unwrap_or_else(|_| panic!("{}: failed to write file contents", msg));
-
-            let mut vars_to_unset = Vec::new();
-
-            for v in &d.env_vars {
-                let fields: Vec<&str> = v.split('=').collect();
-
-                let name = fields[0];
-                let value = fields[1..].join("=");
-
-                env::set_var(name, value);
-
-                vars_to_unset.push(name);
-            }
-
-            let config =
-                AgentConfig::from_cmdline(filename, vec![]).expect("Failed to parse command line");
-
-            assert_eq!(d.debug_console, config.debug_console, "{msg}");
-            assert_eq!(d.dev_mode, config.dev_mode, "{msg}");
-            assert_eq!(d.cgroup_no_v1, config.cgroup_no_v1, "{msg}");
-            assert_eq!(
-                d.unified_cgroup_hierarchy, config.unified_cgroup_hierarchy,
-                "{msg}"
-            );
-            assert_eq!(d.log_level, config.log_level, "{msg}");
-            assert_eq!(d.hotplug_timeout, config.hotplug_timeout, "{msg}");
-            assert_eq!(d.container_pipe_size, config.container_pipe_size, "{msg}");
-            assert_eq!(d.server_addr, config.server_addr, "{msg}");
-            assert_eq!(d.tracing, config.tracing, "{msg}");
-            assert_eq!(d.https_proxy, config.https_proxy, "{msg}");
-            assert_eq!(d.no_proxy, config.no_proxy, "{msg}");
-            assert_eq!(
-                d.guest_components_rest_api, config.guest_components_rest_api,
-                "{msg}"
-            );
-            assert_eq!(
-                d.guest_components_procs, config.guest_components_procs,
-                "{msg}"
-            );
-            assert_eq!(
-                d.secure_storage_integrity, config.secure_storage_integrity,
-                "{msg}"
-            );
-            #[cfg(feature = "agent-policy")]
-            assert_eq!(d.policy_file, config.policy_file, "{msg}");
-
-            for v in vars_to_unset {
-                env::remove_var(v);
-            }
+        for key in ["tracing", "dev_mode", "policy_file", "debug_console_vport"] {
+            assert!(format!("{key} = false").parse::<AgentConfig>().is_err());
         }
     }
 
     #[test]
-    // Run in serial to stop the env set interfering with test_from_cmdline
-    #[serial]
-    fn test_from_cmdline_with_args_overwrites() {
-        let expected = AgentConfig {
-            dev_mode: true,
-            server_addr: "unix:///tmp/overwrite.socket".to_string(),
-            ..Default::default()
-        };
-
-        let example_config_file_contents =
-            "dev_mode = true\nserver_addr = 'unix:///tmp/ignored.socket'";
-        let dir = tempdir().expect("failed to create tmpdir");
-        let file_path = dir.path().join("config.toml");
-        let filename = file_path.to_str().expect("failed to create filename");
-        let mut file = File::create(filename).unwrap_or_else(|_| panic!("failed to create file"));
-        file.write_all(example_config_file_contents.as_bytes())
-            .unwrap_or_else(|_| panic!("failed to write file contents"));
-
-        // Ensure that the env has precedence over agent config file
-        env::set_var("KATA_AGENT_SERVER_ADDR", "unix:///tmp/overwrite.socket");
-
-        let config =
-            AgentConfig::from_cmdline("", vec!["--config".to_string(), filename.to_string()])
-                .expect("Failed to parse command line");
-
-        env::remove_var("KATA_AGENT_SERVER_ADDR");
-
-        assert_eq!(expected.debug_console, config.debug_console);
-        assert_eq!(expected.dev_mode, config.dev_mode);
-        assert_eq!(
-            expected.unified_cgroup_hierarchy,
-            config.unified_cgroup_hierarchy,
-        );
-        assert_eq!(expected.log_level, config.log_level);
-        assert_eq!(expected.hotplug_timeout, config.hotplug_timeout);
-        assert_eq!(expected.container_pipe_size, config.container_pipe_size);
-        assert_eq!(expected.server_addr, config.server_addr);
-        assert_eq!(expected.tracing, config.tracing);
-    }
-
-    #[rstest]
-    #[case("", Err(anyhow!(ERR_INVALID_LOG_LEVEL)))]
-    #[case("foo", Err(anyhow!(ERR_INVALID_LOG_LEVEL)))]
-    #[case("debugging", Err(anyhow!(ERR_INVALID_LOG_LEVEL)))]
-    #[case("xdebug", Err(anyhow!(ERR_INVALID_LOG_LEVEL)))]
-    #[case("trace", Ok(slog::Level::Trace))]
-    #[case("debug", Ok(slog::Level::Debug))]
-    #[case("info", Ok(slog::Level::Info))]
-    #[case("warn", Ok(slog::Level::Warning))]
-    #[case("warning", Ok(slog::Level::Warning))]
-    #[case("error", Ok(slog::Level::Error))]
-    #[case("critical", Ok(slog::Level::Critical))]
-    #[case("fatal", Ok(slog::Level::Critical))]
-    #[case("panic", Ok(slog::Level::Critical))]
-    fn test_logrus_to_slog_level(#[case] input: &str, #[case] expected: Result<slog::Level>) {
-        let result = logrus_to_slog_level(input);
-        let msg = format!("expected: {expected:?}, result: {result:?}");
-        assert_result!(expected, result, msg);
-    }
-
-    #[rstest]
-    #[case("",Err(anyhow!(ERR_INVALID_LOG_LEVEL_PARAM)))]
-    #[case("=",Err(anyhow!(ERR_INVALID_LOG_LEVEL_KEY)))]
-    #[case("x=",Err(anyhow!(ERR_INVALID_LOG_LEVEL_KEY)))]
-    #[case("=y",Err(anyhow!(ERR_INVALID_LOG_LEVEL_KEY)))]
-    #[case("==",Err(anyhow!(ERR_INVALID_LOG_LEVEL_PARAM)))]
-    #[case("= =",Err(anyhow!(ERR_INVALID_LOG_LEVEL_PARAM)))]
-    #[case("x=y",Err(anyhow!(ERR_INVALID_LOG_LEVEL_KEY)))]
-    #[case("agent=debug",Err(anyhow!(ERR_INVALID_LOG_LEVEL_KEY)))]
-    #[case("agent.logg=debug",Err(anyhow!(ERR_INVALID_LOG_LEVEL_KEY)))]
-    #[case("agent.log=trace", Ok(slog::Level::Trace))]
-    #[case("agent.log=debug", Ok(slog::Level::Debug))]
-    #[case("agent.log=info", Ok(slog::Level::Info))]
-    #[case("agent.log=warn", Ok(slog::Level::Warning))]
-    #[case("agent.log=warning", Ok(slog::Level::Warning))]
-    #[case("agent.log=error", Ok(slog::Level::Error))]
-    #[case("agent.log=critical", Ok(slog::Level::Critical))]
-    #[case("agent.log=fatal", Ok(slog::Level::Critical))]
-    #[case("agent.log=panic", Ok(slog::Level::Critical))]
-    fn test_get_log_level(#[case] input: &str, #[case] expected: Result<slog::Level>) {
-        let result = get_log_level(input);
-        let msg = format!("expected: {expected:?}, result: {result:?}");
-        assert_result!(expected, result, msg);
-    }
-
-    #[rstest]
-    #[case("", Err(anyhow!(ERR_INVALID_TIMEOUT)))]
-    #[case("agent.hotplug_timeout", Err(anyhow!(ERR_INVALID_TIMEOUT)))]
-    #[case("foo=bar", Err(anyhow!(ERR_INVALID_TIMEOUT_KEY)))]
-    #[case("agent.hotplug_timeot=1", Err(anyhow!(ERR_INVALID_TIMEOUT_KEY)))]
-    #[case("agent.hotplug_timeout=1", Ok(time::Duration::from_secs(1)))]
-    #[case("agent.hotplug_timeout=3", Ok(time::Duration::from_secs(3)))]
-    #[case("agent.hotplug_timeout=3600", Ok(time::Duration::from_secs(3600)))]
-    #[case("agent.hotplug_timeout=0", Ok(time::Duration::from_secs(0)))]
-    #[case("agent.hotplug_timeout=-1", Err(anyhow!(
-        "unable to parse timeout
-
-Caused by:
-    invalid digit found in string"
-    )))]
-    #[case("agent.hotplug_timeout=4jbsdja", Err(anyhow!(
-        "unable to parse timeout
-
-Caused by:
-    invalid digit found in string"
-    )))]
-    #[case("agent.hotplug_timeout=foo", Err(anyhow!(
-        "unable to parse timeout
-
-Caused by:
-    invalid digit found in string"
-    )))]
-    #[case("agent.hotplug_timeout=j", Err(anyhow!(
-        "unable to parse timeout
-
-Caused by:
-    invalid digit found in string"
-    )))]
-    #[case("agent.chd_api_timeout=1", Err(anyhow!(ERR_INVALID_TIMEOUT_KEY)))]
-    #[case("agent.cdh_api_timeout=600", Ok(time::Duration::from_secs(600)))]
-    #[case("agent.image_pull_timeout=1200", Ok(time::Duration::from_secs(1200)))]
-    #[case("agent.launch_process_timeout=60", Ok(time::Duration::from_secs(60)))]
-    fn test_timeout(#[case] param: &str, #[case] expected: Result<time::Duration>) {
-        let result = get_timeout(param);
-        let msg = format!("expected: {expected:?}, result: {result:?}");
-        assert_result!(expected, result, msg);
-    }
-
-    #[rstest]
-    #[case("", Err(anyhow!(ERR_INVALID_CONTAINER_PIPE_SIZE)))]
-    #[case("agent.container_pipe_size", Err(anyhow!(ERR_INVALID_CONTAINER_PIPE_SIZE)))]
-    #[case("foo=bar", Err(anyhow!(ERR_INVALID_CONTAINER_PIPE_SIZE_KEY)))]
-    #[case("agent.container_pip_siz=1", Err(anyhow!(ERR_INVALID_CONTAINER_PIPE_SIZE_KEY)))]
-    #[case("agent.container_pipe_size=1", Ok(1))]
-    #[case("agent.container_pipe_size=3", Ok(3))]
-    #[case("agent.container_pipe_size=2097152", Ok(2097152))]
-    #[case("agent.container_pipe_size=0", Ok(0))]
-    #[case("agent.container_pipe_size=-1", Err(anyhow!(ERR_INVALID_CONTAINER_PIPE_NEGATIVE)))]
-    #[case("agent.container_pipe_size=foobar", Err(anyhow!(
-        "unable to parse container pipe size
-
-Caused by:
-    invalid digit found in string"
-    )))]
-    #[case("agent.container_pipe_size=j", Err(anyhow!(
-        "unable to parse container pipe size
-
-Caused by:
-    invalid digit found in string",
-    )))]
-    #[case("agent.container_pipe_size=4jbsdja", Err(anyhow!(
-        "unable to parse container pipe size
-
-Caused by:
-    invalid digit found in string"
-    )))]
-    #[case("agent.container_pipe_size=4294967296", Err(anyhow!(
-        "unable to parse container pipe size
-
-Caused by:
-    number too large to fit in target type"
-    )))]
-    fn test_get_container_pipe_size(#[case] param: &str, #[case] expected: Result<i32>) {
-        let result = get_container_pipe_size(param);
-        let msg = format!("expected: {expected:?}, result: {result:?}");
-        assert_result!(expected, result, msg);
-    }
-
-    #[rstest]
-    #[case("", Err(anyhow!(ERR_INVALID_GET_VALUE_PARAM)))]
-    #[case("=", Err(anyhow!(ERR_INVALID_GET_VALUE_NO_NAME)))]
-    #[case("==", Err(anyhow!(ERR_INVALID_GET_VALUE_NO_NAME)))]
-    #[case("x=", Err(anyhow!(ERR_INVALID_GET_VALUE_NO_VALUE)))]
-    #[case("x==", Ok("=".into()))]
-    #[case("x===", Ok("==".into()))]
-    #[case("x==x", Ok("=x".into()))]
-    #[case("x=x", Ok("x".into()))]
-    #[case("x=x=", Ok("x=".into()))]
-    #[case("x=x=x", Ok("x=x".into()))]
-    #[case("foo=bar", Ok("bar".into()))]
-    #[case("x= =", Ok(" =".into()))]
-    #[case("x= =", Ok(" =".into()))]
-    #[case("x= = ", Ok(" = ".into()))]
-    fn test_get_string_value(#[case] param: &str, #[case] expected: Result<String>) {
-        let result = get_string_value(param);
-        let msg = format!("expected: {expected:?}, result: {result:?}");
-        assert_result!(expected, result, msg);
-    }
-
-    #[rstest]
-    #[case("", Err(anyhow!(ERR_INVALID_GET_VALUE_PARAM)))]
-    #[case("=", Err(anyhow!(ERR_INVALID_GET_VALUE_NO_NAME)))]
-    #[case("==", Err(anyhow!(ERR_INVALID_GET_VALUE_NO_NAME)))]
-    #[case("x=all", Ok(GuestComponentsFeatures::All))]
-    #[case("x=attestation", Ok(GuestComponentsFeatures::Attestation))]
-    #[case("x=resource", Ok(GuestComponentsFeatures::Resource))]
-    #[case("x===", Err(anyhow!(ERR_INVALID_GUEST_COMPONENTS_REST_API_VALUE)))]
-    #[case("x==x", Err(anyhow!(ERR_INVALID_GUEST_COMPONENTS_REST_API_VALUE)))]
-    #[case("x=x", Err(anyhow!(ERR_INVALID_GUEST_COMPONENTS_REST_API_VALUE)))]
-    fn test_get_guest_components_features_value(
-        #[case] input: &str,
-        #[case] expected: Result<GuestComponentsFeatures>,
-    ) {
-        let result = get_guest_components_features_value(input);
-        let msg = format!("expected: {expected:?}, result: {result:?}");
-        assert_result!(expected, result, msg);
-    }
-
-    #[rstest]
-    #[case("", Err(anyhow!(ERR_INVALID_GET_VALUE_PARAM)))]
-    #[case("=", Err(anyhow!(ERR_INVALID_GET_VALUE_NO_NAME)))]
-    #[case("==", Err(anyhow!(ERR_INVALID_GET_VALUE_NO_NAME)))]
-    #[case("x=attestation-agent", Ok(GuestComponentsProcs::AttestationAgent))]
-    #[case(
-        "x=confidential-data-hub",
-        Ok(GuestComponentsProcs::ConfidentialDataHub)
-    )]
-    #[case("x=none", Ok(GuestComponentsProcs::None))]
-    #[case("x=api-server-rest", Ok(GuestComponentsProcs::ApiServerRest))]
-    #[case("x===", Err(anyhow!(ERR_INVALID_GUEST_COMPONENTS_PROCS_VALUE)))]
-    #[case("x==x", Err(anyhow!(ERR_INVALID_GUEST_COMPONENTS_PROCS_VALUE)))]
-    #[case("x=x", Err(anyhow!(ERR_INVALID_GUEST_COMPONENTS_PROCS_VALUE)))]
-    fn test_get_guest_components_procs_value(
-        #[case] param: &str,
-        #[case] expected: Result<GuestComponentsProcs>,
-    ) {
-        let result = get_guest_components_procs_value(param);
-        let msg = format!("expected: {expected:?}, result: {result:?}");
-        assert_result!(expected, result, msg);
-    }
-
-    #[test]
-    fn test_config_builder_from_string() {
-        let config = AgentConfig::from_str(
-            r#"
-               dev_mode = true
-               server_addr = 'vsock://8:2048'
-               guest_components_procs = "api-server-rest"
-               guest_components_rest_api = "all"
-              "#,
+    fn file_and_environment_precedence() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "log_level = 'error'\ncontainer_pipe_size = 8192",
         )
         .unwrap();
+        let mut config = parse_kernel(
+            "agent.log=debug",
+            vec!["-c".into(), file.path().display().to_string()],
+        )
+        .unwrap();
+        assert_eq!(config.log_level, slog::Level::Error);
+        assert_eq!(config.container_pipe_size, 8192);
+        config
+            .apply_env(
+                vec![
+                    ("KATA_AGENT_LOG_LEVEL".into(), "trace".into()),
+                    (
+                        "KATA_AGENT_SERVER_ADDR".into(),
+                        "unix:///tmp/agent.sock".into(),
+                    ),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+        assert_eq!(config.log_level, slog::Level::Trace);
+        assert_eq!(config.server_addr, "unix:///tmp/agent.sock");
+        for key in [
+            "KATA_AGENT_TRACING",
+            "KATA_AGENT_POLICY_FILE",
+            "KATA_AGENT_UNKNOWN",
+        ] {
+            assert!(config
+                .apply_env(vec![(key.into(), "0".into())].into_iter())
+                .is_err());
+        }
+    }
 
-        // Verify that the override worked
-        assert!(config.dev_mode);
-        assert_eq!(config.server_addr, "vsock://8:2048");
-        assert_eq!(
-            config.guest_components_procs,
-            GuestComponentsProcs::ApiServerRest
-        );
-        assert_eq!(
-            config.guest_components_rest_api,
-            GuestComponentsFeatures::All
-        );
-
-        // Verify that the default values are valid
-        assert_eq!(config.hotplug_timeout, DEFAULT_HOTPLUG_TIMEOUT);
+    #[test]
+    fn malformed_configuration_fails() {
+        for option in [
+            "agent.log=bad",
+            "agent.log_vport=-1",
+            "agent.hotplug_timeout=0",
+            "agent.hotplug_timeout=-1",
+            "agent.container_pipe_size=-1",
+            "agent.server_addr=",
+            "agent.config_file=",
+        ] {
+            assert!(parse_kernel(option, vec![]).is_err(), "{option}");
+        }
+        assert!(parse_kernel("", vec!["--config".into()]).is_err());
+        for contents in [
+            "log_level='bad'",
+            "log_vport=-1",
+            "container_pipe_size=-1",
+            "hotplug_timeout={secs=0,nanos=0}",
+            "server_addr=''",
+        ] {
+            assert!(contents.parse::<AgentConfig>().is_err(), "{contents}");
+        }
     }
 }

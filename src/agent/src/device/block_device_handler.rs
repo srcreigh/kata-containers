@@ -13,19 +13,16 @@ use protocols::agent::Device;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::instrument;
 
 #[derive(Debug)]
 pub struct VirtioBlkMmioDeviceHandler {}
 
 #[async_trait::async_trait]
 impl DeviceHandler for VirtioBlkMmioDeviceHandler {
-    #[instrument]
     fn driver_types(&self) -> &[&str] {
         &[DRIVER_BLK_MMIO_TYPE]
     }
 
-    #[instrument]
     async fn device_handler(&self, device: &Device, ctx: &mut DeviceContext) -> Result<SpecUpdate> {
         if device.vm_path.is_empty() {
             return Err(anyhow!("Invalid path for virtio mmio blk device"));
@@ -42,7 +39,6 @@ impl DeviceHandler for VirtioBlkMmioDeviceHandler {
     }
 }
 
-#[instrument]
 pub async fn get_virtio_blk_mmio_device_name(
     sandbox: &Arc<Mutex<Sandbox>>,
     devpath: &str,

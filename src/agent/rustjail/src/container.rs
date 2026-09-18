@@ -17,7 +17,6 @@ use std::fs;
 use std::os::unix::io::{AsFd, BorrowedFd, IntoRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use tokio::fs::File;
 
 use crate::cgroups_rs as cgroups;
 use cgroups::freezer::FreezerState;
@@ -1066,40 +1065,6 @@ impl BaseContainer for LinuxContainer {
             child_stderr =
                 unsafe { std::process::Stdio::from_raw_fd(unistd::dup(&slave_fd)?.into_raw_fd()) };
             std::mem::forget(slave_fd); // Don't close - stdin owns it
-
-            if let Some(proc_io) = &mut p.proc_io {
-                // A reference count used to clean up the term master fd.
-                let term_closer = Arc::from(unsafe { File::from_raw_fd(master_raw) });
-
-                // Copy from stdin to term_master
-                if let Some(mut stdin_stream) = proc_io.stdin.take() {
-                    let mut term_master = unsafe { File::from_raw_fd(master_raw) };
-                    let logger = logger.clone();
-                    let term_closer = term_closer.clone();
-                    tokio::spawn(async move {
-                        let res = tokio::io::copy(&mut stdin_stream, &mut term_master).await;
-                        debug!(logger, "copy from stdin to term_master end: {:?}", res);
-
-                        std::mem::forget(term_master); // Avoid auto closing of term_master
-                        drop(term_closer);
-                    });
-                }
-
-                // Copy from term_master to stdout
-                if let Some(mut stdout_stream) = proc_io.stdout.take() {
-                    let wgw_output = proc_io.wg_output.worker();
-                    let mut term_master = unsafe { File::from_raw_fd(master_raw) };
-                    let logger = logger.clone();
-                    let term_closer = term_closer;
-                    tokio::spawn(async move {
-                        let res = tokio::io::copy(&mut term_master, &mut stdout_stream).await;
-                        debug!(logger, "copy from term_master to stdout end: {:?}", res);
-                        wgw_output.done();
-                        std::mem::forget(term_master); // Avoid auto closing of term_master
-                        drop(term_closer);
-                    });
-                }
-            }
         } else {
             // not using a terminal
             let stdin = p.stdin.unwrap();
@@ -1108,53 +1073,6 @@ impl BaseContainer for LinuxContainer {
             child_stdin = unsafe { std::process::Stdio::from_raw_fd(stdin) };
             child_stdout = unsafe { std::process::Stdio::from_raw_fd(stdout) };
             child_stderr = unsafe { std::process::Stdio::from_raw_fd(stderr) };
-
-            if let Some(proc_io) = &mut p.proc_io {
-                // Here we copy from vsock stdin stream to parent_stdin manually.
-                // This is because we need to close the stdin fifo when the stdin stream
-                // is drained.
-                if let Some(mut stdin_stream) = proc_io.stdin.take() {
-                    debug!(logger, "copy from stdin to parent_stdin");
-                    let mut parent_stdin = unsafe { File::from_raw_fd(p.parent_stdin.unwrap()) };
-                    let logger = logger.clone();
-                    tokio::spawn(async move {
-                        let res = tokio::io::copy(&mut stdin_stream, &mut parent_stdin).await;
-                        debug!(logger, "copy from stdin to term_master end: {:?}", res);
-                    });
-                }
-
-                // copy from parent_stdout to stdout stream
-                if let Some(mut stdout_stream) = proc_io.stdout.take() {
-                    debug!(logger, "copy from parent_stdout to stdout stream");
-                    let wgw_output = proc_io.wg_output.worker();
-                    let mut parent_stdout = unsafe { File::from_raw_fd(p.parent_stdout.unwrap()) };
-                    let logger = logger.clone();
-                    tokio::spawn(async move {
-                        let res = tokio::io::copy(&mut parent_stdout, &mut stdout_stream).await;
-                        debug!(
-                            logger,
-                            "copy from parent_stdout to stdout stream end: {:?}", res
-                        );
-                        wgw_output.done();
-                    });
-                }
-
-                // copy from parent_stderr to stderr stream
-                if let Some(mut stderr_stream) = proc_io.stderr.take() {
-                    debug!(logger, "copy from parent_stderr to stderr stream");
-                    let wgw_output = proc_io.wg_output.worker();
-                    let mut parent_stderr = unsafe { File::from_raw_fd(p.parent_stderr.unwrap()) };
-                    let logger = logger.clone();
-                    tokio::spawn(async move {
-                        let res = tokio::io::copy(&mut parent_stderr, &mut stderr_stream).await;
-                        debug!(
-                            logger,
-                            "copy from parent_stderr to stderr stream end: {:?}", res
-                        );
-                        wgw_output.done();
-                    });
-                }
-            }
         }
 
         let pidns = get_pid_namespace(&self.logger, linux)?;
@@ -2205,8 +2123,7 @@ mod tests {
     #[tokio::test]
     async fn test_linuxcontainer_get_process() {
         let _ = new_linux_container_and_then(|mut c: LinuxContainer| {
-            let process =
-                Process::new(&sl(), &oci::Process::default(), "123", true, 1, None).unwrap();
+            let process = Process::new(&sl(), &oci::Process::default(), "123", true, 1).unwrap();
             let exec_id = process.exec_id.clone();
             c.processes.insert(exec_id, process);
 
@@ -2237,7 +2154,7 @@ mod tests {
         oci_process.set_capabilities(None);
         let ret = c
             .unwrap()
-            .start(Process::new(&sl(), &oci_process, "123", true, 1, None).unwrap())
+            .start(Process::new(&sl(), &oci_process, "123", true, 1).unwrap())
             .await;
         assert!(format!("{:?}", ret).contains("no process config"));
     }
@@ -2249,7 +2166,7 @@ mod tests {
         oci_process.set_capabilities(None);
         let ret = c
             .unwrap()
-            .run(Process::new(&sl(), &oci_process, "123", true, 1, None).unwrap())
+            .run(Process::new(&sl(), &oci_process, "123", true, 1).unwrap())
             .await;
         assert!(format!("{:?}", ret).contains("no process config"));
     }

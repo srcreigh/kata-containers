@@ -11,7 +11,6 @@ use anyhow::{anyhow, Result};
 use nix::sys::statfs;
 use slog::warn;
 use std::sync::Mutex;
-use tracing::instrument;
 
 const NAMESPACE_KATA_AGENT: &str = "kata_agent";
 const NAMESPACE_KATA_GUEST: &str = "kata_guest";
@@ -82,7 +81,6 @@ lazy_static! {
     GaugeVec::new(Opts::new(format!("{}_{}",NAMESPACE_KATA_GUEST,"filesystem_inodes"), "Guest filesystem inode usage."), &["mount","device","item"]).unwrap();
 }
 
-#[instrument]
 pub fn get_metrics(_: &protocols::agent::GetMetricsRequest) -> Result<String> {
     let mut registered = REGISTERED
         .lock()
@@ -111,7 +109,6 @@ pub fn get_metrics(_: &protocols::agent::GetMetricsRequest) -> Result<String> {
     Ok(String::from_utf8(buffer)?)
 }
 
-#[instrument]
 fn register_metrics() -> Result<()> {
     REGISTRY.register(Box::new(AGENT_SCRAPE_COUNT.clone()))?;
 
@@ -138,7 +135,6 @@ fn register_metrics() -> Result<()> {
     Ok(())
 }
 
-#[instrument]
 fn update_agent_metrics() -> Result<()> {
     let me = procfs::process::Process::myself();
 
@@ -194,7 +190,6 @@ fn update_agent_metrics() -> Result<()> {
     Ok(())
 }
 
-#[instrument]
 fn update_guest_metrics() {
     // try get load and task info
     match procfs::LoadAverage::new() {
@@ -280,7 +275,6 @@ fn update_guest_metrics() {
     update_guest_filesystem_metrics();
 }
 
-#[instrument]
 fn update_guest_filesystem_metrics() {
     const REAL_FS_TYPES: &[&str] = &["ext4", "xfs", "btrfs", "vfat", "overlay"];
 
@@ -370,7 +364,6 @@ fn update_guest_filesystem_metrics() {
     }
 }
 
-#[instrument]
 fn set_gauge_vec_meminfo(gv: &prometheus::GaugeVec, meminfo: &procfs::Meminfo) {
     gv.with_label_values(&["mem_total"])
         .set(meminfo.mem_total as f64);
@@ -485,7 +478,6 @@ fn set_gauge_vec_meminfo(gv: &prometheus::GaugeVec, meminfo: &procfs::Meminfo) {
         .set(meminfo.k_reclaimable.unwrap_or(0) as f64);
 }
 
-#[instrument]
 fn set_gauge_vec_cpu_time(gv: &prometheus::GaugeVec, cpu: &str, cpu_time: &procfs::CpuTime) {
     gv.with_label_values(&[cpu, "user"])
         .set(cpu_time.user_ms() as f64);
@@ -509,7 +501,6 @@ fn set_gauge_vec_cpu_time(gv: &prometheus::GaugeVec, cpu: &str, cpu_time: &procf
         .set(cpu_time.guest_nice_ms().unwrap_or(0) as f64);
 }
 
-#[instrument]
 fn set_gauge_vec_diskstat(gv: &prometheus::GaugeVec, diskstat: &procfs::DiskStat) {
     gv.with_label_values(&[diskstat.name.as_str(), "reads"])
         .set(diskstat.reads as f64);
@@ -548,7 +539,7 @@ fn set_gauge_vec_diskstat(gv: &prometheus::GaugeVec, diskstat: &procfs::DiskStat
 }
 
 // set_gauge_vec_netdev set gauge for NetDevLine
-#[instrument]
+
 fn set_gauge_vec_netdev(gv: &prometheus::GaugeVec, status: &procfs::net::DeviceStatus) {
     gv.with_label_values(&[status.name.as_str(), "recv_bytes"])
         .set(status.recv_bytes as f64);
@@ -585,7 +576,7 @@ fn set_gauge_vec_netdev(gv: &prometheus::GaugeVec, status: &procfs::net::DeviceS
 }
 
 // set_gauge_vec_proc_status set gauge for ProcStatus
-#[instrument]
+
 fn set_gauge_vec_proc_status(gv: &prometheus::GaugeVec, status: &procfs::process::Status) {
     gv.with_label_values(&["vmpeak"])
         .set(status.vmpeak.unwrap_or(0) as f64);
@@ -626,7 +617,7 @@ fn set_gauge_vec_proc_status(gv: &prometheus::GaugeVec, status: &procfs::process
 }
 
 // set_gauge_vec_proc_io set gauge for ProcIO
-#[instrument]
+
 fn set_gauge_vec_proc_io(gv: &prometheus::GaugeVec, io_stat: &procfs::process::Io) {
     gv.with_label_values(&["rchar"]).set(io_stat.rchar as f64);
     gv.with_label_values(&["wchar"]).set(io_stat.wchar as f64);
@@ -641,7 +632,7 @@ fn set_gauge_vec_proc_io(gv: &prometheus::GaugeVec, io_stat: &procfs::process::I
 }
 
 // set_gauge_vec_proc_stat set gauge for ProcStat
-#[instrument]
+
 fn set_gauge_vec_proc_stat(gv: &prometheus::GaugeVec, stat: &procfs::process::Stat) {
     gv.with_label_values(&["utime"]).set(stat.utime as f64);
     gv.with_label_values(&["stime"]).set(stat.stime as f64);

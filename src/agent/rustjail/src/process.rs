@@ -7,7 +7,6 @@ use libc::pid_t;
 use std::fs::File;
 use std::os::unix::io::{IntoRawFd, RawFd};
 use tokio::sync::mpsc::Sender;
-use tokio_vsock::VsockStream;
 
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
@@ -20,7 +19,6 @@ use oci_spec::runtime as oci;
 use slog::Logger;
 
 use crate::pipestream::PipeStream;
-use awaitgroup::WaitGroup;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{split, ReadHalf, WriteHalf};
@@ -51,31 +49,6 @@ type Reader = Arc<Mutex<ReadHalf<PipeStream>>>;
 type Writer = Arc<Mutex<WriteHalf<PipeStream>>>;
 
 #[derive(Debug)]
-pub struct ProcessIo {
-    pub stdin: Option<VsockStream>,
-    pub stdout: Option<VsockStream>,
-    pub stderr: Option<VsockStream>,
-    // used to wait for all process outputs to be copied to the vsock streams
-    // only used when tty is used.
-    pub wg_output: WaitGroup,
-}
-
-impl ProcessIo {
-    pub fn new(
-        stdin: Option<VsockStream>,
-        stdout: Option<VsockStream>,
-        stderr: Option<VsockStream>,
-    ) -> Self {
-        ProcessIo {
-            stdin,
-            stdout,
-            stderr,
-            wg_output: WaitGroup::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct Process {
     pub exec_id: String,
     pub stdin: Option<RawFd>,
@@ -102,8 +75,6 @@ pub struct Process {
 
     readers: HashMap<StreamType, Reader>,
     writers: HashMap<StreamType, Writer>,
-
-    pub proc_io: Option<ProcessIo>,
 }
 
 pub trait ProcessOperations {
@@ -135,7 +106,6 @@ impl Process {
         id: &str,
         init: bool,
         pipe_size: i32,
-        proc_io: Option<ProcessIo>,
     ) -> Result<Self> {
         let logger = logger.new(o!("subsystem" => "process"));
         let (exit_tx, exit_rx) = tokio::sync::watch::channel(false);
@@ -162,7 +132,6 @@ impl Process {
             term_exit_notifier: Arc::new(Notify::new()),
             readers: HashMap::new(),
             writers: HashMap::new(),
-            proc_io,
         };
 
         info!(logger, "before create console socket!");
@@ -205,12 +174,6 @@ impl Process {
     }
 
     pub fn cleanup_process_stream(&mut self) {
-        if let Some(proc_io) = self.proc_io.take() {
-            drop(proc_io);
-
-            return;
-        }
-
         // legacy io mode
         close_process_stream!(self, parent_stdin, ParentStdin);
         close_process_stream!(self, parent_stdout, ParentStdout);
@@ -319,7 +282,6 @@ mod tests {
             id,
             init,
             32,
-            None,
         );
 
         let mut process = process.unwrap();

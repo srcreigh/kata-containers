@@ -20,7 +20,6 @@ use std::os::unix::prelude::FileTypeExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::instrument;
 
 pub mod block_device_handler;
 
@@ -154,7 +153,6 @@ lazy_static! {
     };
 }
 
-#[instrument]
 pub async fn add_devices(
     logger: &Logger,
     devices: &[Device],
@@ -202,7 +200,6 @@ pub async fn add_devices(
     update_spec_devices(logger, spec, dev_updates)
 }
 
-#[instrument]
 fn validate_device(logger: &Logger, device: &Device) -> Result<()> {
     // log before validation to help with debugging gRPC protocol version differences.
     info!(
@@ -226,7 +223,7 @@ fn validate_device(logger: &Logger, device: &Device) -> Result<()> {
 }
 
 // Insert a devices cgroup rule to control access to device.
-#[instrument]
+
 pub fn insert_devices_cgroup_rule(
     logger: &Logger,
     spec: &mut Spec,
@@ -278,7 +275,7 @@ pub fn insert_devices_cgroup_rule(
 // is given a map of (container_path => update) where:
 //     container_path: the path to the device in the original OCI spec
 //     update: information on changes to make to the device
-#[instrument]
+
 fn update_spec_devices(
     logger: &Logger,
     spec: &mut Spec,
@@ -371,7 +368,6 @@ fn update_spec_devices(
     Ok(())
 }
 
-#[instrument]
 pub fn online_device(path: &str) -> Result<()> {
     fs::write(path, "1")?;
     Ok(())

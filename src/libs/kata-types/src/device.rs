@@ -52,6 +52,12 @@ pub fn validate_spec_device_features(spec: &oci_spec::runtime::Spec) -> anyhow::
     }
     if let Some(process) = spec.process() {
         for entry in process.env().iter().flatten() {
+            anyhow::ensure!(
+                !entry
+                    .split_once('=')
+                    .is_some_and(|(_, value)| value.starts_with("sealed.")),
+                "kata-fc: sealed-secret environment values are unsupported"
+            );
             if let Some(value) = entry.strip_prefix("VISIBLE_CDI_DEVICES=") {
                 anyhow::ensure!(
                     matches!(value.trim(), "" | "none" | "void"),
@@ -77,11 +83,17 @@ pub fn validate_linux_device_features(linux: &oci_spec::runtime::Linux) -> anyho
 /// Check both OCI paths and resolved host device paths for excluded integrations.
 pub fn validate_device_path(path: &std::path::Path) -> anyhow::Result<()> {
     anyhow::ensure!(
-        !["/dev/vfio", "/dev/dri", "/dev/infiniband", "/dev/iommu"]
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
+        ![
+            "/dev/vfio",
+            "/dev/dri",
+            "/dev/infiniband",
+            "/dev/iommu",
+            "/dev/trusted_store"
+        ]
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
             && !path.to_string_lossy().starts_with("/dev/nvidia"),
-        "kata-fc: GPU/VFIO/RDMA device passthrough is unsupported: {}",
+        "kata-fc: unsupported device path: {}",
         path.display()
     );
     Ok(())
@@ -109,6 +121,9 @@ mod minimal_device_tests {
             spec.set_process(Some(process.clone()));
             assert!(validate_spec_device_features(&spec).is_err());
         }
+        process.set_env(Some(vec!["TOKEN=sealed.invalid".into()]));
+        spec.set_process(Some(process.clone()));
+        assert!(validate_spec_device_features(&spec).is_err());
         for value in ["", "none", "void"] {
             process.set_env(Some(vec![format!("VISIBLE_CDI_DEVICES={value}")]));
             spec.set_process(Some(process.clone()));
@@ -121,13 +136,14 @@ mod minimal_device_tests {
             "/dev/dri/renderD128",
             "/dev/infiniband/uverbs0",
             "/dev/iommu",
+            "/dev/trusted_store",
         ] {
             let mut linux = Linux::default();
             let mut device = LinuxDevice::default();
             device.set_path(path.into());
             linux.set_devices(Some(vec![device]));
             spec.set_linux(Some(linux));
-            assert!(validate_spec_device_features(&spec).is_err(), "{path}");
+            assert!(validate_spec_device_features(&spec).is_err(), "{}", path);
         }
         for path in ["/dev/null", "/dev/random", "/dev/fuse", "/dev/vdb"] {
             validate_device_path(std::path::Path::new(path)).unwrap();

@@ -21,11 +21,8 @@ extern crate scopeguard;
 #[macro_use]
 extern crate slog;
 
-use anyhow::{anyhow, bail, Context, Result};
-use cfg_if::cfg_if;
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use const_format::concatcp;
-use initdata::{InitdataReturnValue, AA_CONFIG_PATH, CDH_CONFIG_PATH};
 use nix::fcntl::OFlag;
 use nix::sys::reboot::{reboot, RebootMode};
 use nix::sys::socket::{self, AddressFamily, SockFlag, SockType, VsockAddr};
@@ -33,28 +30,21 @@ use nix::unistd::{self, dup, sync, Pid};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::ErrorKind;
-use std::os::unix::fs::{self as unixfs, FileTypeExt};
+use std::os::unix::fs as unixfs;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::Path;
 use std::process::exit;
 use std::sync::Arc;
-use tracing::{instrument, span};
 
-mod confidential_data_hub;
 mod config;
-mod console;
 mod device;
 mod features;
-mod guest_extension_image;
-mod initdata;
 mod linux_abi;
 mod metrics;
 mod mount;
 mod namespace;
 mod netlink;
 mod network;
-mod passfd_io;
 pub mod random;
 mod sandbox;
 mod signal;
@@ -63,11 +53,10 @@ mod uevent;
 mod util;
 mod version;
 
-use config::GuestComponentsProcs;
 use mount::{cgroups_mount, general_mount};
 use sandbox::Sandbox;
 use signal::setup_signal_handler;
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{error, info, o, warn, Logger};
 use uevent::watch_uevents;
 
 use futures::future::join_all;
@@ -82,37 +71,8 @@ use tokio::{
 };
 
 mod rpc;
-mod tracer;
-
-#[cfg(feature = "agent-policy")]
-mod policy;
-
-cfg_if! {
-    if #[cfg(target_arch = "s390x")] {
-        mod ap;
-        mod ccw;
-    }
-}
 
 const NAME: &str = "kata-agent";
-
-const UNIX_SOCKET_PREFIX: &str = "unix://";
-
-// Legacy (non-extension) rootfs locations for the CoCo guest components. They are
-// used to build the built-in launch plan when no CoCo extension image is mounted,
-// keeping monolithic / non-confidential images working unchanged.
-const AA_PATH: &str = "/usr/local/bin/attestation-agent";
-const AA_ATTESTATION_SOCKET: &str =
-    "/run/confidential-containers/attestation-agent/attestation-agent.sock";
-const AA_ATTESTATION_URI: &str = concatcp!(UNIX_SOCKET_PREFIX, AA_ATTESTATION_SOCKET);
-
-const CDH_PATH: &str = "/usr/local/bin/confidential-data-hub";
-const CDH_SOCKET: &str = "/run/confidential-containers/cdh.sock";
-const CDH_SOCKET_URI: &str = concatcp!(UNIX_SOCKET_PREFIX, CDH_SOCKET);
-
-const API_SERVER_PATH: &str = "/usr/local/bin/api-server-rest";
-
-const OCICRYPT_CONFIG_PATH: &str = "/etc/ocicrypt_config.json";
 
 lazy_static! {
     static ref AGENT_CONFIG: AgentConfig =
@@ -120,11 +80,6 @@ lazy_static! {
         // clap::Parser::parse() greedily process all command line input including cargo test parameters,
         // so should only be used inside main.
         AgentConfig::from_cmdline("/proc/cmdline", env::args().collect()).unwrap();
-}
-
-#[cfg(feature = "agent-policy")]
-lazy_static! {
-    static ref AGENT_POLICY: Mutex<AgentPolicy> = Mutex::new(AgentPolicy::new());
 }
 
 #[derive(Parser)]
@@ -146,7 +101,6 @@ enum SubCommand {
     Init {},
 }
 
-#[instrument]
 fn announce(logger: &Logger, config: &AgentConfig) {
     let extra_features = features::get_build_features();
 
@@ -190,8 +144,6 @@ async fn real_main(init_mode: bool) -> std::result::Result<(), Box<dyn std::erro
 
     // List of tasks that need to be stopped for a clean shutdown
     let mut tasks: Vec<JoinHandle<Result<()>>> = vec![];
-
-    console::initialize();
 
     // support vsock log
     let (rfd, wfd) = unistd::pipe2(OFlag::O_CLOEXEC)?;
@@ -259,23 +211,6 @@ async fn real_main(init_mode: bool) -> std::result::Result<(), Box<dyn std::erro
         ttrpc_log_guard = Ok(slog_stdlog::init()?);
     }
 
-    if config.tracing {
-        tracer::setup_tracing(NAME, &logger)?;
-    }
-
-    let root_span = span!(tracing::Level::TRACE, "root-span");
-
-    // XXX: Start the root trace transaction.
-    //
-    // XXX: Note that *ALL* spans needs to start after this point!!
-    let span_guard = root_span.enter();
-
-    // Start the fd passthrough io listener
-    let passfd_listener_port = config.passfd_listener_port as u32;
-    if passfd_listener_port != 0 {
-        passfd_io::start_listen(passfd_listener_port).await?;
-    }
-
     // Start the sandbox and wait for its ttRPC server to end
     start_sandbox(&logger, config, init_mode, &mut tasks, shutdown_rx.clone()).await?;
 
@@ -297,14 +232,6 @@ async fn real_main(init_mode: bool) -> std::result::Result<(), Box<dyn std::erro
 
     // Wait for all threads to finish
     let results = join_all(tasks).await;
-
-    // force flushing spans
-    drop(span_guard);
-    drop(root_span);
-
-    if config.tracing {
-        tracer::end_tracing();
-    }
 
     eprintln!("{NAME} shutdown complete");
 
@@ -360,7 +287,6 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-#[instrument]
 async fn start_sandbox(
     logger: &Logger,
     config: &AgentConfig,
@@ -368,31 +294,10 @@ async fn start_sandbox(
     tasks: &mut Vec<JoinHandle<Result<()>>>,
     shutdown: Receiver<bool>,
 ) -> Result<()> {
-    let debug_console_vport = config.debug_console_vport as u32;
-
-    if config.debug_console {
-        let debug_console_task = tokio::task::spawn(console::debug_console_handler(
-            logger.clone(),
-            debug_console_vport,
-            shutdown.clone(),
-        ));
-
-        tasks.push(debug_console_task);
-    }
-
     // Initialize unique sandbox structure.
     let s = Sandbox::new(logger).context("Failed to create sandbox")?;
     if init_mode {
         s.rtnl.handle_localhost().await?;
-    }
-
-    #[cfg(feature = "agent-policy")]
-    if let Err(e) = initialize_policy().await {
-        error!(logger, "Failed to initialize agent policy: {:?}", e);
-        // Continuing execution without a security policy could be dangerous.
-        // Give a brief moment for the logs to flush, then abort the process to stop the VM.
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        std::process::abort();
     }
 
     let sandbox = Arc::new(Mutex::new(s));
@@ -412,33 +317,6 @@ async fn start_sandbox(
     let (tx, rx) = tokio::sync::oneshot::channel();
     sandbox.lock().await.sender = Some(tx);
 
-    let initdata_return_value = initdata::initialize_initdata(logger).await?;
-
-    let gc_procs = config.guest_components_procs;
-    let launch_plan = build_coco_launch_plan(config, &initdata_return_value, gc_procs)?;
-    if !attestation_components_available(logger, &launch_plan) {
-        warn!(
-            logger,
-            "attestation binaries requested for launch not available"
-        );
-    } else {
-        init_attestation_components(logger, &launch_plan).await?;
-    }
-
-    // if policy is given via initdata, use it
-    #[cfg(feature = "agent-policy")]
-    if let Some(initdata_return_value) = initdata_return_value {
-        if let Some(policy) = &initdata_return_value._policy {
-            info!(logger, "using policy from initdata");
-            AGENT_POLICY
-                .lock()
-                .await
-                .set_policy(policy)
-                .await
-                .context("Failed to set policy from initdata")?;
-        }
-    }
-
     // vsock:///dev/vsock, port
     let mut server = rpc::start(sandbox.clone(), config.server_addr.as_str(), init_mode).await?;
 
@@ -446,318 +324,6 @@ async fn start_sandbox(
 
     rx.await?;
     server.shutdown().await?;
-
-    Ok(())
-}
-
-// Map the requested guest-components level to the numeric gating level used by
-// extension manifests. A process is launched only when its declared `level` is
-// <= this value. The ordering mirrors the implications documented on
-// `GuestComponentsProcs` (ApiServerRest implies CDH implies AttestationAgent).
-fn guest_components_max_level(procs: GuestComponentsProcs) -> u32 {
-    match procs {
-        GuestComponentsProcs::None => 0,
-        GuestComponentsProcs::AttestationAgent => 1,
-        GuestComponentsProcs::ConfidentialDataHub => 2,
-        GuestComponentsProcs::ApiServerRest => 3,
-    }
-}
-
-// Build the substitution context exposed to extension manifests. New extension bundles
-// can rely on these variables without requiring agent code changes; introducing
-// a brand new variable is the only case that needs touching the agent.
-fn build_substitution_ctx(
-    config: &AgentConfig,
-    initdata_return_value: &Option<InitdataReturnValue>,
-) -> Result<std::collections::HashMap<String, String>> {
-    let ocicrypt_config_path = guest_extension_image::resolve_component_path(
-        guest_extension_image::COCO_EXTENSION_NAME,
-        guest_extension_image::COCO_COMPONENT_OCICRYPT_CONFIG,
-        OCICRYPT_CONFIG_PATH,
-    )?;
-
-    let initdata_toml_path = if initdata_return_value.is_some() {
-        initdata::INITDATA_TOML_PATH.to_string()
-    } else {
-        String::new()
-    };
-
-    let extension_root =
-        guest_extension_image::extension_mount_root(guest_extension_image::COCO_EXTENSION_NAME)?;
-
-    let mut ctx = std::collections::HashMap::new();
-    ctx.insert(
-        "aa_attestation_uri".to_string(),
-        AA_ATTESTATION_URI.to_string(),
-    );
-    ctx.insert(
-        "aa_attestation_socket".to_string(),
-        AA_ATTESTATION_SOCKET.to_string(),
-    );
-    ctx.insert("aa_config_path".to_string(), AA_CONFIG_PATH.to_string());
-    ctx.insert("cdh_config_path".to_string(), CDH_CONFIG_PATH.to_string());
-    ctx.insert("cdh_socket".to_string(), CDH_SOCKET.to_string());
-    ctx.insert(
-        "ocicrypt_config_path".to_string(),
-        ocicrypt_config_path.to_string_lossy().into_owned(),
-    );
-    ctx.insert(
-        "rest_api_features".to_string(),
-        config.guest_components_rest_api.to_string(),
-    );
-    ctx.insert(
-        "launch_process_timeout".to_string(),
-        config.launch_process_timeout.as_secs().to_string(),
-    );
-    ctx.insert("initdata_toml_path".to_string(), initdata_toml_path);
-    ctx.insert(
-        "extension_root".to_string(),
-        extension_root.to_string_lossy().into_owned(),
-    );
-    // The CoCo extension ships several attestation-agent flavours and selects one
-    // via the manifest's "attester_variant". The guest init (NVRC) owns that
-    // decision: with a GPU present it sets KATA_ATTESTER_VARIANT=nvidia so the
-    // NVIDIA-attester build launches (it emits the GPU evidence a KBS GPU
-    // policy requires). Absent that signal we fall back to the stock attester.
-    // Cross-component contract: the env var name and "nvidia" value are set by
-    // NVRC (src/kata_agent.rs, src/gpu.rs); keep them in sync.
-    let attester_variant = env::var("KATA_ATTESTER_VARIANT")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "default".to_string());
-    ctx.insert("attester_variant".to_string(), attester_variant);
-
-    Ok(ctx)
-}
-
-// Built-in launch plan used when no CoCo extension image is mounted. It reproduces
-// the legacy behaviour of launching the guest components from the rootfs
-// (`/usr/local/bin/...`), so monolithic and non-confidential images are
-// unaffected by the extension machinery.
-fn builtin_coco_plan(
-    config: &AgentConfig,
-    initdata_return_value: &Option<InitdataReturnValue>,
-    max_level: u32,
-) -> Vec<guest_extension_image::LaunchSpec> {
-    let mut plan = Vec::new();
-
-    if max_level >= 1 {
-        let mut args = vec![
-            "--attestation_sock".to_string(),
-            AA_ATTESTATION_URI.to_string(),
-        ];
-        if initdata_return_value.is_some() {
-            args.push("--initdata-toml".to_string());
-            args.push(initdata::INITDATA_TOML_PATH.to_string());
-        }
-        plan.push(guest_extension_image::LaunchSpec {
-            id: "attestation-agent".to_string(),
-            path: Path::new(AA_PATH).to_path_buf(),
-            args,
-            config: Some(AA_CONFIG_PATH.to_string()),
-            env: vec![],
-            wait_socket: Some(AA_ATTESTATION_SOCKET.to_string()),
-            timeout_secs: config.launch_process_timeout.as_secs(),
-        });
-    }
-
-    if max_level >= 2 {
-        plan.push(guest_extension_image::LaunchSpec {
-            id: "confidential-data-hub".to_string(),
-            path: Path::new(CDH_PATH).to_path_buf(),
-            args: vec![],
-            config: Some(CDH_CONFIG_PATH.to_string()),
-            env: vec![(
-                "OCICRYPT_KEYPROVIDER_CONFIG".to_string(),
-                OCICRYPT_CONFIG_PATH.to_string(),
-            )],
-            wait_socket: Some(CDH_SOCKET.to_string()),
-            timeout_secs: config.launch_process_timeout.as_secs(),
-        });
-    }
-
-    if max_level >= 3 {
-        plan.push(guest_extension_image::LaunchSpec {
-            id: "api-server-rest".to_string(),
-            path: Path::new(API_SERVER_PATH).to_path_buf(),
-            args: vec![
-                "--features".to_string(),
-                config.guest_components_rest_api.to_string(),
-            ],
-            config: None,
-            env: vec![],
-            wait_socket: None,
-            timeout_secs: 0,
-        });
-    }
-
-    plan
-}
-
-// Build the ordered launch plan for the guest components. When a CoCo extension
-// image is mounted its manifest drives the plan (so new bundles need no agent
-// changes); otherwise the built-in legacy plan is used.
-fn build_coco_launch_plan(
-    config: &AgentConfig,
-    initdata_return_value: &Option<InitdataReturnValue>,
-    procs: GuestComponentsProcs,
-) -> Result<Vec<guest_extension_image::LaunchSpec>> {
-    let max_level = guest_components_max_level(procs);
-    let ctx = build_substitution_ctx(config, initdata_return_value)?;
-    match guest_extension_image::launch_plan(
-        guest_extension_image::COCO_EXTENSION_NAME,
-        max_level,
-        &ctx,
-    )? {
-        Some(plan) => Ok(plan),
-        None => Ok(builtin_coco_plan(config, initdata_return_value, max_level)),
-    }
-}
-
-// Check that every process in the launch plan is present on disk. A missing
-// binary means the components were not provisioned (e.g. a non-confidential
-// rootfs), in which case launching is skipped.
-fn attestation_components_available(
-    logger: &Logger,
-    plan: &[guest_extension_image::LaunchSpec],
-) -> bool {
-    for spec in plan {
-        let exists = spec
-            .path
-            .try_exists()
-            .unwrap_or_else(|error| match error.kind() {
-                ErrorKind::NotFound => false,
-                _ => panic!(
-                    "Path existence check failed for '{}': {}",
-                    spec.path.display(),
-                    error
-                ),
-            });
-
-        if !exists {
-            warn!(logger, "{} not found", spec.path.display());
-            return false;
-        }
-    }
-    true
-}
-
-async fn launch_guest_component_procs(
-    logger: &Logger,
-    plan: &[guest_extension_image::LaunchSpec],
-) -> Result<()> {
-    for spec in plan {
-        let path = spec
-            .path
-            .to_str()
-            .ok_or_else(|| anyhow!("non-utf8 component path {}", spec.path.display()))?;
-        debug!(logger, "spawning extension component process {}", spec.id);
-
-        let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
-        let envs: Vec<(&str, &str)> = spec
-            .env
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-
-        launch_process(
-            logger,
-            path,
-            args,
-            spec.config.as_deref(),
-            spec.wait_socket.as_deref().unwrap_or(""),
-            spec.timeout_secs,
-            &envs,
-        )
-        .await
-        .map_err(|e| anyhow!("launch_process {} failed: {:?}", path, e))?;
-    }
-
-    Ok(())
-}
-
-// Start-up attestation-agent, CDH and api-server-rest if they are packaged in the rootfs
-// and the corresponding procs are enabled in the agent configuration. the process will be
-// launched in the background and the function will return immediately.
-// If the CDH is started, a CDH client will be instantiated and returned.
-async fn init_attestation_components(
-    logger: &Logger,
-    plan: &[guest_extension_image::LaunchSpec],
-) -> Result<()> {
-    launch_guest_component_procs(logger, plan).await?;
-
-    // If a CDH socket exists, initialize the CDH client and enable ocicrypt
-    match tokio::fs::metadata(CDH_SOCKET).await {
-        Ok(md) => {
-            if md.file_type().is_socket() {
-                confidential_data_hub::init_cdh_client(CDH_SOCKET_URI).await?;
-            } else {
-                debug!(logger, "File {} is not a socket", CDH_SOCKET);
-            }
-        }
-        Err(err) => warn!(
-            logger,
-            "Failed to probe CDH socket file {}: {:?}", CDH_SOCKET, err
-        ),
-    }
-
-    Ok(())
-}
-
-async fn wait_for_path_to_exist(logger: &Logger, path: &str, timeout_secs: u64) -> Result<()> {
-    let p = Path::new(path);
-    let mut attempts = 0;
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if p.exists() {
-            return Ok(());
-        }
-        if attempts >= timeout_secs {
-            break;
-        }
-        attempts += 1;
-        info!(
-            logger,
-            "waiting for {} to exist (attempts={})", path, attempts
-        );
-    }
-
-    Err(anyhow!("wait for {} to exist timeout.", path))
-}
-
-async fn launch_process(
-    logger: &Logger,
-    path: &str,
-    mut args: Vec<&str>,
-    config: Option<&str>,
-    unix_socket_path: &str,
-    timeout_secs: u64,
-    envs: &[(&str, &str)],
-) -> Result<()> {
-    if !Path::new(path).exists() {
-        bail!("path {} does not exist.", path);
-    }
-
-    if let Some(config_path) = config {
-        if Path::new(config_path).exists() {
-            args.push("-c");
-            args.push(config_path);
-        }
-    }
-
-    if !unix_socket_path.is_empty() && Path::new(unix_socket_path).exists() {
-        tokio::fs::remove_file(unix_socket_path).await?;
-    }
-
-    let mut process = tokio::process::Command::new(path);
-    process.args(args);
-    for (k, v) in envs {
-        process.env(k, v);
-    }
-    process.spawn()?;
-    if !unix_socket_path.is_empty() && timeout_secs > 0 {
-        wait_for_path_to_exist(logger, unix_socket_path, timeout_secs).await?;
-    }
 
     Ok(())
 }
@@ -796,19 +362,6 @@ fn init_agent_as_init(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result
     Ok(())
 }
 
-#[cfg(feature = "agent-policy")]
-async fn initialize_policy() -> Result<()> {
-    AGENT_POLICY
-        .lock()
-        .await
-        .initialize(
-            AGENT_CONFIG.log_level.as_usize(),
-            AGENT_CONFIG.policy_file.clone(),
-            None,
-        )
-        .await
-}
-
 // The Rust standard library had suppressed the default SIGPIPE behavior,
 // see https://github.com/rust-lang/rust/pull/13158.
 // Since the parent's signal handler would be inherited by it's child process,
@@ -822,9 +375,6 @@ fn reset_sigpipe() {
 
 use crate::config::AgentConfig;
 use std::os::unix::io::RawFd;
-
-#[cfg(feature = "agent-policy")]
-use kata_agent_policy::policy::AgentPolicy;
 
 #[cfg(test)]
 mod tests {

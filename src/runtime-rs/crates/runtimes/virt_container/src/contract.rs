@@ -30,7 +30,7 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
         "{fail}: Firecracker seccomp cannot be disabled"
     );
     ensure!(
-        !h.security_info.confidential_guest,
+        !h.security_info.confidential_guest && h.security_info.initdata.is_empty(),
         "{fail}: confidential computing"
     );
     ensure!(!h.security_info.rootless, "{fail}: rootless host runtime");
@@ -99,6 +99,7 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
         .agent
         .get("kata")
         .ok_or_else(|| anyhow::anyhow!("{fail}: missing kata agent"))?;
+    ensure!(a.policy.is_empty(), "{fail}: agent policy");
     ensure!(!a.debug_console_enabled, "{fail}: guest debug console");
     ensure!(
         !a.enable_tracing && !a.visible_cdi_devices,
@@ -142,6 +143,14 @@ mod tests {
             |c| c.runtime.sandbox_bind_mounts.push("/host".into()),
             |c| c.runtime.use_passfd_io = true,
             |c| c.runtime.enable_pprof = true,
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .security_info
+                    .initdata = "data".into()
+            },
+            |c| c.agent.get_mut("kata").unwrap().policy = "policy".into(),
             |c| {
                 c.hypervisor
                     .get_mut("firecracker")

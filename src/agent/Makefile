@@ -33,29 +33,9 @@ ifeq ($(SECCOMP),yes)
     override EXTRA_RUSTFEATURES += seccomp
 endif
 
-##VAR AGENT_POLICY=yes|no define if agent enables the policy feature
-AGENT_POLICY ?= no
-
-# Enable the policy feature of rust build
-ifeq ($(AGENT_POLICY),yes)
-    override EXTRA_RUSTFEATURES += agent-policy
-endif
-
-##VAR INIT_DATA=yes|no define if agent enables the init data feature
-INIT_DATA ?= yes
-
-# Enable the init data fature of rust build
-ifeq ($(INIT_DATA),yes)
-    override EXTRA_RUSTFEATURES += init-data
-endif
-
-##VAR USE_DEVMAPPER=yes|no define if agent enables dm-verity (devicemapper) support
-USE_DEVMAPPER ?= no
-
-# Enable the devicemapper feature (links libdevmapper for dm-verity) with GNU libc
-ifeq ($(USE_DEVMAPPER),yes)
-    override EXTRA_RUSTFEATURES += devicemapper
-    override LIBC = gnu
+# Removed build variants must fail explicitly rather than being ignored.
+ifneq ($(filter yes,$(AGENT_POLICY) $(INIT_DATA) $(USE_DEVMAPPER)),)
+    $(error kata-fc: policy, init-data and guest devmapper features are unsupported)
 endif
 
 include ../../utils.mk

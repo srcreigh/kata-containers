@@ -30,7 +30,6 @@ use thiserror::Error;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
-use tracing::instrument;
 
 use crate::mount::{get_mount_fs_type, TYPE_ROOTFS};
 use crate::namespace::Namespace;
@@ -109,8 +108,6 @@ pub struct Sandbox {
     pub network: Network,
     pub mounts: Vec<String>,
     pub container_mounts: HashMap<String, Vec<String>>,
-    /// dm-verity devices per container for cleanup
-    pub container_verity_devices: HashMap<String, Vec<String>>,
     pub uevent_map: HashMap<String, Uevent>,
     pub uevent_watchers: Vec<Option<UeventWatcher>>,
     pub shared_utsns: Namespace,
@@ -127,7 +124,6 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    #[instrument]
     pub fn new(logger: &Logger) -> Result<Self> {
         let fs_type = get_mount_fs_type("/")?;
         let logger = logger.new(o!("subsystem" => "sandbox"));
@@ -142,7 +138,6 @@ impl Sandbox {
             containers: HashMap::new(),
             mounts: Vec::new(),
             container_mounts: HashMap::new(),
-            container_verity_devices: HashMap::new(),
             uevent_map: HashMap::new(),
             uevent_watchers: Vec::new(),
             shared_utsns: Namespace::new(&logger),
@@ -163,7 +158,7 @@ impl Sandbox {
     /// The caller may detect new storage object by checking `StorageState.refcount == 1`.
     /// The `shared` flag indicates if this storage is shared across multiple containers;
     /// if true, cleanup will be skipped when containers exit.
-    #[instrument]
+
     pub async fn add_sandbox_storage(&mut self, path: &str, shared: bool) -> StorageState {
         match self.storages.entry(path.to_string()) {
             Entry::Occupied(e) => {
@@ -208,7 +203,7 @@ impl Sandbox {
     ///
     /// Returns `Ok(true)` if the reference count has reached zero and the storage object has been
     /// removed.
-    #[instrument]
+
     pub async fn remove_sandbox_storage(&mut self, path: &str) -> Result<bool> {
         match self.storages.get(path) {
             None => Err(anyhow!("Sandbox storage with path {} not found", path)),
@@ -229,7 +224,6 @@ impl Sandbox {
         }
     }
 
-    #[instrument]
     pub async fn setup_shared_namespaces(&mut self) -> Result<bool> {
         // Set up shared IPC namespace
         self.shared_ipcns = Namespace::new(&self.logger)
@@ -248,7 +242,6 @@ impl Sandbox {
         Ok(true)
     }
 
-    #[instrument]
     pub fn update_shared_pidns(&mut self, c: &LinuxContainer) -> Result<()> {
         // Populate the shared pid path only if this is an infra container and
         // sandbox_pidns has not been passed in the create_sandbox request.
@@ -320,7 +313,6 @@ impl Sandbox {
             .map_err(|_| SandboxError::InvalidExecId)
     }
 
-    #[instrument]
     pub async fn destroy(&mut self) -> Result<()> {
         for ctr in self.containers.values_mut() {
             ctr.destroy().await?;
@@ -328,7 +320,6 @@ impl Sandbox {
         Ok(())
     }
 
-    #[instrument]
     pub async fn run_oom_event_monitor(&self, mut rx: Receiver<String>, container_id: String) {
         let logger = self.logger.clone();
         let tx = match self.event_tx.as_ref() {
@@ -357,7 +348,6 @@ impl Sandbox {
         });
     }
 
-    #[instrument]
     pub fn setup_shared_mounts(&self, c: &LinuxContainer, mounts: &Vec<SharedMount>) -> Result<()> {
         let mut src_ctrs: HashMap<String, i32> = HashMap::new();
         for shared_mount in mounts {
@@ -830,21 +820,14 @@ mod tests {
         linux_container.id = cid.to_string();
         // add init process
         let mut init_process =
-            Process::new(&logger, &oci::Process::default(), "1", true, 1, None).unwrap();
+            Process::new(&logger, &oci::Process::default(), "1", true, 1).unwrap();
         init_process.pid = 1;
         linux_container
             .processes
             .insert("1".to_string(), init_process);
         // add exec process
-        let mut exec_process = Process::new(
-            &logger,
-            &oci::Process::default(),
-            "exec-123",
-            false,
-            1,
-            None,
-        )
-        .unwrap();
+        let mut exec_process =
+            Process::new(&logger, &oci::Process::default(), "exec-123", false, 1).unwrap();
         exec_process.pid = 123;
         linux_container
             .processes
@@ -894,7 +877,6 @@ mod tests {
                 "this_is_a_test_process",
                 true,
                 1,
-                None,
             )
             .unwrap();
             // processes interally only have pids when manually set

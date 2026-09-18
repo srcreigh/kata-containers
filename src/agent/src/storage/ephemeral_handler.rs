@@ -16,7 +16,6 @@ use kata_types::mount::{StorageDevice, KATA_MOUNT_OPTION_FS_GID};
 use nix::unistd::Gid;
 use protocols::agent::Storage;
 use slog::Logger;
-use tracing::instrument;
 
 use crate::storage::{
     common_storage_handler, new_device, parse_options, StorageContext, StorageHandler, MODE_SETGID,
@@ -31,12 +30,10 @@ pub struct EphemeralHandler {}
 
 #[async_trait::async_trait]
 impl StorageHandler for EphemeralHandler {
-    #[instrument]
     fn driver_types(&self) -> &[&str] {
         &[DRIVER_EPHEMERAL_TYPE]
     }
 
-    #[instrument]
     async fn create_device(
         &self,
         mut storage: Storage,

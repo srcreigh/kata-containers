@@ -4,8 +4,6 @@
 //
 
 use async_trait::async_trait;
-#[cfg(feature = "agent-policy")]
-use kata_agent_policy::policy::PolicyCopyFileRequest;
 use pathrs::flags::OpenFlags;
 use rustjail::{pipestream::PipeStream, process::StreamType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf};
@@ -13,8 +11,6 @@ use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
 use std::convert::TryFrom;
-#[cfg(feature = "agent-policy")]
-use std::convert::TryInto as _;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::os::unix::ffi::OsStrExt;
@@ -32,8 +28,6 @@ use anyhow::{anyhow, Context, Result};
 use cgroups::FreezerState;
 use oci::{LinuxNamespace, Spec};
 use oci_spec::runtime as oci;
-#[cfg(feature = "agent-policy")]
-use protobuf::MessageDyn;
 use protobuf::MessageField;
 use protocols::agent::{
     AgentDetails, CopyFileRequest, GuestDetailsResponse, Metrics, OOMEvent, ReadStreamResponse,
@@ -63,34 +57,18 @@ use rustjail::process::ProcessOperations;
 #[cfg(all(test, not(target_arch = "powerpc64")))]
 use std::os::fd::AsRawFd;
 
-use crate::confidential_data_hub::image::KATA_IMAGE_WORK_DIR;
 use crate::device::add_devices;
 use crate::features::get_build_features;
+use crate::linux_abi::*;
 use crate::metrics::get_metrics;
 use crate::mount::baremount;
 use crate::namespace::{NSTYPEIPC, NSTYPEPID, NSTYPEUTS};
 use crate::network::setup_guest_dns;
-use crate::passfd_io;
 use crate::random;
 use crate::sandbox::{Sandbox, SandboxError};
 use crate::storage::{add_storages, STORAGE_HANDLERS};
 use crate::version::{AGENT_VERSION, API_VERSION};
 use crate::AGENT_CONFIG;
-use crate::{confidential_data_hub, linux_abi::*};
-#[cfg(feature = "devicemapper")]
-use kata_types::dmverity::cleanup_dmverity_devices;
-
-use crate::trace_rpc_call;
-use crate::tracer::extract_carrier_from_ttrpc;
-
-#[cfg(feature = "agent-policy")]
-use crate::policy::{do_set_policy, is_allowed, is_allowed_with_entrypoint};
-
-use opentelemetry::global;
-use tracing::span;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-use tracing::instrument;
 
 use libc::{self, c_ushort, pid_t, winsize, TIOCSWINSZ};
 use std::fs;
@@ -105,7 +83,6 @@ use std::path::PathBuf;
 use kata_types::k8s;
 
 pub const CONTAINER_BASE: &str = "/run/kata-containers";
-const TRUSTED_IMAGE_STORAGE_DEVICE: &str = "/dev/trusted_store";
 const KATA_GUEST_SHARE_DIR: &str = "/run/kata-containers/shared/containers/";
 
 const ERR_CANNOT_GET_WRITER: &str = "Cannot get writer";
@@ -123,6 +100,7 @@ const FILE_PERMISSION_MASK: u32 = 0o7777;
 
 // Validate before mutating sandbox state or touching guest files/namespaces.
 fn validate_sandbox_features(req: &protocols::agent::CreateSandboxRequest) -> ttrpc::Result<()> {
+    validate_storage_features(&req.storages)?;
     if !req.kernel_modules.is_empty() || !req.guest_hook_path.is_empty() {
         return Err(ttrpc_error(
             ttrpc::Code::INVALID_ARGUMENT,
@@ -130,6 +108,22 @@ fn validate_sandbox_features(req: &protocols::agent::CreateSandboxRequest) -> tt
         ));
     }
     Ok(())
+}
+
+// Proto3 scalar port zero means absent; reject any requested pass-fd port.
+fn validate_passfd(stdin: u32, stdout: u32, stderr: u32) -> ttrpc::Result<()> {
+    if stdin != 0 || stdout != 0 || stderr != 0 {
+        return Err(ttrpc_error(
+            ttrpc::Code::INVALID_ARGUMENT,
+            "kata-fc: pass-fd IO is unsupported",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_storage_features(storages: &[protocols::agent::Storage]) -> ttrpc::Result<()> {
+    crate::storage::validate_storages(storages)
+        .map_err(|e| ttrpc_error(ttrpc::Code::INVALID_ARGUMENT, e.to_string()))
 }
 
 // Convenience function to obtain the scope logger.
@@ -150,11 +144,6 @@ fn sandbox_err_to_ttrpc(err: SandboxError) -> ttrpc::Error {
         SandboxError::InvalidContainerId => ttrpc::Code::INVALID_ARGUMENT,
     };
     ttrpc_error(code, err)
-}
-
-#[cfg(not(feature = "agent-policy"))]
-async fn is_allowed(_req: &impl serde::Serialize) -> ttrpc::Result<()> {
-    Ok(())
 }
 
 fn same<E>(e: E) -> E {
@@ -239,20 +228,13 @@ pub struct AgentService {
 }
 
 impl AgentService {
-    #[instrument]
     async fn do_create_container(
         &self,
         req: protocols::agent::CreateContainerRequest,
     ) -> Result<()> {
+        validate_passfd(req.stdin_port, req.stdout_port, req.stderr_port)?;
+        validate_storage_features(&req.storages)?;
         validate_container_device_features(&req)?;
-        // create the proc_io first, in case there's some error occur below, thus we can make sure
-        // the io stream closed when error occur.
-        let proc_io = if AGENT_CONFIG.passfd_listener_port != 0 {
-            Some(passfd_io::take_io_streams(req.stdin_port, req.stdout_port, req.stderr_port).await)
-        } else {
-            None
-        };
-
         let cid = req.container_id.clone();
 
         kata_sys_util::validate::verify_id(&cid)?;
@@ -282,11 +264,6 @@ impl AgentService {
         // cannot predict everything from the caller.
         add_devices(&sl(), &req.devices, &mut oci, &self.sandbox).await?;
 
-        // Handle trusted storage configuration before mounting any storage
-        cdh_handler_trusted_storage(&mut oci)
-            .await
-            .map_err(|e| anyhow!("failed to handle trusted storage: {}", e))?;
-
         // Both rootfs and volumes (invoked with --volume for instance) will
         // be processed the same way. The idea is to always mount any provided
         // storage to the specified MountPoint, so that it will match what's
@@ -301,11 +278,6 @@ impl AgentService {
             Some(req.container_id),
         )
         .await?;
-
-        // Handle sealed secrets after storage is mounted
-        cdh_handler_sealed_secrets(&mut oci)
-            .await
-            .map_err(|e| anyhow!("failed to handle sealed secrets: {}", e))?;
 
         let mut s = self.sandbox.lock().await;
         s.container_mounts.insert(cid.clone(), m);
@@ -363,8 +335,7 @@ impl AgentService {
             return Err(anyhow!(nix::Error::EINVAL));
         };
 
-        let new_p = confidential_data_hub::image::get_process(p, &oci, req.storages.clone())?;
-        let p = Process::new(&sl(), &new_p, cid.as_str(), true, pipe_size, proc_io)?;
+        let p = Process::new(&sl(), p, cid.as_str(), true, pipe_size)?;
 
         // if starting container failed, we will do some rollback work
         // to ensure no resources are leaked.
@@ -387,7 +358,6 @@ impl AgentService {
         Ok(())
     }
 
-    #[instrument]
     async fn do_start_container(&self, req: protocols::agent::StartContainerRequest) -> Result<()> {
         let mut s = self.sandbox.lock().await;
         let sid = s.id.clone();
@@ -412,7 +382,6 @@ impl AgentService {
         ctr.exec().await
     }
 
-    #[instrument]
     async fn do_remove_container(
         &self,
         req: protocols::agent::RemoveContainerRequest,
@@ -450,20 +419,12 @@ impl AgentService {
         remove_container_resources(&mut *self.sandbox.lock().await, &cid).await
     }
 
-    #[instrument]
     async fn do_exec_process(&self, req: protocols::agent::ExecProcessRequest) -> Result<()> {
+        validate_passfd(req.stdin_port, req.stdout_port, req.stderr_port)?;
         let cid = req.container_id;
         let exec_id = req.exec_id;
 
         info!(sl(), "do_exec_process cid: {} eid: {}", cid, exec_id);
-
-        // create the proc_io first, in case there's some error occur below, thus we can make sure
-        // the io stream closed when error occur.
-        let proc_io = if AGENT_CONFIG.passfd_listener_port != 0 {
-            Some(passfd_io::take_io_streams(req.stdin_port, req.stdout_port, req.stderr_port).await)
-        } else {
-            None
-        };
 
         let mut sandbox = self.sandbox.lock().await;
         let process = req
@@ -475,7 +436,7 @@ impl AgentService {
 
         let pipe_size = AGENT_CONFIG.container_pipe_size;
         let ocip = process.into();
-        let p = Process::new(&sl(), &ocip, exec_id.as_str(), false, pipe_size, proc_io)?;
+        let p = Process::new(&sl(), &ocip, exec_id.as_str(), false, pipe_size)?;
 
         let ctr = sandbox
             .get_container(&cid)
@@ -484,7 +445,6 @@ impl AgentService {
         ctr.run(p).await
     }
 
-    #[instrument]
     async fn do_signal_process(&self, req: protocols::agent::SignalProcessRequest) -> Result<()> {
         let cid = req.container_id;
         let eid = req.exec_id;
@@ -605,7 +565,6 @@ impl AgentService {
         ctr.cgroup_manager.as_ref().get_pids()
     }
 
-    #[instrument]
     async fn do_wait_process(
         &self,
         req: protocols::agent::WaitProcessRequest,
@@ -875,76 +834,69 @@ impl AgentService {
 impl agent_ttrpc::AgentService for AgentService {
     async fn create_container(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::CreateContainerRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "create_container", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "create_container");
         self.do_create_container(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
     async fn start_container(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::StartContainerRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "start_container", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "start_container");
         self.do_start_container(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
     async fn remove_container(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::RemoveContainerRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "remove_container", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "remove_container");
         self.do_remove_container(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
     async fn exec_process(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::ExecProcessRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "exec_process", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "exec_process");
         self.do_exec_process(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
     async fn signal_process(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::SignalProcessRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "signal_process", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "signal_process");
         self.do_signal_process(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
     async fn wait_process(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::WaitProcessRequest,
     ) -> ttrpc::Result<WaitProcessResponse> {
-        trace_rpc_call!(ctx, "wait_process", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "wait_process");
         self.do_wait_process(req).await.map_ttrpc_err(same)
     }
 
     async fn update_container(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::UpdateContainerRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "update_container", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "update_container");
 
         let mut sandbox = self.sandbox.lock().await;
         let ctr = sandbox
@@ -960,11 +912,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn stats_container(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::StatsContainerRequest,
     ) -> ttrpc::Result<StatsContainerResponse> {
-        trace_rpc_call!(ctx, "stats_container", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "stats_container");
 
         // Clone the container's cgroup manager (an Arc) while holding the sandbox lock, then
         // release the lock BEFORE the blocking cgroup read below.
@@ -999,11 +950,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn pause_container(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::PauseContainerRequest,
     ) -> ttrpc::Result<protocols::empty::Empty> {
-        trace_rpc_call!(ctx, "pause_container", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "pause_container");
 
         let mut sandbox = self.sandbox.lock().await;
         let ctr = sandbox
@@ -1015,11 +965,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn resume_container(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::ResumeContainerRequest,
     ) -> ttrpc::Result<protocols::empty::Empty> {
-        trace_rpc_call!(ctx, "resume_container", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "resume_container");
 
         let mut sandbox = self.sandbox.lock().await;
         let ctr = sandbox
@@ -1034,7 +983,6 @@ impl agent_ttrpc::AgentService for AgentService {
         _ctx: &TtrpcContext,
         req: protocols::agent::WriteStreamRequest,
     ) -> ttrpc::Result<WriteStreamResponse> {
-        is_allowed(&req).await?;
         self.do_write_stream(req).await.map_ttrpc_err(same)
     }
 
@@ -1043,12 +991,7 @@ impl agent_ttrpc::AgentService for AgentService {
         _ctx: &TtrpcContext,
         req: protocols::agent::ReadStreamRequest,
     ) -> ttrpc::Result<ReadStreamResponse> {
-        let mut response = self.do_read_stream(&req, true).await.map_ttrpc_err(same)?;
-        if is_allowed(&req).await.is_err() {
-            // Policy does not allow reading logs, so we redact the log messages.
-            response.clear_data();
-        }
-        Ok(response)
+        self.do_read_stream(&req, true).await.map_ttrpc_err(same)
     }
 
     async fn read_stderr(
@@ -1056,24 +999,18 @@ impl agent_ttrpc::AgentService for AgentService {
         _ctx: &TtrpcContext,
         req: protocols::agent::ReadStreamRequest,
     ) -> ttrpc::Result<ReadStreamResponse> {
-        let mut response = self.do_read_stream(&req, false).await.map_ttrpc_err(same)?;
-        if is_allowed(&req).await.is_err() {
-            // Policy does not allow reading logs, so we redact the log messages.
-            response.clear_data();
-        }
-        Ok(response)
+        self.do_read_stream(&req, false).await.map_ttrpc_err(same)
     }
 
     async fn close_stdin(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::CloseStdinRequest,
     ) -> ttrpc::Result<Empty> {
         // The stdin will be closed when EOF is got in rpc `write_stdin`[runtime-rs]
         // so this rpc will not be called anymore by runtime-rs.
 
-        trace_rpc_call!(ctx, "close_stdin", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "close_stdin");
 
         let cid = req.container_id;
         let eid = req.exec_id;
@@ -1090,11 +1027,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn tty_win_resize(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::TtyWinResizeRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "tty_win_resize", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "tty_win_resize");
 
         let mut sandbox = self.sandbox.lock().await;
         let p = sandbox
@@ -1121,11 +1057,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn update_interface(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::UpdateInterfaceRequest,
     ) -> ttrpc::Result<Interface> {
-        trace_rpc_call!(ctx, "update_interface", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "update_interface");
 
         let interface = req.interface.into_option().map_ttrpc_err(
             ttrpc::Code::INVALID_ARGUMENT,
@@ -1151,11 +1086,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn update_routes(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::UpdateRoutesRequest,
     ) -> ttrpc::Result<Routes> {
-        trace_rpc_call!(ctx, "update_routes", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "update_routes");
 
         let new_routes = req
             .routes
@@ -1185,11 +1119,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn create_sandbox(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::CreateSandboxRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "create_sandbox", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "create_sandbox");
         validate_sandbox_features(&req)?;
 
         {
@@ -1226,11 +1159,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn destroy_sandbox(
         &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::DestroySandboxRequest,
+        _ctx: &TtrpcContext,
+        _req: protocols::agent::DestroySandboxRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "destroy_sandbox", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "destroy_sandbox");
 
         let mut sandbox = self.sandbox.lock().await;
         // destroy all containers, clean up, notify agent to exit etc.
@@ -1254,11 +1186,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn add_arp_neighbors(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::AddARPNeighborsRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "add_arp_neighbors", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "add_arp_neighbors");
 
         let neighs = req
             .neighbors
@@ -1282,11 +1213,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn reseed_random_dev(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::ReseedRandomDevRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "reseed_random_dev", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "reseed_random_dev");
 
         random::reseed_rng(req.data.as_slice()).map_ttrpc_err(same)?;
 
@@ -1295,11 +1225,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn get_guest_details(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::GuestDetailsRequest,
     ) -> ttrpc::Result<GuestDetailsResponse> {
-        trace_rpc_call!(ctx, "get_guest_details", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "get_guest_details");
 
         info!(sl(), "get guest details!");
         let mut resp = GuestDetailsResponse::new();
@@ -1324,21 +1253,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn copy_file(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::CopyFileRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "copy_file", req);
-        #[cfg(feature = "agent-policy")]
-        {
-            let req_for_policy: PolicyCopyFileRequest = (&req)
-                .try_into()
-                .context("parsing CopyFileRequest for policy")
-                .map_ttrpc_err(same)?;
-            is_allowed_with_entrypoint(req.descriptor_dyn().name(), &req_for_policy).await?;
-        }
-        #[cfg(not(feature = "agent-policy"))]
-        is_allowed(&req).await?;
-
+        info!(sl(), "rpc call from shim to agent: {}", "copy_file");
         // Potentially untrustworthy data from the host needs to go into the shared dir.
         let root_path = PathBuf::from(KATA_GUEST_SHARE_DIR);
         do_copy_file(&req, &root_path).map_ttrpc_err(same)?;
@@ -1348,11 +1266,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn get_metrics(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::GetMetricsRequest,
     ) -> ttrpc::Result<Metrics> {
-        trace_rpc_call!(ctx, "get_metrics", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "get_metrics");
 
         let s = get_metrics(&req).map_ttrpc_err(same)?;
         let mut metrics = Metrics::new();
@@ -1363,9 +1280,8 @@ impl agent_ttrpc::AgentService for AgentService {
     async fn get_oom_event(
         &self,
         _ctx: &TtrpcContext,
-        req: protocols::agent::GetOOMEventRequest,
+        _req: protocols::agent::GetOOMEventRequest,
     ) -> ttrpc::Result<OOMEvent> {
-        is_allowed(&req).await?;
         let event_rx = {
             let s = self.sandbox.lock().await;
             s.event_rx.clone()
@@ -1386,11 +1302,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn get_volume_stats(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: VolumeStatsRequest,
     ) -> ttrpc::Result<VolumeStatsResponse> {
-        trace_rpc_call!(ctx, "get_volume_stats", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "get_volume_stats");
 
         info!(sl(), "get volume stats!");
         let mut resp = VolumeStatsResponse::new();
@@ -1421,11 +1336,10 @@ impl agent_ttrpc::AgentService for AgentService {
 
     async fn resize_volume(
         &self,
-        ctx: &TtrpcContext,
-        req: ResizeVolumeRequest,
+        _ctx: &TtrpcContext,
+        _req: ResizeVolumeRequest,
     ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "resize_volume", req);
-        is_allowed(&req).await?;
+        info!(sl(), "rpc call from shim to agent: {}", "resize_volume");
 
         Err(ttrpc_error(
             ttrpc::Code::UNIMPLEMENTED,
@@ -1433,26 +1347,15 @@ impl agent_ttrpc::AgentService for AgentService {
         ))
     }
 
-    #[cfg(feature = "agent-policy")]
-    async fn set_policy(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::SetPolicyRequest,
-    ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "set_policy", req);
-
-        do_set_policy(&req).await?;
-
-        Ok(Empty::new())
-    }
-
     async fn get_diagnostic_data(
         &self,
-        ctx: &TtrpcContext,
+        _ctx: &TtrpcContext,
         req: protocols::agent::GetDiagnosticDataRequest,
     ) -> ttrpc::Result<protocols::agent::GetDiagnosticDataResponse> {
-        trace_rpc_call!(ctx, "get_diagnostic_data", req);
-        is_allowed(&req).await?;
+        info!(
+            sl(),
+            "rpc call from shim to agent: {}", "get_diagnostic_data"
+        );
 
         match req.log_type.as_str() {
             "termination_log" => self
@@ -1711,15 +1614,6 @@ async fn remove_container_resources(sandbox: &mut Sandbox, cid: &str) -> Result<
                 err
             );
         }
-    }
-
-    // Cleanup dm-verity devices for this container (after all mounts are unmounted)
-    if let Some(verity_devices) = sandbox.container_verity_devices.remove(cid) {
-        #[cfg(feature = "devicemapper")]
-        if !verity_devices.is_empty() {
-            cleanup_dmverity_devices(&verity_devices, &sandbox.logger);
-        }
-        let _ = verity_devices;
     }
 
     sandbox.container_mounts.remove(cid);
@@ -2006,155 +1900,6 @@ pub fn setup_bundle(cid: &str, spec: &mut Spec) -> Result<PathBuf> {
     Ok(olddir)
 }
 
-fn is_sealed_secret_path(source_path: &str) -> bool {
-    // Base path to check
-    let base_path = "/run/kata-containers/shared/containers";
-    // Paths to exclude
-    let excluded_suffixes = [
-        "resolv.conf",
-        "termination-log",
-        "hostname",
-        "hosts",
-        "serviceaccount",
-    ];
-
-    // Ensure the path starts with the base path and does not end with any excluded suffix
-    source_path.starts_with(base_path)
-        && !excluded_suffixes
-            .iter()
-            .any(|suffix| source_path.ends_with(suffix))
-}
-
-async fn cdh_handler_trusted_storage(oci: &mut Spec) -> Result<()> {
-    let linux = oci
-        .linux()
-        .as_ref()
-        .ok_or_else(|| anyhow!("Spec didn't contain linux field"))?;
-
-    if let Some(devices) = linux.devices() {
-        for specdev in devices.iter() {
-            if specdev.path().as_path().to_str() == Some(TRUSTED_IMAGE_STORAGE_DEVICE) {
-                let dev_major_minor = format!("{}:{}", specdev.major(), specdev.minor());
-                cdh_secure_mount(
-                    "block-device",
-                    &dev_major_minor,
-                    "luks2",
-                    KATA_IMAGE_WORK_DIR,
-                    "-E lazy_journal_init",
-                )
-                .await?;
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) async fn cdh_secure_mount(
-    device_type: &str,
-    device_id: &str,
-    encrypt_type: &str,
-    mount_point: &str,
-    mkfs_opts: &str,
-) -> Result<()> {
-    if !confidential_data_hub::is_cdh_client_initialized() {
-        return Ok(());
-    }
-
-    let integrity = AGENT_CONFIG.secure_storage_integrity.to_string();
-
-    info!(
-        sl(),
-        "cdh_secure_mount: device_type {}, device_id {}, encrypt_type {}, integrity {}, mkfs_opts {}",
-        device_type,
-        device_id,
-        encrypt_type,
-        integrity,
-        mkfs_opts
-    );
-
-    let options = std::collections::HashMap::from([
-        ("deviceId".to_string(), device_id.to_string()),
-        ("sourceType".to_string(), "empty".to_string()),
-        ("targetType".to_string(), "fileSystem".to_string()),
-        ("filesystemType".to_string(), "ext4".to_string()),
-        ("mkfsOpts".to_string(), mkfs_opts.to_string()),
-        ("encryptionType".to_string(), encrypt_type.to_string()),
-        ("dataIntegrity".to_string(), integrity),
-    ]);
-
-    std::fs::create_dir_all(mount_point).inspect_err(|e| {
-        error!(
-            sl(),
-            "Failed to create mount point directory {}: {:?}", mount_point, e
-        );
-    })?;
-
-    confidential_data_hub::secure_mount(device_type, &options, vec![], mount_point).await?;
-
-    Ok(())
-}
-
-async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
-    if !confidential_data_hub::is_cdh_client_initialized() {
-        return Ok(());
-    }
-    let process = oci
-        .process_mut()
-        .as_mut()
-        .ok_or_else(|| anyhow!("Spec didn't contain process field"))?;
-    if let Some(envs) = process.env_mut().as_mut() {
-        for env in envs.iter_mut() {
-            match confidential_data_hub::unseal_env(env).await {
-                Ok(unsealed_env) => *env = unsealed_env.to_string(),
-                Err(e) => {
-                    warn!(sl(), "Failed to unseal secret: {}", e)
-                }
-            }
-        }
-    }
-
-    let mounts = oci
-        .mounts_mut()
-        .as_mut()
-        .ok_or_else(|| anyhow!("Spec didn't contain mounts field"))?;
-
-    for m in mounts.iter_mut() {
-        let Some(source_path) = m.source().as_ref().and_then(|p| p.to_str()) else {
-            warn!(sl(), "Mount source is None or invalid");
-            continue;
-        };
-
-        // Check if source_path starts with "/run/kata-containers/shared/containers"
-        // For a volume mount path /mydir,
-        // the secret file path will be like this under the /run/kata-containers/shared/containers dir
-        // a128482812bad768f404e063f225decd425fc94a673aec4add45a9caa1122ccb-75490e32e51da3ff-mydir
-        // We can ignore few paths like: resolv.conf, termination-log, hostname,hosts,serviceaccount
-        if is_sealed_secret_path(source_path) {
-            debug!(
-                sl(),
-                "Calling unseal_file for - source: {:?} destination: {:?}",
-                source_path,
-                m.destination()
-            );
-            // Call unseal_file. This function checks the files under the source_path
-            // for the sealed secret header and unseal it if the header is present.
-            // This is suboptimal as we are going through every file under the source_path.
-            // But currently there is no quick way to determine which volume-mount is referring
-            // to a sealed secret without reading the file.
-            // And relying on file naming heuristic is inflexible. So we are going with this approach.
-            if let Err(e) = confidential_data_hub::unseal_file(source_path).await {
-                warn!(
-                    sl(),
-                    "Failed to unseal file: {:?}, Error: {:?}", source_path, e
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(dead_code)]
 mod tests {
@@ -2322,7 +2067,6 @@ mod tests {
         reject!(add_swap);
         reject!(add_swap_path);
         reject!(resize_volume);
-        #[cfg(not(feature = "agent-policy"))]
         reject!(set_policy);
     }
 
@@ -2353,6 +2097,103 @@ mod tests {
             assert!(!service.sandbox.lock().await.running);
         }
         validate_sandbox_features(&Default::default()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn minimal_services_reject_removed_io_and_storage_before_locking() {
+        let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
+        let service = AgentService {
+            sandbox: Arc::new(Mutex::new(sandbox)),
+            init_mode: true,
+        };
+        let ctx = mk_ttrpc_context();
+        let _guard = service.sandbox.lock().await;
+        for ports in [(1, 0, 0), (0, 1026, 0), (0, 0, 1)] {
+            let create = protocols::agent::CreateContainerRequest {
+                stdin_port: ports.0,
+                stdout_port: ports.1,
+                stderr_port: ports.2,
+                ..Default::default()
+            };
+            let exec = protocols::agent::ExecProcessRequest {
+                stdin_port: ports.0,
+                stdout_port: ports.1,
+                stderr_port: ports.2,
+                ..Default::default()
+            };
+            for result in [
+                timeout(
+                    Duration::from_secs(1),
+                    service.create_container(&ctx, create),
+                )
+                .await
+                .unwrap(),
+                timeout(Duration::from_secs(1), service.exec_process(&ctx, exec))
+                    .await
+                    .unwrap(),
+            ] {
+                match result.unwrap_err() {
+                    ttrpc::Error::RpcStatus(status) => {
+                        assert_eq!(status.code(), ttrpc::Code::INVALID_ARGUMENT)
+                    }
+                    e => panic!("unexpected error: {:?}", e),
+                }
+            }
+        }
+        for storage in [
+            protocols::agent::Storage {
+                driver: "image_guest_pull".into(),
+                ..Default::default()
+            },
+            protocols::agent::Storage {
+                driver: "mmioblk".into(),
+                driver_options: vec!["encryption_key=ephemeral".into()],
+                ..Default::default()
+            },
+            protocols::agent::Storage {
+                driver: "mmioblk".into(),
+                driver_options: vec!["unknown=true".into()],
+                ..Default::default()
+            },
+        ] {
+            // A valid first item must not be mounted before the invalid second is checked.
+            let storages = vec![
+                protocols::agent::Storage {
+                    driver: "local".into(),
+                    ..Default::default()
+                },
+                storage,
+            ];
+            let create = protocols::agent::CreateContainerRequest {
+                storages: storages.clone(),
+                ..Default::default()
+            };
+            let sandbox = protocols::agent::CreateSandboxRequest {
+                storages,
+                ..Default::default()
+            };
+            for result in [
+                timeout(
+                    Duration::from_secs(1),
+                    service.create_container(&ctx, create),
+                )
+                .await
+                .unwrap(),
+                timeout(
+                    Duration::from_secs(1),
+                    service.create_sandbox(&ctx, sandbox),
+                )
+                .await
+                .unwrap(),
+            ] {
+                match result.unwrap_err() {
+                    ttrpc::Error::RpcStatus(status) => {
+                        assert_eq!(status.code(), ttrpc::Code::INVALID_ARGUMENT)
+                    }
+                    e => panic!("unexpected error: {:?}", e),
+                }
+            }
+        }
     }
 
     fn create_dummy_opts() -> CreateOpts {
@@ -2568,7 +2409,6 @@ mod tests {
                     &exec_process_id.to_string(),
                     false,
                     1,
-                    None,
                 )
                 .unwrap();
 
@@ -3054,56 +2894,6 @@ OtherField:other
 
         assert_eq!(stats.used, 3);
         assert_eq!(stats.available, available - 2);
-    }
-
-    #[tokio::test]
-    async fn test_is_sealed_secret_path() {
-        #[derive(Debug)]
-        struct TestData<'a> {
-            source_path: &'a str,
-            result: bool,
-        }
-
-        let tests = &[
-            TestData {
-                source_path: "/run/kata-containers/shared/containers/somefile",
-                result: true,
-            },
-            TestData {
-                source_path: "/run/kata-containers/shared/containers/a128482812bad768f404e063f225decd425fc94a673aec4add45a9caa1122ccb-75490e32e51da3ff-resolv.conf",
-                result: false,
-            },
-            TestData {
-                source_path: "/run/kata-containers/shared/containers/a128482812bad768f404e063f225decd425fc94a673aec4add45a9caa1122ccb-75490e32e51da3ff-termination-log",
-                result: false,
-            },
-            TestData {
-                source_path: "/run/kata-containers/shared/containers/a128482812bad768f404e063f225decd425fc94a673aec4add45a9caa1122ccb-75490e32e51da3ff-hostname",
-                result: false,
-            },
-            TestData {
-                source_path: "/run/kata-containers/shared/containers/a128482812bad768f404e063f225decd425fc94a673aec4add45a9caa1122ccb-75490e32e51da3ff-hosts",
-                result: false,
-            },
-            TestData {
-                source_path: "/run/kata-containers/shared/containers/a128482812bad768f404e063f225decd425fc94a673aec4add45a9caa1122ccb-75490e32e51da3ff-serviceaccount",
-                result: false,
-            },
-            TestData {
-                source_path: "/run/kata-containers/shared/containers/a128482812bad768f404e063f225decd425fc94a673aec4add45a9caa1122ccb-75490e32e51da3ff-mysecret",
-                result: true,
-            },
-            TestData {
-                source_path: "/some/other/path",
-                result: false,
-            },
-        ];
-
-        for (i, d) in tests.iter().enumerate() {
-            let msg = format!("test[{i}]: {d:?}");
-            let result = is_sealed_secret_path(d.source_path);
-            assert_eq!(d.result, result, "{msg}");
-        }
     }
 
     #[tokio::test]

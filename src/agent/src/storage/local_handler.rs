@@ -14,19 +14,16 @@ use kata_types::device::DRIVER_LOCAL_TYPE;
 use kata_types::mount::{StorageDevice, KATA_MOUNT_OPTION_FS_GID};
 use nix::unistd::Gid;
 use protocols::agent::Storage;
-use tracing::instrument;
 
 #[derive(Debug)]
 pub struct LocalHandler {}
 
 #[async_trait::async_trait]
 impl StorageHandler for LocalHandler {
-    #[instrument]
     fn driver_types(&self) -> &[&str] {
         &[DRIVER_LOCAL_TYPE]
     }
 
-    #[instrument]
     async fn create_device(
         &self,
         storage: Storage,

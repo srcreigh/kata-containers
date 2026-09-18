@@ -18,7 +18,6 @@ use protocols::agent::Storage;
 use protocols::types::FSGroupChangePolicy;
 use slog::Logger;
 use tokio::sync::Mutex;
-use tracing::instrument;
 
 use self::block_handler::VirtioBlkMmioHandler;
 use self::ephemeral_handler::EphemeralHandler;
@@ -176,23 +175,35 @@ async fn update_storage_device(
 // associated operations such as waiting for the device to show up, and mount
 // it to a specific location, according to the type of handler chosen, and for
 // each storage.
-#[instrument]
+
+// Validate the whole request before mounting or registering any storage.
+pub fn validate_storages(storages: &[Storage]) -> Result<()> {
+    for storage in storages {
+        anyhow::ensure!(
+            STORAGE_HANDLERS.handler(&storage.driver).is_some(),
+            "kata-fc: unsupported storage driver {}",
+            storage.driver
+        );
+        anyhow::ensure!(
+            storage.driver_options.iter().all(|option| storage.driver
+                == kata_types::device::DRIVER_BLK_MMIO_TYPE
+                && option == kata_types::mount::KATA_BLOCK_VOLUME_CREATE_FS),
+            "kata-fc: unsupported storage driver options"
+        );
+    }
+    Ok(())
+}
+
 pub async fn add_storages(
     logger: Logger,
     storages: Vec<Storage>,
     sandbox: &Arc<Mutex<Sandbox>>,
     cid: Option<String>,
 ) -> Result<Vec<String>> {
+    validate_storages(&storages)?;
     let mut mount_list = Vec::new();
 
     for storage in &storages {
-        // Reject before registering state, including requests for already-mounted paths.
-        if STORAGE_HANDLERS.handler(&storage.driver).is_none() {
-            return Err(anyhow!(
-                "kata-fc-minimal: unsupported storage driver {}",
-                storage.driver
-            ));
-        }
         // Standard storage handling
         let path = storage.mount_point.clone();
         let state = sandbox
@@ -254,7 +265,6 @@ pub(crate) fn new_device(path: String) -> Result<Arc<dyn StorageDevice>> {
     Ok(Arc::new(device))
 }
 
-#[instrument]
 pub(crate) fn common_storage_handler(logger: &Logger, storage: &Storage) -> Result<String> {
     mount_storage(logger, storage)?;
     set_ownership(logger, storage)?;
@@ -262,7 +272,7 @@ pub(crate) fn common_storage_handler(logger: &Logger, storage: &Storage) -> Resu
 }
 
 // mount_storage performs the mount described by the storage structure.
-#[instrument]
+
 fn mount_storage(logger: &Logger, storage: &Storage) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "mount"));
 
@@ -301,7 +311,6 @@ fn mount_storage(logger: &Logger, storage: &Storage) -> Result<()> {
     )
 }
 
-#[instrument]
 pub(crate) fn parse_options(option_list: &[String]) -> HashMap<String, String> {
     let mut options = HashMap::new();
     for opt in option_list {
@@ -313,7 +322,6 @@ pub(crate) fn parse_options(option_list: &[String]) -> HashMap<String, String> {
     options
 }
 
-#[instrument]
 pub fn set_ownership(logger: &Logger, storage: &Storage) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "mount", "fn" => "set_ownership"));
 
@@ -364,7 +372,6 @@ pub fn set_ownership(logger: &Logger, storage: &Storage) -> Result<()> {
     )
 }
 
-#[instrument]
 pub fn recursive_ownership_change(
     path: &Path,
     uid: Option<Uid>,

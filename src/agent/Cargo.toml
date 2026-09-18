@@ -19,9 +19,7 @@ scopeguard.workspace = true
 thiserror.workspace = true
 regex.workspace = true
 serial_test.workspace = true
-url.workspace = true
 derivative.workspace = true
-const_format.workspace = true
 
 # Async helpers
 async-trait.workspace = true
@@ -46,7 +44,6 @@ slog-term.workspace = true
 slog-stdlog.workspace = true
 log.workspace = true
 
-cfg-if.workspace = true
 prometheus.workspace = true
 procfs.workspace = true
 
@@ -54,22 +51,13 @@ anyhow.workspace = true
 
 cgroups.workspace = true
 
-# Tracing
-tracing.workspace = true
-tracing-subscriber.workspace = true
-# TODO: bump tracing-opentelemetry to sync with version in workspace
-tracing-opentelemetry = "0.17.0"
-opentelemetry.workspace = true
 
 # Configuration
 serde.workspace = true
 toml.workspace = true
 clap.workspace = true
-strum.workspace = true
-strum_macros.workspace = true
 
 # Local dependencies
-kata-agent-policy = { workspace = true, optional = true }
 rustjail.workspace = true
 protocols = { workspace = true, features = ["async", "with-serde"] }
 kata-sys-util.workspace = true
@@ -79,17 +67,9 @@ safe-path.workspace = true
 # Note: this crate sets the slog 'max_*' features which allows the log level
 # to be modified at runtime.
 logging.workspace = true
-vsock-exporter.workspace = true
 pathrs.workspace = true
 
-# Initdata
-base64 = { workspace = true }
-sha2 = { workspace = true }
-async-compression = { version = "0.4.22", features = ["tokio", "gzip"] }
 
-
-[target.'cfg(target_arch = "s390x")'.dependencies]
-pv_core = { git = "https://github.com/ibm-s390-linux/s390-tools", rev = "4942504a9a2977d49989a5e5b7c1c8e07dc0fa41", package = "s390_pv_core" }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -103,6 +83,3 @@ lto = true
 
 [features]
 seccomp = ["rustjail/seccomp"]
-agent-policy = ["kata-agent-policy"]
-init-data = []
-devicemapper = ["kata-types/devicemapper"]

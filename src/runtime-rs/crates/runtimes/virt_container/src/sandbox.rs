@@ -7,7 +7,7 @@
 use crate::health_check::HealthCheck;
 use crate::oom::CrioOomNotifier;
 use agent::kata::KataAgent;
-use agent::types::{KernelModule, SetPolicyRequest};
+use agent::types::KernelModule;
 use agent::{self, Agent, GetGuestDetailsRequest, VolumeStatsRequest};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -29,35 +29,23 @@ use containerd_shim_protos::events::task::{TaskExit, TaskOOM};
 use hypervisor::{firecracker::Firecracker, HYPERVISOR_FIRECRACKER};
 use hypervisor::{BlockConfigModern, Hypervisor};
 
+use hypervisor::PortDeviceConfig;
 use hypervisor::{
-    utils::{
-        get_hvsock_path, remove_vmm_user_runtime_dir, uses_native_ccw_bus, vmm_user_runtime_dir,
-    },
+    utils::{get_hvsock_path, remove_vmm_user_runtime_dir, vmm_user_runtime_dir},
     HybridVsockConfig, DEFAULT_GUEST_VSOCK_CID,
 };
-use hypervisor::{BlockDeviceAio, PortDeviceConfig};
-use hypervisor::{ProtectionDeviceConfig, SevSnpConfig, TdxConfig};
 use kata_sys_util::hooks::HookStates;
-use kata_sys_util::protection::{available_guest_protection, GuestProtection};
 use kata_sys_util::spec::load_oci_spec;
 use kata_types::capabilities::CapabilityBits;
-use kata_types::config::hypervisor::Hypervisor as HypervisorConfig;
 
-use kata_types::config::hypervisor::{VIRTIO_BLK_CCW, VIRTIO_BLK_PCI};
 use kata_types::config::{hypervisor::Factory, TomlConfig};
-use kata_types::initdata::{calculate_initdata_digest, ProtectedPlatform};
 use oci_spec::runtime as oci;
 use persist::{self, sandbox_persist::Persist};
 use protobuf::SpecialFields;
-use resource::coco_data::initdata::{
-    kata_shared_init_data_path, InitDataConfig, KATA_INIT_DATA_IMAGE,
-};
-use resource::coco_data::initdata_block;
 use resource::manager::ManagerArgs;
 use resource::network::{dan_config_path, DanNetworkConfig, NetworkConfig, NetworkWithNetNsConfig};
 use resource::{ResourceConfig, ResourceManager};
 use runtime_spec as spec;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 use strum::Display;
@@ -248,37 +236,6 @@ impl VirtSandbox {
             resource_configs.push(vm_rootfs);
         }
 
-        // prepare extra extension image device configs (e.g. CoCo extension)
-        let extra_configs = self
-            .prepare_guest_extension_images_config()
-            .await
-            .context("failed to prepare extra images device config")?;
-        for block_config in extra_configs {
-            resource_configs.push(ResourceConfig::GuestExtensionImage(block_config));
-        }
-
-        // prepare protection device config
-        let init_data = if let Some(initdata) = self
-            .prepare_initdata_device_config(&self.hypervisor.hypervisor_config().await)
-            .await
-            .context("failed to prepare initdata device config")?
-        {
-            resource_configs.push(ResourceConfig::InitData(initdata.0));
-
-            Some(initdata.1)
-        } else {
-            None
-        };
-
-        // prepare protection device config
-        if let Some(protection_dev_config) = self
-            .prepare_protection_device_config(&self.hypervisor.hypervisor_config().await, init_data)
-            .await
-            .context("failed to prepare protection device config")?
-        {
-            resource_configs.push(ResourceConfig::Protection(protection_dev_config));
-        }
-
         // prepare pcie port device config
         if let Some(port_dev_config) = self.prepare_pcie_port_devices().await {
             resource_configs.push(ResourceConfig::PortDevice(port_dev_config));
@@ -423,22 +380,13 @@ impl VirtSandbox {
 
     async fn prepare_rootfs_config(&self) -> Result<Option<BlockConfigModern>> {
         let boot_info = self.hypervisor.hypervisor_config().await.boot_info;
-        let security_info = self.hypervisor.hypervisor_config().await.security_info;
 
         if !boot_info.initrd.is_empty() {
             return Ok(None);
         }
 
         if boot_info.image.is_empty() {
-            let is_remote_hypervisor = Arc::clone(&self.resource_manager.config().await)
-                .runtime
-                .hypervisor_name
-                == "remote";
-            if (uses_native_ccw_bus() && security_info.confidential_guest) || is_remote_hypervisor {
-                return Ok(None);
-            } else {
-                return Err(anyhow!("both of image and initrd isn't set"));
-            }
+            return Err(anyhow!("both image and initrd are unset"));
         }
 
         Ok(Some(BlockConfigModern {
@@ -449,191 +397,12 @@ impl VirtSandbox {
         }))
     }
 
-    async fn prepare_guest_extension_images_config(&self) -> Result<Vec<BlockConfigModern>> {
-        let hv_config = self.hypervisor.hypervisor_config().await;
-        let mut configs = Vec::new();
-
-        // Extension images must be cold-plugged as virtio-blk, because the
-        // guest discovers each extension by its deterministic serial
-        // (extension-<name>), and only virtio-blk devices carry that serial.
-        // We therefore always enforce a virtio-blk transport here (the
-        // architecture's virtio-blk-ccw on s390x, virtio-blk-pci elsewhere)
-        // rather than reusing vm_rootfs_driver or block_device_driver: those
-        // may resolve to a non-virtio-blk transport such as virtio-pmem
-        // (NVDIMM, no serial) or virtio-scsi, which would leave the extension
-        // undiscoverable and its mount unit would fail closed.
-        let block_driver = if uses_native_ccw_bus() {
-            VIRTIO_BLK_CCW.to_string()
-        } else {
-            VIRTIO_BLK_PCI.to_string()
-        };
-        for extra in &hv_config.guest_extension_images {
-            if extra.path.is_empty() {
-                continue;
-            }
-            configs.push(BlockConfigModern {
-                path_on_host: extra.path.clone(),
-                is_readonly: true,
-                driver_option: block_driver.clone(),
-                serial_override: format!("extension-{}", extra.name),
-                ..Default::default()
-            });
-        }
-
-        Ok(configs)
-    }
-
-    async fn set_agent_policy(&self) -> Result<()> {
-        // TODO: Exclude policy-related items from the annotations.
-        let toml_config = self.resource_manager.config().await;
-        if let Some(agent_config) = toml_config.agent.get(&toml_config.runtime.agent_name) {
-            // If a Policy has been specified, send it to the agent.
-            if !agent_config.policy.is_empty() {
-                info!(
-                    sl!(),
-                    "Setting Agent Policy with {:?}.", &agent_config.policy
-                );
-                self.agent
-                    .set_policy(SetPolicyRequest {
-                        policy: agent_config.policy.clone(),
-                    })
-                    .await
-                    .context("sandbox: set policy failed")?;
-            }
-        }
-
-        Ok(())
-    }
-
     async fn prepare_vm_socket_config(&self) -> Result<ResourceConfig> {
         // This fork has exactly one VMM and one agent transport.
         Ok(ResourceConfig::HybridVsock(HybridVsockConfig {
             guest_cid: DEFAULT_GUEST_VSOCK_CID,
             uds_path: get_hvsock_path(&self.sid),
         }))
-    }
-
-    async fn prepare_protection_device_config(
-        &self,
-        hypervisor_config: &HypervisorConfig,
-        init_data: Option<String>,
-    ) -> Result<Option<ProtectionDeviceConfig>> {
-        // No guest protection requested: skip host detection and run without
-        // a protection device (also avoids failing on hosts that advertise a
-        // protection they cannot use, e.g. SEV without SEV-SNP).
-        if !hypervisor_config.security_info.confidential_guest {
-            return Ok(None);
-        }
-
-        let available_protection = available_guest_protection()?;
-        info!(
-            sl!(),
-            "sandbox: available protection: {:?}", available_protection
-        );
-
-        match available_protection {
-            GuestProtection::Sev(details) => {
-                if hypervisor_config.boot_info.firmware.is_empty() {
-                    return Err(anyhow!("SEV protection requires a path to firmaware"));
-                }
-
-                Ok(Some(ProtectionDeviceConfig::SevSnp(SevSnpConfig {
-                    is_snp: false,
-                    cbitpos: details.cbitpos,
-                    phys_addr_reduction: details.phys_addr_reduction,
-                    firmware: hypervisor_config.boot_info.firmware.clone(),
-                    host_data: None,
-                })))
-            }
-            GuestProtection::Snp(details) => {
-                if hypervisor_config.boot_info.firmware.is_empty() {
-                    return Err(anyhow!("SEV-SNP protection requires a path to firmaware"));
-                }
-
-                // If we got here SEV-SNP is available.  However, if
-                // 'sev_snp_guest' is 'false' in the configuration file we
-                // still have to revert to SEV.
-                let is_snp = hypervisor_config.security_info.sev_snp_guest;
-                if !is_snp {
-                    info!(sl!(), "reverting to SEV even though SEV-SNP is available as requested by 'sev_snp_guest'");
-                }
-
-                Ok(Some(ProtectionDeviceConfig::SevSnp(SevSnpConfig {
-                    is_snp,
-                    cbitpos: details.cbitpos,
-                    phys_addr_reduction: details.phys_addr_reduction,
-                    firmware: hypervisor_config.boot_info.firmware.clone(),
-                    host_data: init_data,
-                })))
-            }
-            GuestProtection::Se => {
-                Ok(Some(ProtectionDeviceConfig::Se))
-            }
-            GuestProtection::Tdx => {
-                Ok(Some(ProtectionDeviceConfig::Tdx(TdxConfig {
-                    id: "tdx".to_owned(),
-                    firmware: hypervisor_config.boot_info.firmware.clone(),
-                    qgs_port: hypervisor_config.security_info.qgs_port,
-                    mrconfigid: init_data,
-                    debug: false,
-                })))
-            },
-            GuestProtection::NoProtection => Ok(None),
-            _ => Err(anyhow!("confidential_guest requested by configuration but no supported protection available"))
-        }
-    }
-
-    async fn prepare_initdata_device_config(
-        &self,
-        hypervisor_config: &HypervisorConfig,
-    ) -> Result<Option<InitDataConfig>> {
-        let initdata = hypervisor_config.security_info.initdata.clone();
-        if initdata.is_empty() {
-            return Ok(None);
-        }
-        debug!(sl!(), "Init Data Content String: {:?}", &initdata);
-        let available_protection = available_guest_protection()?;
-        info!(
-            sl!(),
-            "sandbox: available protection: {:?}", available_protection
-        );
-        let initdata_digest = match available_protection {
-            GuestProtection::Tdx => calculate_initdata_digest(&initdata, ProtectedPlatform::Tdx)?,
-            GuestProtection::Snp(_details) => {
-                calculate_initdata_digest(&initdata, ProtectedPlatform::Snp)?
-            }
-            GuestProtection::Se => calculate_initdata_digest(&initdata, ProtectedPlatform::Se)?,
-            GuestProtection::NoProtection => {
-                calculate_initdata_digest(&initdata, ProtectedPlatform::NoProtection)?
-            }
-            // TODO: there's more `GuestProtection` types to be supported.
-            _ => return Ok(None),
-        };
-        info!(sl!(), "initdata  digest {:?}", &initdata_digest);
-
-        // initdata within compressed rawblock
-        let image_path = Path::new(kata_shared_init_data_path().as_str())
-            .join(&self.sid)
-            .join(KATA_INIT_DATA_IMAGE);
-        initdata_block::push_data(&image_path, &initdata)?;
-        info!(
-            sl!(),
-            "initdata push data into compressed block: {:?}", &image_path
-        );
-        let block_driver = &hypervisor_config.blockdev_info.block_device_driver;
-        let block_config = BlockConfigModern {
-            path_on_host: image_path.display().to_string(),
-            is_readonly: true,
-            driver_option: block_driver.clone(),
-            blkdev_aio: BlockDeviceAio::Native,
-            num_queues: hypervisor_config.blockdev_info.num_queues,
-            queue_size: hypervisor_config.blockdev_info.queue_size,
-            ..Default::default()
-        };
-        let initdata_config = InitDataConfig(block_config, initdata_digest);
-        info!(sl!(), "initdata config: {:?}", initdata_config.clone());
-
-        Ok(Some(initdata_config))
     }
 
     fn has_prestart_hooks(
@@ -852,7 +621,6 @@ impl Sandbox for VirtSandbox {
             .start(&address)
             .await
             .context(format!("connect to address {:?}", &address))?;
-        self.set_agent_policy().await.context("set agent policy")?;
 
         self.resource_manager
             .setup_after_start_vm()
@@ -1238,22 +1006,8 @@ impl Sandbox for VirtSandbox {
         self.hypervisor.get_hypervisor_metrics().await
     }
 
-    async fn set_policy(&self, policy: &str) -> Result<()> {
-        if policy.is_empty() {
-            debug!(sl!(), "sb: set_policy skipped without policy");
-            return Ok(());
-        }
-
-        info!(sl!(), "sb: set_policy invoked");
-        let policy_req = SetPolicyRequest {
-            policy: policy.to_string(),
-        };
-        self.agent
-            .set_policy(policy_req)
-            .await
-            .context("sandbox: failed to set policy")?;
-
-        Ok(())
+    async fn set_policy(&self, _policy: &str) -> Result<()> {
+        Err(anyhow!("kata-fc: agent policy is unsupported"))
     }
 }
 

@@ -19,8 +19,6 @@ members = [
   # kata-agent
   "src/agent",
   "src/agent/rustjail",
-  "src/agent/policy",
-  "src/agent/vsock-exporter",
 
   # Dragonball
   "src/dragonball/crates/dbs_utils",
@@ -99,9 +97,7 @@ shim-interface = { path = "src/libs/shim-interface" }
 test-utils = { path = "src/libs/test-utils" }
 
 # Local dependencies from `src/agent`
-kata-agent-policy = { path = "src/agent/policy" }
 rustjail = { path = "src/agent/rustjail" }
-vsock-exporter = { path = "src/agent/vsock-exporter" }
 
 # Outside dependencies
 actix-rt = "2.7.0"
