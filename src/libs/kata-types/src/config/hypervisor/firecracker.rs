@@ -52,6 +52,12 @@ impl ConfigPlugin for FirecrackerConfig {
     /// Adjust the configuration information after loading from configuration file.
     fn adjust_config(&self, conf: &mut TomlConfig) -> Result<()> {
         if let Some(firecracker) = conf.hypervisor.get_mut(HYPERVISOR_NAME_FIRECRACKER) {
+            if firecracker.boot_info.vm_rootfs_driver.is_empty() {
+                firecracker.boot_info.vm_rootfs_driver = super::VIRTIO_BLK_MMIO.into();
+            }
+            if firecracker.blockdev_info.block_device_driver.is_empty() {
+                firecracker.blockdev_info.block_device_driver = super::VIRTIO_BLK_MMIO.into();
+            }
             if firecracker.boot_info.kernel.is_empty() {
                 firecracker.boot_info.kernel =
                     default::DEFAULT_FIRECRACKER_GUEST_KERNEL_IMAGE.to_string();
@@ -113,5 +119,26 @@ impl ConfigPlugin for FirecrackerConfig {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod minimal_tests {
+    use super::*;
+    #[test]
+    fn boot_image_and_container_disks_default_to_mmio() {
+        let mut conf = TomlConfig::default();
+        conf.hypervisor
+            .insert("firecracker".into(), Default::default());
+        FirecrackerConfig::new().adjust_config(&mut conf).unwrap();
+        let h = conf.hypervisor.get_mut("firecracker").unwrap();
+        // Avoid filesystem lookups while exercising generic default adjustment.
+        h.boot_info.kernel.clear();
+        h.boot_info.adjust_config().unwrap();
+        assert_eq!(h.boot_info.vm_rootfs_driver, super::super::VIRTIO_BLK_MMIO);
+        assert_eq!(
+            h.blockdev_info.block_device_driver,
+            super::super::VIRTIO_BLK_MMIO
+        );
     }
 }

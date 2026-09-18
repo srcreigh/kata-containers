@@ -15,7 +15,7 @@ use crate::{
     volume::copy_volume::generate_mount_path,
 };
 use anyhow::{anyhow, Context, Result};
-use kata_sys_util::mount::{get_mount_options, get_mount_path};
+use kata_sys_util::mount::get_mount_options;
 use oci_spec::runtime as oci;
 
 use hypervisor::device::DeviceType;

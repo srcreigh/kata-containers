@@ -14,8 +14,6 @@ mod macvlan_endpoint;
 pub use macvlan_endpoint::MacVlanEndpoint;
 pub mod endpoint_persist;
 mod endpoints_test;
-mod tap_endpoint;
-pub use tap_endpoint::TapEndpoint;
 
 use anyhow::Result;
 use async_trait::async_trait;

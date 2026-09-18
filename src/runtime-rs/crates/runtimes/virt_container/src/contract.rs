@@ -52,7 +52,8 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
         "{fail}: shared host filesystems"
     );
     ensure!(
-        h.blockdev_info.block_device_driver == "virtio-blk-mmio",
+        h.blockdev_info.block_device_driver == "virtio-blk-mmio"
+            && h.boot_info.vm_rootfs_driver == "virtio-blk-mmio",
         "{fail}: only virtio-blk-mmio storage is supported"
     );
     ensure!(
@@ -124,6 +125,7 @@ mod tests {
         let mut h = kata_types::config::Hypervisor::default();
         h.jailer_path = "/opt/kata/bin/jailer".into();
         h.blockdev_info.block_device_driver = "virtio-blk-mmio".into();
+        h.boot_info.vm_rootfs_driver = "virtio-blk-mmio".into();
         c.hypervisor.insert("firecracker".into(), h);
         c.agent.insert("kata".into(), Default::default());
         c
@@ -137,6 +139,13 @@ mod tests {
         let mutations: Vec<fn(&mut TomlConfig)> = vec![
             |c| c.runtime.hypervisor_name = "qemu".into(),
             |c| c.runtime.name = "linux_container".into(),
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .boot_info
+                    .vm_rootfs_driver = "virtio-blk-pci".into()
+            },
             |c| c.runtime.static_sandbox_resource_mgmt = false,
             |c| c.runtime.disable_new_netns = true,
             |c| c.runtime.experimental.push("force_guest_pull".into()),

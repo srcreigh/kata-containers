@@ -5,9 +5,6 @@
 //
 
 #[macro_use]
-extern crate lazy_static;
-
-#[macro_use]
 extern crate slog;
 
 logging::logger_with_subsystem!(sl, "resource");

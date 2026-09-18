@@ -8,7 +8,6 @@ pub(crate) mod address;
 pub(crate) mod link;
 
 use anyhow::{anyhow, Result};
-use rand::{rng, Rng};
 
 pub(crate) fn parse_mac(s: &str) -> Option<hypervisor::Address> {
     let v: Vec<_> = s.split(':').collect();
@@ -32,17 +31,6 @@ pub(crate) fn get_mac_addr(b: &[u8]) -> Result<String> {
             b[0], b[1], b[2], b[3], b[4], b[5]
         ))
     }
-}
-
-/// Generate a private mac address.
-/// The range of private mac addressess is
-/// x2-xx-xx-xx-xx-xx, x6-xx-xx-xx-xx-xx, xA-xx-xx-xx-xx-xx, xE-xx-xx-xx-xx-xx.
-pub(crate) fn generate_private_mac_addr() -> String {
-    let mut addr: [u8; 6] = [0, 0, 0, 0, 0, 0];
-    rng().fill_bytes(&mut addr);
-    addr[0] = (addr[0] | 2) & 0xfe;
-    // This is a safty unwrap since the len of addr is 6
-    get_mac_addr(&addr).unwrap()
 }
 
 #[cfg(test)]
@@ -75,13 +63,4 @@ mod tests {
         assert_eq!(expected_addr.0, addr.unwrap().0);
     }
 
-    #[test]
-    fn test_generate_private_mac_addr() {
-        let addr1 = generate_private_mac_addr();
-        let addr2 = generate_private_mac_addr();
-        assert_ne!(addr1, addr2);
-        let ch1 = addr1.chars().nth(1).unwrap();
-        let is_private = ch1 == '2' || ch1 == '6' || ch1 == 'a' || ch1 == 'e';
-        assert!(is_private)
-    }
 }

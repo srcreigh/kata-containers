@@ -3747,7 +3747,6 @@ dependencies = [
  "inotify 0.11.1",
  "kata-sys-util",
  "kata-types",
- "lazy_static",
  "libc",
  "logging",
  "netlink-packet-core",
