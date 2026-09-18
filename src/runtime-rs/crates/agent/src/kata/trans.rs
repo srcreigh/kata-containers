@@ -13,20 +13,19 @@ use protocols::{
 
 use crate::{
     types::{
-        ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, AddSwapPathRequest, AddSwapRequest,
-        AgentDetails, BlkioStats, BlkioStatsEntry, CgroupStats, CheckRequest, CloseStdinRequest,
-        ContainerID, CopyFileRequest, CpuStats, CpuUsage, CreateContainerRequest,
-        CreateSandboxRequest, Device, Empty, ExecProcessRequest, FSGroup, FSGroupChangePolicy,
-        GetIPTablesRequest, GetIPTablesResponse, GuestDetailsResponse, HealthCheckResponse,
-        HugetlbStats, IPAddress, IPFamily, Interface, Interfaces, KernelModule,
-        MemHotplugByProbeRequest, MemoryData, MemoryStats, MetricsResponse, NetworkStats,
-        OnlineCPUMemRequest, PidsStats, ReadStreamRequest, ReadStreamResponse,
-        RemoveContainerRequest, ReseedRandomDevRequest, ResizeVolumeRequest, Route, Routes,
-        SetGuestDateTimeRequest, SetIPTablesRequest, SetIPTablesResponse, SharedMount,
-        SignalProcessRequest, StatsContainerResponse, Storage, StringUser, ThrottlingData,
-        TtyWinResizeRequest, UpdateContainerRequest, UpdateInterfaceRequest, UpdateRoutesRequest,
-        VersionCheckResponse, VolumeStatsRequest, VolumeStatsResponse, WaitProcessRequest,
-        WriteStreamRequest,
+        ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, AgentDetails, BlkioStats,
+        BlkioStatsEntry, CgroupStats, CheckRequest, CloseStdinRequest, ContainerID,
+        CopyFileRequest, CpuStats, CpuUsage, CreateContainerRequest, CreateSandboxRequest, Device,
+        Empty, ExecProcessRequest, FSGroup, FSGroupChangePolicy, GetIPTablesRequest,
+        GetIPTablesResponse, GuestDetailsResponse, HealthCheckResponse, HugetlbStats, IPAddress,
+        IPFamily, Interface, Interfaces, KernelModule, MemHotplugByProbeRequest, MemoryData,
+        MemoryStats, MetricsResponse, NetworkStats, OnlineCPUMemRequest, PidsStats,
+        ReadStreamRequest, ReadStreamResponse, RemoveContainerRequest, ReseedRandomDevRequest,
+        ResizeVolumeRequest, Route, Routes, SetGuestDateTimeRequest, SetIPTablesRequest,
+        SetIPTablesResponse, SharedMount, SignalProcessRequest, StatsContainerResponse, Storage,
+        StringUser, ThrottlingData, TtyWinResizeRequest, UpdateContainerRequest,
+        UpdateInterfaceRequest, UpdateRoutesRequest, VersionCheckResponse, VolumeStatsRequest,
+        VolumeStatsResponse, WaitProcessRequest, WriteStreamRequest,
     },
     GetDiagnosticDataRequest, GetDiagnosticDataResponse, GetGuestDetailsRequest, OomEventResponse,
     SetPolicyRequest, WaitProcessResponse, WriteStreamResponse,
@@ -901,24 +900,6 @@ impl From<ResizeVolumeRequest> for agent::ResizeVolumeRequest {
         Self {
             volume_guest_path: from.volume_guest_path,
             size: from.size,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<AddSwapRequest> for agent::AddSwapRequest {
-    fn from(from: AddSwapRequest) -> Self {
-        Self {
-            PCIPath: from.pci_path,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<AddSwapPathRequest> for agent::AddSwapPathRequest {
-    fn from(from: AddSwapPathRequest) -> Self {
-        Self {
-            path: from.path,
             ..Default::default()
         }
     }

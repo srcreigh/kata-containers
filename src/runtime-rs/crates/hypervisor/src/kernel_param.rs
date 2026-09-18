@@ -6,10 +6,7 @@
 
 use anyhow::{anyhow, Result};
 
-use crate::{
-    VM_ROOTFS_DRIVER_BLK, VM_ROOTFS_DRIVER_BLK_CCW, VM_ROOTFS_DRIVER_MMIO, VM_ROOTFS_DRIVER_PMEM,
-    VM_ROOTFS_ROOT_BLK, VM_ROOTFS_ROOT_PMEM,
-};
+use crate::{VM_ROOTFS_DRIVER_MMIO, VM_ROOTFS_ROOT_BLK};
 use kata_types::config::hypervisor::{parse_kernel_verity_params, VERITY_BLOCK_SIZE_BYTES};
 use kata_types::config::LOG_VPORT_OPTION;
 use kata_types::fs::{
@@ -145,45 +142,11 @@ impl KernelParams {
         kernel_verity_params: &str,
         rootfs_driver: &str,
         rootfs_type: &str,
-        use_dax: bool,
     ) -> Result<Self> {
         let mut params = vec![];
 
         match rootfs_driver {
-            VM_ROOTFS_DRIVER_PMEM => {
-                params.push(Param::new("root", VM_ROOTFS_ROOT_PMEM));
-                match rootfs_type {
-                    VM_ROOTFS_FILESYSTEM_EXT4 => {
-                        if use_dax {
-                            params.push(Param::new(
-                                "rootflags",
-                                "dax,data=ordered,errors=remount-ro ro",
-                            ));
-                        } else {
-                            params
-                                .push(Param::new("rootflags", "data=ordered,errors=remount-ro ro"));
-                        }
-                    }
-                    VM_ROOTFS_FILESYSTEM_XFS => {
-                        if use_dax {
-                            params.push(Param::new("rootflags", "dax ro"));
-                        } else {
-                            params.push(Param::new("rootflags", "ro"));
-                        }
-                    }
-                    VM_ROOTFS_FILESYSTEM_EROFS => {
-                        if use_dax {
-                            params.push(Param::new("rootflags", "dax ro"));
-                        } else {
-                            params.push(Param::new("rootflags", "ro"));
-                        }
-                    }
-                    _ => {
-                        return Err(anyhow!("Unsupported rootfs type {}", rootfs_type));
-                    }
-                }
-            }
-            VM_ROOTFS_DRIVER_BLK | VM_ROOTFS_DRIVER_BLK_CCW | VM_ROOTFS_DRIVER_MMIO => {
+            VM_ROOTFS_DRIVER_MMIO => {
                 params.push(Param::new("root", VM_ROOTFS_ROOT_BLK));
                 match rootfs_type {
                     VM_ROOTFS_FILESYSTEM_EXT4 => {
@@ -213,13 +176,7 @@ impl KernelParams {
             None => return Ok(params),
         };
 
-        let (root_device, hash_device) = match rootfs_driver {
-            VM_ROOTFS_DRIVER_PMEM => ("/dev/pmem0p1", "/dev/pmem0p2"),
-            VM_ROOTFS_DRIVER_BLK | VM_ROOTFS_DRIVER_BLK_CCW | VM_ROOTFS_DRIVER_MMIO => {
-                ("/dev/vda1", "/dev/vda2")
-            }
-            _ => return Err(anyhow!("Unsupported rootfs driver {}", rootfs_driver)),
-        };
+        let (root_device, hash_device) = ("/dev/vda1", "/dev/vda2");
 
         let data_sectors = (cfg.data_block_size / VERITY_BLOCK_SIZE_BYTES) * cfg.data_blocks;
         let root_flags = kernel_verity_root_flags(rootfs_type)?;
@@ -313,9 +270,6 @@ mod tests {
 
     use super::*;
 
-    use crate::{
-        VM_ROOTFS_DRIVER_BLK, VM_ROOTFS_DRIVER_PMEM, VM_ROOTFS_ROOT_BLK, VM_ROOTFS_ROOT_PMEM,
-    };
     use kata_types::fs::{
         VM_ROOTFS_FILESYSTEM_EROFS, VM_ROOTFS_FILESYSTEM_EXT4, VM_ROOTFS_FILESYSTEM_XFS,
     };
@@ -360,7 +314,6 @@ mod tests {
     struct TestData<'a> {
         rootfs_driver: &'a str,
         rootfs_type: &'a str,
-        use_dax: bool,
         expect_params: KernelParams,
         result: Result<()>,
     }
@@ -368,25 +321,10 @@ mod tests {
     #[test]
     fn test_rootfs_kernel_params() {
         let tests = &[
-            // EXT4 with DAX
+            // Supported MMIO root filesystems
             TestData {
-                rootfs_driver: VM_ROOTFS_DRIVER_PMEM,
+                rootfs_driver: VM_ROOTFS_DRIVER_MMIO,
                 rootfs_type: VM_ROOTFS_FILESYSTEM_EXT4,
-                use_dax: true,
-                expect_params: KernelParams {
-                    params: [
-                        Param::new("root", VM_ROOTFS_ROOT_PMEM),
-                        Param::new("rootflags", "dax,data=ordered,errors=remount-ro ro"),
-                        Param::new("rootfstype", VM_ROOTFS_FILESYSTEM_EXT4),
-                    ]
-                    .to_vec(),
-                },
-                result: Ok(()),
-            },
-            TestData {
-                rootfs_driver: VM_ROOTFS_DRIVER_BLK,
-                rootfs_type: VM_ROOTFS_FILESYSTEM_EXT4,
-                use_dax: true,
                 expect_params: KernelParams {
                     params: [
                         Param::new("root", VM_ROOTFS_ROOT_BLK),
@@ -397,25 +335,9 @@ mod tests {
                 },
                 result: Ok(()),
             },
-            // XFS without DAX
             TestData {
-                rootfs_driver: VM_ROOTFS_DRIVER_PMEM,
+                rootfs_driver: VM_ROOTFS_DRIVER_MMIO,
                 rootfs_type: VM_ROOTFS_FILESYSTEM_XFS,
-                use_dax: false,
-                expect_params: KernelParams {
-                    params: [
-                        Param::new("root", VM_ROOTFS_ROOT_PMEM),
-                        Param::new("rootflags", "ro"),
-                        Param::new("rootfstype", VM_ROOTFS_FILESYSTEM_XFS),
-                    ]
-                    .to_vec(),
-                },
-                result: Ok(()),
-            },
-            TestData {
-                rootfs_driver: VM_ROOTFS_DRIVER_BLK,
-                rootfs_type: VM_ROOTFS_FILESYSTEM_XFS,
-                use_dax: true,
                 expect_params: KernelParams {
                     params: [
                         Param::new("root", VM_ROOTFS_ROOT_BLK),
@@ -426,25 +348,9 @@ mod tests {
                 },
                 result: Ok(()),
             },
-            // EROFS with DAX
             TestData {
-                rootfs_driver: VM_ROOTFS_DRIVER_PMEM,
+                rootfs_driver: VM_ROOTFS_DRIVER_MMIO,
                 rootfs_type: VM_ROOTFS_FILESYSTEM_EROFS,
-                use_dax: true,
-                expect_params: KernelParams {
-                    params: [
-                        Param::new("root", VM_ROOTFS_ROOT_PMEM),
-                        Param::new("rootflags", "dax ro"),
-                        Param::new("rootfstype", VM_ROOTFS_FILESYSTEM_EROFS),
-                    ]
-                    .to_vec(),
-                },
-                result: Ok(()),
-            },
-            TestData {
-                rootfs_driver: VM_ROOTFS_DRIVER_BLK,
-                rootfs_type: VM_ROOTFS_FILESYSTEM_EROFS,
-                use_dax: true,
                 expect_params: KernelParams {
                     params: [
                         Param::new("root", VM_ROOTFS_ROOT_BLK),
@@ -459,7 +365,6 @@ mod tests {
             TestData {
                 rootfs_driver: "foo",
                 rootfs_type: VM_ROOTFS_FILESYSTEM_EXT4,
-                use_dax: true,
                 expect_params: KernelParams {
                     params: [
                         Param::new("root", VM_ROOTFS_ROOT_BLK),
@@ -472,9 +377,8 @@ mod tests {
             },
             // Unsupported rootfs type
             TestData {
-                rootfs_driver: VM_ROOTFS_DRIVER_BLK,
+                rootfs_driver: VM_ROOTFS_DRIVER_MMIO,
                 rootfs_type: "foo",
-                use_dax: true,
                 expect_params: KernelParams {
                     params: [
                         Param::new("root", VM_ROOTFS_ROOT_BLK),
@@ -489,12 +393,7 @@ mod tests {
 
         for (i, t) in tests.iter().enumerate() {
             let msg = format!("test[{i}]: {t:?}");
-            let result = KernelParams::new_rootfs_kernel_params(
-                "",
-                t.rootfs_driver,
-                t.rootfs_type,
-                t.use_dax,
-            );
+            let result = KernelParams::new_rootfs_kernel_params("", t.rootfs_driver, t.rootfs_type);
             let msg = format!("{msg}, result: {result:?}");
             if let Err(expected_err) = &t.result {
                 let expected_error = format!("{expected_err}");
@@ -508,12 +407,23 @@ mod tests {
     }
 
     #[test]
+    fn alternate_rootfs_transports_are_rejected() {
+        for driver in [
+            "virtio-blk-pci",
+            "virtio-blk-ccw",
+            "virtio-pmem",
+            "virtio-scsi",
+        ] {
+            assert!(KernelParams::new_rootfs_kernel_params("", driver, "ext4").is_err());
+        }
+    }
+
+    #[test]
     fn test_kernel_verity_params() -> Result<()> {
         let params = KernelParams::new_rootfs_kernel_params(
             "root_hash=abc,salt=def,data_blocks=1,data_block_size=4096,hash_block_size=4096",
-            VM_ROOTFS_DRIVER_BLK,
+            VM_ROOTFS_DRIVER_MMIO,
             VM_ROOTFS_FILESYSTEM_EXT4,
-            false,
         )?;
         let params_string = params.to_string()?;
         assert!(params_string.contains("dm-mod.create="));
@@ -522,36 +432,33 @@ mod tests {
 
         let err = KernelParams::new_rootfs_kernel_params(
             "root_hash=abc,data_blocks=1,data_block_size=4096,hash_block_size=4096",
-            VM_ROOTFS_DRIVER_BLK,
+            VM_ROOTFS_DRIVER_MMIO,
             VM_ROOTFS_FILESYSTEM_EXT4,
-            false,
         )
         .expect_err("expected missing salt error");
         assert!(format!("{err}").contains("Missing kernel_verity_params salt"));
 
         let err = KernelParams::new_rootfs_kernel_params(
             "root_hash=abc,salt=def,data_block_size=4096,hash_block_size=4096",
-            VM_ROOTFS_DRIVER_BLK,
+            VM_ROOTFS_DRIVER_MMIO,
             VM_ROOTFS_FILESYSTEM_EXT4,
-            false,
         )
         .expect_err("expected missing data_blocks error");
         assert!(format!("{err}").contains("Missing kernel_verity_params data_blocks"));
 
         let err = KernelParams::new_rootfs_kernel_params(
             "root_hash=abc,salt=def,data_blocks=foo,data_block_size=4096,hash_block_size=4096",
-            VM_ROOTFS_DRIVER_BLK,
+            VM_ROOTFS_DRIVER_MMIO,
             VM_ROOTFS_FILESYSTEM_EXT4,
-            false,
         )
         .expect_err("expected invalid data_blocks error");
         assert!(format!("{err}").contains("Invalid kernel_verity_params data_blocks"));
 
         let err = KernelParams::new_rootfs_kernel_params(
             "root_hash=abc,salt=def,data_blocks=1,data_block_size=4096,hash_block_size=4096,badfield",
-            VM_ROOTFS_DRIVER_BLK,
+            VM_ROOTFS_DRIVER_MMIO,
             VM_ROOTFS_FILESYSTEM_EXT4,
-            false,
+
         )
         .expect_err("expected invalid entry error");
         assert!(format!("{err}").contains("Invalid kernel_verity_params entry"));

@@ -75,7 +75,7 @@ impl Endpoint for IPVlanEndpoint {
         self.net_pair.tap.tap_iface.hard_addr.clone()
     }
 
-    async fn attach(&self) -> Result<Option<String>> {
+    async fn attach(&self) -> Result<()> {
         self.net_pair
             .add_network_model()
             .await

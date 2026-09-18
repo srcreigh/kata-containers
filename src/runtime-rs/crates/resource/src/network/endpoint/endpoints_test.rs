@@ -8,11 +8,10 @@
 mod tests {
     use std::sync::Arc;
 
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{Context, Result};
     use netlink_packet_route::link::MacVlanMode;
     use rtnetlink::{LinkDummy, LinkMacVlan, LinkVeth, LinkVlan};
     use scopeguard::defer;
-    use tests_utils::load_test_config;
     use tokio::sync::RwLock;
 
     use crate::network::{
@@ -28,17 +27,10 @@ mod tests {
     use hypervisor::{device::device_manager::DeviceManager, firecracker::Firecracker};
 
     async fn get_device_manager() -> Result<Arc<RwLock<DeviceManager>>> {
-        let hypervisor_name: &str = "firecracker";
-        let toml_config = load_test_config(hypervisor_name.to_owned())?;
-        let hypervisor_config = toml_config
-            .hypervisor
-            .get(hypervisor_name)
-            .ok_or_else(|| anyhow!("failed to get hypervisor for {}", &hypervisor_name))?;
-
+        let mut config = kata_types::config::Hypervisor::default();
+        config.blockdev_info.block_device_driver = "virtio-blk-mmio".into();
         let hypervisor = Firecracker::new();
-        hypervisor
-            .set_hypervisor_config(hypervisor_config.clone())
-            .await;
+        hypervisor.set_hypervisor_config(config).await;
 
         let dm = Arc::new(RwLock::new(
             DeviceManager::new(Arc::new(hypervisor))

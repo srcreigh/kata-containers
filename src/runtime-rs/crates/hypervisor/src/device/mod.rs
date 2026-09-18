@@ -19,7 +19,6 @@ use async_trait::async_trait;
 
 pub mod device_manager;
 pub mod driver;
-pub mod pci_path;
 mod tap;
 pub use self::tap::{Error as TapError, Tap};
 pub mod util;

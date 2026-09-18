@@ -19,7 +19,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use hypervisor::device::device_manager::{do_handle_device, DeviceManager};
 use hypervisor::device::driver::NetworkConfig;
-use hypervisor::device::{DeviceConfig, DeviceType};
+use hypervisor::device::DeviceConfig;
 use hypervisor::Hypervisor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -29,19 +29,16 @@ use super::EndpointState;
 pub(crate) async fn attach_network_device(
     d: &Arc<RwLock<DeviceManager>>,
     config: NetworkConfig,
-) -> Result<Option<String>> {
-    let device_info = do_handle_device(d, &DeviceConfig::NetworkCfg(config)).await?;
-    match device_info {
-        DeviceType::Network(net) => Ok(net.config.pci_path.map(|p| p.to_string())),
-        _ => Ok(None),
-    }
+) -> Result<()> {
+    do_handle_device(d, &DeviceConfig::NetworkCfg(config)).await?;
+    Ok(())
 }
 
 #[async_trait]
 pub trait Endpoint: std::fmt::Debug + Send + Sync {
     async fn name(&self) -> String;
     async fn hardware_addr(&self) -> String;
-    async fn attach(&self) -> Result<Option<String>>;
+    async fn attach(&self) -> Result<()>;
     async fn detach(&self, hypervisor: &dyn Hypervisor) -> Result<()>;
     async fn save(&self) -> Option<EndpointState>;
 }

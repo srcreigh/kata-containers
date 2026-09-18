@@ -2011,7 +2011,6 @@ dependencies = [
  "hypervisor",
  "kata-sys-util",
  "kata-types",
- "lazy_static",
  "libc",
  "logging",
  "nix 0.31.3",

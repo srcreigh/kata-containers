@@ -4,17 +4,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, convert::TryFrom, sync::Arc};
 
 use anyhow::{anyhow, Context, Result};
 use kata_sys_util::rand::RandomBytes;
-use kata_types::config::hypervisor::{BlockDeviceInfo, VIRTIO_SCSI};
+use kata_types::config::hypervisor::BlockDeviceInfo;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     BlockConfigModern, BlockDeviceModernHandle, HybridVsockDevice, Hypervisor, NetworkDevice,
-    KATA_BLK_DEV_TYPE, KATA_CCW_DEV_TYPE, KATA_MMIO_BLK_DEV_TYPE, KATA_NVDIMM_DEV_TYPE,
-    KATA_SCSI_DEV_TYPE, VIRTIO_BLOCK_CCW, VIRTIO_BLOCK_MMIO, VIRTIO_BLOCK_PCI, VIRTIO_PMEM,
+    KATA_MMIO_BLK_DEV_TYPE, VIRTIO_BLOCK_MMIO,
 };
 
 use super::{
@@ -24,66 +23,26 @@ use super::{
 
 pub type ArcMutexDevice = Arc<Mutex<dyn Device>>;
 
-macro_rules! declare_index {
-    ($self:ident, $index:ident, $released_index:ident) => {{
-        let current_index = if let Some(index) = $self.$released_index.pop() {
-            index
-        } else {
-            $self.$index
-        };
-        $self.$index += 1;
-        Ok(current_index)
-    }};
-}
-
-macro_rules! release_index {
-    ($self:ident, $index:ident, $released_index:ident) => {{
-        $self.$released_index.push($index);
-        $self.$released_index.sort_by(|a, b| b.cmp(a));
-    }};
-}
-
-/// block_index and released_block_index are used to search an available block index
-/// in Sandbox.
-/// pmem_index and released_pmem_index are used to search an available pmem index
-/// in Sandbox.
-///
-/// @pmem_index generally default is 0 for <pmem0>;
-/// @block_index generally default is 0 for <vda>;
-/// @released_pmem_index for pmem devices removed and indexes will released at the same time.
-/// @released_block_index for blk devices removed and indexes will released at the same time.
+/// Available MMIO disk indices. Released slots are reused in ascending order.
 #[derive(Clone, Debug, Default)]
 struct SharedInfo {
-    pmem_index: u64,
     block_index: u64,
-    released_pmem_index: Vec<u64>,
     released_block_index: Vec<u64>,
 }
 
 impl SharedInfo {
-    async fn new() -> Self {
-        SharedInfo {
-            pmem_index: 0,
-            block_index: 0,
-            released_pmem_index: vec![],
-            released_block_index: vec![],
+    fn declare_device_index(&mut self) -> Result<u64> {
+        if let Some(index) = self.released_block_index.pop() {
+            return Ok(index);
         }
+        let index = self.block_index;
+        self.block_index = index.checked_add(1).context("block index overflow")?;
+        Ok(index)
     }
 
-    fn declare_device_index(&mut self, is_pmem: bool) -> Result<u64> {
-        if is_pmem {
-            declare_index!(self, pmem_index, released_pmem_index)
-        } else {
-            declare_index!(self, block_index, released_block_index)
-        }
-    }
-
-    fn release_device_index(&mut self, index: u64, is_pmem: bool) {
-        if is_pmem {
-            release_index!(self, index, released_pmem_index);
-        } else {
-            release_index!(self, index, released_block_index);
-        }
+    fn release_device_index(&mut self, index: u64) {
+        self.released_block_index.push(index);
+        self.released_block_index.sort_by(|a, b| b.cmp(a));
     }
 }
 
@@ -101,7 +60,7 @@ impl DeviceManager {
         Ok(DeviceManager {
             devices,
             hypervisor,
-            shared_info: SharedInfo::new().await,
+            shared_info: SharedInfo::default(),
         })
     }
 
@@ -123,11 +82,8 @@ impl DeviceManager {
         if let Err(e) = result {
             match device_guard.get_device_info().await {
                 DeviceType::BlockModern(device) => {
-                    let (index, is_pmem) = {
-                        let cfg = &device.lock().await.config;
-                        (cfg.index, cfg.driver_option == *KATA_NVDIMM_DEV_TYPE)
-                    };
-                    self.shared_info.release_device_index(index, is_pmem);
+                    let index = device.lock().await.config.index;
+                    self.shared_info.release_device_index(index);
                 }
                 _ => {
                     debug!(sl!(), "no need to do release device index.");
@@ -150,13 +106,7 @@ impl DeviceManager {
                 Ok(index) => {
                     if let Some(i) = index {
                         // release the declared device index
-                        let is_pmem = match device_guard.get_device_info().await {
-                            DeviceType::BlockModern(dev) => {
-                                dev.lock().await.config.driver_option == *KATA_NVDIMM_DEV_TYPE
-                            }
-                            _ => false,
-                        };
-                        self.shared_info.release_device_index(i, is_pmem);
+                        self.shared_info.release_device_index(i);
                     }
                     Ok(())
                 }
@@ -210,28 +160,6 @@ impl DeviceManager {
         }
 
         None
-    }
-
-    fn get_dev_virt_path(
-        &mut self,
-        dev_type: &str,
-        is_pmem: bool,
-    ) -> Result<Option<(u64, String)>> {
-        let virt_path = if dev_type == DEVICE_TYPE_BLOCK {
-            let current_index = self.shared_info.declare_device_index(is_pmem)?;
-            let drive_name = if is_pmem {
-                format!("pmem{current_index}")
-            } else {
-                get_virt_drive_name(current_index as i32)?
-            };
-            let virt_path_name = format!("/dev/{drive_name}");
-            Some((current_index, virt_path_name))
-        } else {
-            // only dev_type is block, otherwise, it's None.
-            None
-        };
-
-        Ok(virt_path)
     }
 
     async fn new_device(&mut self, device_config: &DeviceConfig) -> Result<String> {
@@ -291,37 +219,10 @@ impl DeviceManager {
         device_id: String,
     ) -> Result<ArcMutexDevice> {
         let mut block_config = config.clone();
-        let mut is_pmem = false;
-
-        match block_config.driver_option.as_str() {
-            VIRTIO_BLOCK_MMIO => {
-                block_config.driver_option = KATA_MMIO_BLK_DEV_TYPE.to_string();
-            }
-            VIRTIO_BLOCK_PCI => {
-                block_config.driver_option = KATA_BLK_DEV_TYPE.to_string();
-            }
-            VIRTIO_BLOCK_CCW => {
-                block_config.driver_option = KATA_CCW_DEV_TYPE.to_string();
-            }
-            VIRTIO_PMEM => {
-                block_config.driver_option = KATA_NVDIMM_DEV_TYPE.to_string();
-                is_pmem = true;
-            }
-            VIRTIO_SCSI => {
-                block_config.driver_option = KATA_SCSI_DEV_TYPE.to_string();
-            }
-            _ => {
-                return Err(anyhow!(
-                    "unsupported driver type {}",
-                    block_config.driver_option
-                ));
-            }
-        };
-
-        if let Some(virt_path) = self.get_dev_virt_path(DEVICE_TYPE_BLOCK, is_pmem)? {
-            block_config.index = virt_path.0;
-            block_config.virt_path = virt_path.1;
-        }
+        block_config.driver_option = KATA_MMIO_BLK_DEV_TYPE.to_string();
+        let index = self.shared_info.declare_device_index()?;
+        block_config.index = index;
+        block_config.virt_path = format!("/dev/{}", get_virt_drive_name(i32::try_from(index)?)?);
 
         if block_config.path_on_host.is_empty() {
             block_config.path_on_host =
@@ -391,7 +292,7 @@ pub async fn get_block_device_info(d: &RwLock<DeviceManager>) -> BlockDeviceInfo
 
 #[cfg(test)]
 mod tests {
-    use super::DeviceManager;
+    use super::{DeviceManager, SharedInfo};
     use crate::{
         device::{device_manager::get_block_device_info, DeviceConfig, DeviceType},
         firecracker::Firecracker,
@@ -416,6 +317,18 @@ mod tests {
         Ok(dm)
     }
 
+    #[test]
+    fn released_mmio_indices_are_reused_without_skipping_fresh_slots() {
+        let mut info = SharedInfo::default();
+        assert_eq!(info.declare_device_index().unwrap(), 0);
+        assert_eq!(info.declare_device_index().unwrap(), 1);
+        info.release_device_index(1);
+        info.release_device_index(0);
+        assert_eq!(info.declare_device_index().unwrap(), 0);
+        assert_eq!(info.declare_device_index().unwrap(), 1);
+        assert_eq!(info.declare_device_index().unwrap(), 2);
+    }
+
     #[actix_rt::test]
     async fn test_new_block_device() {
         let dm = new_device_manager().await;
@@ -425,6 +338,7 @@ mod tests {
         let block_driver = get_block_device_info(&d).await.block_device_driver;
         let dev_info = DeviceConfig::BlockCfgModern(BlockConfigModern {
             path_on_host: "/dev/dddzzz".to_string(),
+            is_readonly: true,
             driver_option: block_driver,
             ..Default::default()
         });
@@ -439,6 +353,8 @@ mod tests {
         if let DeviceType::BlockModern(device_lock) = device_info {
             let device = device_lock.lock().await;
             assert_eq!(device.config.driver_option, KATA_MMIO_BLK_DEV_TYPE);
+            assert_eq!(device.config.virt_path, "/dev/vda");
+            assert!(device.config.is_readonly);
         } else {
             panic!("expected an MMIO block device")
         }

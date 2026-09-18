@@ -7,7 +7,6 @@
 use std::{
     convert::TryFrom,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    sync::Arc,
 };
 
 use agent::{ARPNeighbor, IPAddress, IPFamily, Interface, Route};
@@ -20,7 +19,6 @@ use netlink_packet_route::{
     route::{RouteAddress, RouteAttribute, RouteMessage, RouteMetric},
 };
 use rtnetlink::{IpVersion, RouteMessageBuilder};
-use tokio::sync::RwLock;
 
 use super::NetworkInfo;
 use crate::network::utils::{
@@ -31,7 +29,6 @@ use crate::network::utils::{
 #[derive(Debug)]
 pub(crate) struct NetworkInfoFromLink {
     interface: Interface,
-    device_path: Arc<RwLock<String>>,
     neighs: Vec<ARPNeighbor>,
     routes: Vec<Route>,
 }
@@ -57,7 +54,6 @@ impl NetworkInfoFromLink {
                 field_type: link.r#type().to_string(),
                 raw_flags: attrs.flags & libc::IFF_NOARP as u32,
             },
-            device_path: Arc::new(RwLock::new(String::new())),
             neighs: handle_neighbors(handle, attrs)
                 .await
                 .context("handle neighbours")?,
@@ -264,9 +260,7 @@ async fn handle_routes(handle: &rtnetlink::Handle, attrs: &LinkAttrs) -> Result<
 #[async_trait]
 impl NetworkInfo for NetworkInfoFromLink {
     async fn interface(&self) -> Result<Interface> {
-        let mut iface = self.interface.clone();
-        iface.device_path = self.device_path.read().await.clone();
-        Ok(iface)
+        Ok(self.interface.clone())
     }
 
     async fn routes(&self) -> Result<Vec<Route>> {
@@ -275,11 +269,6 @@ impl NetworkInfo for NetworkInfoFromLink {
 
     async fn neighs(&self) -> Result<Vec<ARPNeighbor>> {
         Ok(self.neighs.clone())
-    }
-
-    async fn set_device_path(&self, path: String) -> Result<()> {
-        *self.device_path.write().await = path;
-        Ok(())
     }
 }
 

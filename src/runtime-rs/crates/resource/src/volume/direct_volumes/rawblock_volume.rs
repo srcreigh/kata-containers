@@ -11,7 +11,7 @@ use hypervisor::{
         device_manager::{do_handle_device, get_block_device_info, DeviceManager},
         DeviceConfig,
     },
-    BlockConfigModern, BlockDeviceAio,
+    BlockConfigModern,
 };
 use kata_types::mount::DirectVolumeMountInfo;
 use nix::sys::{stat, stat::SFlag};
@@ -83,11 +83,6 @@ impl RawblockVolume {
             path_on_host: mount_info.device.clone(),
             is_readonly: read_only,
             driver_option: blkdev_info.block_device_driver,
-            blkdev_aio: BlockDeviceAio::new(&blkdev_info.block_device_aio),
-            num_queues: blkdev_info.num_queues,
-            queue_size: blkdev_info.queue_size,
-            logical_sector_size: blkdev_info.block_device_logical_sector_size,
-            physical_sector_size: blkdev_info.block_device_physical_sector_size,
             ..Default::default()
         };
 

@@ -91,12 +91,7 @@ impl Network for NetworkWithNetns {
         let inner = self.inner.read().await;
         let _netns_guard = netns::NetnsGuard::new(&inner.netns_path).context("net netns guard")?;
         for e in &inner.entity_list {
-            if let Some(device_path) = e.endpoint.attach().await.context("attach")? {
-                e.network_info
-                    .set_device_path(device_path)
-                    .await
-                    .context("set device path")?;
-            }
+            e.endpoint.attach().await.context("attach")?;
         }
         Ok(())
     }
@@ -146,9 +141,6 @@ impl Network for NetworkWithNetns {
         let inner = self.inner.read().await;
 
         // Always detach endpoints regardless of whether kata created the netns.
-        // Physical endpoints rebind their VF from vfio-pci back to the original
-        // host driver here.  Skipping this when network_created=false would
-        // permanently leave VFs bound to vfio-pci after pod deletion.
         {
             let _netns_guard =
                 netns::NetnsGuard::new(&inner.netns_path).context("net netns guard")?;

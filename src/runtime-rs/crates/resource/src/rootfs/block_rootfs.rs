@@ -7,16 +7,15 @@
 use super::{Rootfs, ROOTFS};
 use crate::{block_device::agent_storage_source_from_block_config, guest_paths::do_get_guest_path};
 use agent::Storage;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use hypervisor::{
     device::{
         device_manager::{do_handle_device, get_block_device_info, DeviceManager},
         DeviceConfig, DeviceType,
     },
-    BlockConfigModern, BlockDeviceAio,
+    BlockConfigModern,
 };
-use kata_types::config::hypervisor::VIRTIO_PMEM;
 use kata_types::fs::VM_ROOTFS_FILESYSTEM_XFS;
 use kata_types::mount::Mount;
 use nix::sys::stat::{self, SFlag};
@@ -48,11 +47,6 @@ impl BlockRootfs {
             minor: stat::minor(dev_id) as i64,
             driver_option: block_driver.clone(),
             path_on_host: rootfs.source.clone(),
-            blkdev_aio: BlockDeviceAio::new(&blkdev_info.block_device_aio),
-            num_queues: blkdev_info.num_queues,
-            queue_size: blkdev_info.queue_size,
-            logical_sector_size: blkdev_info.block_device_logical_sector_size,
-            physical_sector_size: blkdev_info.block_device_physical_sector_size,
             ..Default::default()
         };
 
@@ -84,13 +78,6 @@ impl BlockRootfs {
         let mut device_id: String = "".to_owned();
         if let DeviceType::BlockModern(device_mod) = device_info {
             let device = device_mod.lock().await.clone();
-            if block_driver == VIRTIO_PMEM {
-                return Err(anyhow!(
-                    "Complete support for block driver {} has not been implemented yet",
-                    block_driver
-                ));
-            }
-
             storage.driver = device.config.driver_option.clone();
             storage.source = agent_storage_source_from_block_config(&device.config)?;
             device_id = device.device_id;

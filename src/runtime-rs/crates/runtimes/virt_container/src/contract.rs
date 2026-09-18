@@ -56,6 +56,20 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
             && h.boot_info.vm_rootfs_driver == "virtio-blk-mmio",
         "{fail}: only virtio-blk-mmio storage is supported"
     );
+    ensure!(!h.memory_info.enable_guest_swap, "{fail}: guest swap");
+    let b = &h.blockdev_info;
+    ensure!(
+        matches!(b.block_device_aio.as_str(), "" | "io_uring")
+            && !b.block_device_cache_set
+            && !b.block_device_cache_direct
+            && !b.block_device_cache_noflush
+            && b.block_device_logical_sector_size == 0
+            && b.block_device_physical_sector_size == 0
+            && matches!(b.num_queues, 0 | 1)
+            && matches!(b.queue_size, 0 | 128)
+            && b.memory_offset == 0,
+        "{fail}: alternate block I/O, cache, sector or queue settings"
+    );
     ensure!(
         !h.blockdev_info.enable_vhost_user_store,
         "{fail}: vhost-user storage"
@@ -145,6 +159,76 @@ mod tests {
                     .unwrap()
                     .boot_info
                     .vm_rootfs_driver = "virtio-blk-pci".into()
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .memory_info
+                    .enable_guest_swap = true
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .blockdev_info
+                    .block_device_aio = "native".into()
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .blockdev_info
+                    .block_device_cache_set = true
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .blockdev_info
+                    .block_device_cache_direct = true
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .blockdev_info
+                    .block_device_cache_noflush = true
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .blockdev_info
+                    .block_device_logical_sector_size = 4096
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .blockdev_info
+                    .block_device_physical_sector_size = 4096
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .blockdev_info
+                    .num_queues = 4
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .blockdev_info
+                    .queue_size = 256
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .blockdev_info
+                    .memory_offset = 128
             },
             |c| c.runtime.static_sandbox_resource_mgmt = false,
             |c| c.runtime.disable_new_netns = true,

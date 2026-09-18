@@ -16,7 +16,7 @@ use hypervisor::{
         device_manager::{do_handle_device, get_block_device_info, DeviceManager},
         DeviceConfig,
     },
-    BlockConfigModern, BlockDeviceAio,
+    BlockConfigModern,
 };
 use kata_sys_util::k8s::is_disk_empty_dir;
 use kata_types::config::{EMPTYDIR_MODE_BLOCK_ENCRYPTED, EMPTYDIR_MODE_BLOCK_PLAIN};
@@ -106,12 +106,6 @@ impl BlockEmptyDirVolume {
         let block_config = BlockConfigModern {
             path_on_host: disk_path.display().to_string(),
             driver_option: blkdev_info.block_device_driver,
-            blkdev_aio: BlockDeviceAio::new(&blkdev_info.block_device_aio),
-            num_queues: blkdev_info.num_queues,
-            queue_size: blkdev_info.queue_size,
-            logical_sector_size: blkdev_info.block_device_logical_sector_size,
-            physical_sector_size: blkdev_info.block_device_physical_sector_size,
-            discard_unmap,
             ..Default::default()
         };
 

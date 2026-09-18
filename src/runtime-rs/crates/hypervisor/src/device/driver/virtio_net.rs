@@ -9,7 +9,6 @@ use std::fmt;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::device::pci_path::PciPath;
 use crate::device::{Device, DeviceType};
 use crate::Hypervisor as hypervisor;
 
@@ -48,8 +47,6 @@ pub struct NetworkConfig {
     pub use_generic_irq: Option<bool>,
     /// Allow duplicate mac
     pub allow_duplicate_mac: bool,
-    /// Guest PCI path after hot-plug (used by the agent to wait for uevents).
-    pub pci_path: Option<PciPath>,
 }
 
 #[derive(Clone, Debug, Default)]

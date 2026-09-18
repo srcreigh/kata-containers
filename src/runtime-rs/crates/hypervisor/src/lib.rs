@@ -15,7 +15,6 @@ logging::logger_with_subsystem!(sl, "hypervisor");
 pub mod device;
 pub mod hypervisor_persist;
 pub use device::driver::*;
-pub use device::pci_path::PciPath;
 use device::DeviceType;
 
 // Firecracker upstream only releases binaries for x86_64 and aarch64
@@ -40,14 +39,10 @@ use kata_types::config::hypervisor::Hypervisor as HypervisorConfig;
 pub use kata_types::config::hypervisor::HYPERVISOR_NAME_CH;
 
 // Config which driver to use as vm root dev
-const VM_ROOTFS_DRIVER_BLK: &str = "virtio-blk-pci";
-const VM_ROOTFS_DRIVER_BLK_CCW: &str = "virtio-blk-ccw";
-const VM_ROOTFS_DRIVER_PMEM: &str = "virtio-pmem";
 const VM_ROOTFS_DRIVER_MMIO: &str = "virtio-blk-mmio";
 
 //Configure the root corresponding to the driver
 const VM_ROOTFS_ROOT_BLK: &str = "/dev/vda1";
-const VM_ROOTFS_ROOT_PMEM: &str = "/dev/pmem0p1";
 
 // before using hugepages for VM, we need to mount hugetlbfs
 // /dev/hugepages will be the mount point
