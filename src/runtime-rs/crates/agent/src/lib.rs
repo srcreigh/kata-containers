@@ -13,27 +13,24 @@ pub mod kata;
 mod log_forwarder;
 mod sock;
 pub mod types;
+pub use protocols::agent::{
+    BlkioStatsEntry, GetDiagnosticDataResponse, Metrics as MetricsResponse,
+    OOMEvent as OomEventResponse, ReadStreamResponse, StatsContainerResponse, WaitProcessResponse,
+    WriteStreamResponse,
+};
+pub use protocols::csi::VolumeStatsResponse;
 pub use types::{
-    ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, BlkioStatsEntry, CheckRequest, ContainerID,
+    ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, CheckRequest, ContainerID,
     ContainerProcessID, CopyFileRequest, CreateContainerRequest, CreateSandboxRequest, Empty,
-    ExecProcessRequest, FSGroup, FSGroupChangePolicy, GetDiagnosticDataRequest,
-    GetDiagnosticDataResponse, GetGuestDetailsRequest, GetIPTablesRequest, GetIPTablesResponse,
-    GuestDetailsResponse, HealthCheckResponse, IPAddress, IPFamily, Interface, Interfaces,
-    ListProcessesRequest, MemHotplugByProbeRequest, MetricsResponse, OnlineCPUMemRequest,
-    OomEventResponse, ReadStreamRequest, ReadStreamResponse, RemoveContainerRequest,
-    ResizeVolumeRequest, Route, Routes, SetGuestDateTimeRequest, SetIPTablesRequest,
-    SetIPTablesResponse, SignalProcessRequest, StatsContainerResponse, Storage,
-    TtyWinResizeRequest, UpdateContainerRequest, UpdateInterfaceRequest, UpdateRoutesRequest,
-    VersionCheckResponse, VolumeStatsRequest, VolumeStatsResponse, WaitProcessRequest,
-    WaitProcessResponse, WriteStreamRequest, WriteStreamResponse,
+    ExecProcessRequest, FSGroup, FSGroupChangePolicy, GetDiagnosticDataRequest, IPAddress,
+    IPFamily, Interface, ReadStreamRequest, RemoveContainerRequest, Route, Routes,
+    SignalProcessRequest, Storage, StringUser, TtyWinResizeRequest, UpdateContainerRequest,
+    UpdateInterfaceRequest, UpdateRoutesRequest, VolumeStatsRequest, WaitProcessRequest,
+    WriteStreamRequest,
 };
 
 use anyhow::Result;
 use async_trait::async_trait;
-
-use kata_types::config::Agent as AgentConfig;
-
-use crate::types::SetPolicyRequest;
 
 pub const AGENT_KATA: &str = "kata";
 
@@ -44,25 +41,22 @@ pub trait AgentManager: Send + Sync {
     async fn disconnect(&self) -> Result<()>;
 
     async fn agent_sock(&self) -> Result<String>;
-    async fn agent_config(&self) -> AgentConfig;
 }
 
 #[async_trait]
 pub trait HealthService: Send + Sync {
-    async fn check(&self, req: CheckRequest) -> Result<HealthCheckResponse>;
-    async fn version(&self, req: CheckRequest) -> Result<VersionCheckResponse>;
+    async fn check(&self, req: CheckRequest) -> Result<Empty>;
 }
 
 #[async_trait]
 pub trait Agent: AgentManager + HealthService + Send + Sync {
     // sandbox
     async fn create_sandbox(&self, req: CreateSandboxRequest) -> Result<Empty>;
-    async fn destroy_sandbox(&self, req: Empty) -> Result<Empty>;
 
     // network
     async fn add_arp_neighbors(&self, req: AddArpNeighborRequest) -> Result<Empty>;
-    async fn update_interface(&self, req: UpdateInterfaceRequest) -> Result<Interface>;
-    async fn update_routes(&self, req: UpdateRoutesRequest) -> Result<Routes>;
+    async fn update_interface(&self, req: UpdateInterfaceRequest) -> Result<Empty>;
+    async fn update_routes(&self, req: UpdateRoutesRequest) -> Result<Empty>;
 
     // container
     async fn create_container(&self, req: CreateContainerRequest) -> Result<Empty>;
@@ -89,9 +83,6 @@ pub trait Agent: AgentManager + HealthService + Send + Sync {
     async fn get_metrics(&self, req: Empty) -> Result<MetricsResponse>;
     async fn get_oom_event(&self, req: Empty) -> Result<OomEventResponse>;
     async fn get_volume_stats(&self, req: VolumeStatsRequest) -> Result<VolumeStatsResponse>;
-    async fn resize_volume(&self, req: ResizeVolumeRequest) -> Result<Empty>;
-    async fn get_guest_details(&self, req: GetGuestDetailsRequest) -> Result<GuestDetailsResponse>;
-    async fn set_policy(&self, req: SetPolicyRequest) -> Result<Empty>;
 
     // diagnostics
     async fn get_diagnostic_data(

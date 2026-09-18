@@ -22,11 +22,11 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
             Some(stats) => stats,
         };
 
-        if let Some(cg_stats) = stats.cgroup_stats {
-            if let Some(cpu) = cg_stats.cpu_stats {
+        if let Some(cg_stats) = stats.cgroup_stats.into_option() {
+            if let Some(cpu) = cg_stats.cpu_stats.into_option() {
                 // set protobuf cpu stat
                 let mut p_cpu = metrics::CPUStat::new();
-                if let Some(usage) = cpu.cpu_usage {
+                if let Some(usage) = cpu.cpu_usage.into_option() {
                     let mut p_usage = metrics::CPUUsage::new();
                     p_usage.set_total(usage.total_usage);
                     p_usage.set_per_cpu(usage.percpu_usage);
@@ -37,7 +37,7 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
                     p_cpu.set_usage(p_usage);
                 }
 
-                if let Some(throttle) = cpu.throttling_data {
+                if let Some(throttle) = cpu.throttling_data.into_option() {
                     let mut p_throttle = metrics::Throttle::new();
                     p_throttle.set_periods(throttle.periods);
                     p_throttle.set_throttled_time(throttle.throttled_time);
@@ -50,11 +50,11 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
                 metric.set_cpu(p_cpu);
             }
 
-            if let Some(m_stats) = cg_stats.memory_stats {
+            if let Some(m_stats) = cg_stats.memory_stats.into_option() {
                 let mut p_m = metrics::MemoryStat::new();
                 p_m.set_cache(m_stats.cache);
                 // memory usage
-                if let Some(m_data) = m_stats.usage {
+                if let Some(m_data) = m_stats.usage.into_option() {
                     let mut p_m_entry = metrics::MemoryEntry::new();
                     p_m_entry.set_usage(m_data.usage);
                     p_m_entry.set_limit(m_data.limit);
@@ -64,7 +64,7 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
                     p_m.set_usage(p_m_entry);
                 }
                 // memory swap_usage
-                if let Some(m_data) = m_stats.swap_usage {
+                if let Some(m_data) = m_stats.swap_usage.into_option() {
                     let mut p_m_entry = metrics::MemoryEntry::new();
                     p_m_entry.set_usage(m_data.usage);
                     p_m_entry.set_limit(m_data.limit);
@@ -74,7 +74,7 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
                     p_m.set_swap(p_m_entry);
                 }
                 // memory kernel_usage
-                if let Some(m_data) = m_stats.kernel_usage {
+                if let Some(m_data) = m_stats.kernel_usage.into_option() {
                     let mut p_m_entry = metrics::MemoryEntry::new();
                     p_m_entry.set_usage(m_data.usage);
                     p_m_entry.set_limit(m_data.limit);
@@ -120,14 +120,14 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
                 metric.set_memory(p_m);
             }
 
-            if let Some(pid_stats) = cg_stats.pids_stats {
+            if let Some(pid_stats) = cg_stats.pids_stats.into_option() {
                 let mut p_pid = metrics::PidsStat::new();
                 p_pid.set_limit(pid_stats.limit);
                 p_pid.set_current(pid_stats.current);
                 metric.set_pids(p_pid);
             }
 
-            if let Some(blk_stats) = cg_stats.blkio_stats {
+            if let Some(blk_stats) = cg_stats.blkio_stats.into_option() {
                 let mut p_blk_stats = metrics::BlkIOStat::new();
                 p_blk_stats
                     .set_io_serviced_recursive(copy_blkio_entry(&blk_stats.io_serviced_recursive));
@@ -209,4 +209,79 @@ fn copy_blkio_entry(entry: &[agent::BlkioStatsEntry]) -> Vec<metrics::BlkIOEntry
     }
 
     p_entry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protobuf::MessageField;
+    use protocols::agent as wire;
+
+    #[test]
+    fn protobuf_stats_preserve_containerd_accounting() {
+        let stats = wire::StatsContainerResponse {
+            cgroup_stats: MessageField::some(wire::CgroupStats {
+                cpu_stats: MessageField::some(wire::CpuStats {
+                    cpu_usage: MessageField::some(wire::CpuUsage {
+                        total_usage: 123,
+                        percpu_usage: vec![40, 83],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                memory_stats: MessageField::some(wire::MemoryStats {
+                    usage: MessageField::some(wire::MemoryData {
+                        usage: 4096,
+                        limit: 8192,
+                        ..Default::default()
+                    }),
+                    stats: [("rss".into(), 1024), ("unused-key".into(), 999)].into(),
+                    ..Default::default()
+                }),
+                pids_stats: MessageField::some(wire::PidsStats {
+                    current: 3,
+                    limit: 100,
+                    ..Default::default()
+                }),
+                blkio_stats: MessageField::some(wire::BlkioStats {
+                    io_service_bytes_recursive: vec![wire::BlkioStatsEntry {
+                        major: 254,
+                        minor: 1,
+                        op: "Read".into(),
+                        value: 512,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                hugetlb_stats: [(
+                    "2MB".into(),
+                    wire::HugetlbStats {
+                        usage: 2048,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            }),
+            network_stats: vec![wire::NetworkStats {
+                name: "eth0".into(),
+                rx_bytes: 42,
+                tx_bytes: 64,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let info = StatsInfo::from(Some(stats)).value.unwrap();
+        assert_eq!(info.type_url, "io.containerd.cgroups.v1.Metrics");
+        let result = metrics::Metrics::parse_from_bytes(&info.value).unwrap();
+        assert_eq!(result.cpu().usage().total(), 123);
+        assert_eq!(result.cpu().usage().per_cpu(), [40, 83]);
+        assert_eq!(result.memory().usage().usage(), 4096);
+        assert_eq!(result.memory().rss(), 1024);
+        assert_eq!(result.pids().current(), 3);
+        assert_eq!(result.blkio().io_service_bytes_recursive()[0].value(), 512);
+        assert_eq!(result.hugetlb()[0].pagesize(), "2MB");
+        assert_eq!(result.network()[0].rx_bytes(), 42);
+        assert!(StatsInfo::from(None).value.is_none());
+    }
 }

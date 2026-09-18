@@ -74,7 +74,7 @@ impl<'inner> ContainerIoWrite<'inner> {
         let mut write_future = write_future.unwrap();
         match write_future.as_mut().poll(cx) {
             Poll::Ready(v) => match v {
-                Ok(resp) => Poll::Ready(Ok(resp.length as usize)),
+                Ok(resp) => Poll::Ready(Ok(resp.len as usize)),
                 Err(err) => Poll::Ready(Err(std::io::Error::other(err))),
             },
             Poll::Pending => {

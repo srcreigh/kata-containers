@@ -129,6 +129,29 @@ fn handle_file(autogen_comment: &str, rust_filename: &str) -> Result<(), std::io
     Ok(())
 }
 
+// The fork's host has an explicit RPC allowlist and decodes only consumed
+// response bodies. Keep generated server dispatch (including UNIMPLEMENTED
+// methods), but remove unused generated clients and their response decoders.
+// Fail closed if the pinned generator changes its output layout.
+fn remove_generated_client(path: &str, client: &str, first_handler: &str) -> std::io::Result<()> {
+    let mut source = fs::read_to_string(path)?;
+    let marker = format!("#[derive(Clone)]\npub struct {client} {{");
+    let start = source
+        .find(&marker)
+        .expect("generated client declaration changed");
+    let handler = format!("\nstruct {first_handler} {{");
+    let end = start
+        + source[start..]
+            .find(&handler)
+            .expect("generated server boundary changed");
+    source.replace_range(start..end, "");
+    assert!(
+        !source.contains(client),
+        "unexpected generated client reference"
+    );
+    fs::write(path, source)
+}
+
 fn codegen(path: &str, protos: &[&str], async_all: bool) -> Result<(), std::io::Error> {
     fs::create_dir_all(path).unwrap();
 
@@ -158,6 +181,17 @@ fn codegen(path: &str, protos: &[&str], async_all: bool) -> Result<(), std::io::
         .rust_protobuf_customize(protobuf_options)
         .rust_protobuf_customize_callback(GenSerde)
         .run()?;
+
+    if protos.contains(&"protos/agent.proto") {
+        remove_generated_client(
+            "src/agent_ttrpc.rs",
+            "AgentServiceClient",
+            "CreateContainerMethod",
+        )?;
+    }
+    if protos.contains(&"protos/health.proto") {
+        remove_generated_client("src/health_ttrpc.rs", "HealthClient", "CheckMethod")?;
+    }
 
     // ttrpc-codegen 0.6 emits NOT_FOUND for declared methods without an
     // implementation. This fork deliberately excludes features: report

@@ -8,7 +8,6 @@ use std::env;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait;
 use common::message::Event;
 use containerd_shim::publisher::RemotePublisher;
 use containerd_shim::util::timestamp;
@@ -20,39 +19,22 @@ use ttrpc::r#async::TtrpcContext;
 use ttrpc::MessageHeader;
 
 // Ttrpc address passed from container runtime.
-// For now containerd will pass the address, and CRI-O will not.
+// Required by this containerd-only fork.
 const TTRPC_ADDRESS_ENV: &str = "TTRPC_ADDRESS";
 
-/// Forwarder forwards events to upper runtime.
-#[async_trait]
-pub(crate) trait Forwarder {
-    /// Forward an event to publisher
-    async fn forward(&self, event: Arc<dyn Event + Send + Sync>) -> Result<()>;
-}
-
-/// Returns an instance of `ContainerdForwarder` in the case of
-/// `TTRPC_ADDRESS` existing. Otherwise, fall back to `LogForwarder`.
-pub(crate) async fn new_event_publisher(namespace: &str) -> Result<Box<dyn Forwarder>> {
-    let fwd: Box<dyn Forwarder> = match env::var(TTRPC_ADDRESS_ENV) {
-        Ok(address) if !address.is_empty() => Box::new(
-            ContainerdForwarder::new(namespace, &address)
-                .await
-                .context("new containerd forwarder")?,
-        ),
-        // an empty address doesn't match the arm above so catch it here
-        // and handle it the same way as if it's missing altogether
-        Ok(_) | Err(_) => Box::new(
-            LogForwarder::new(namespace)
-                .await
-                .context("new log forwarder")?,
-        ),
-    };
-
-    Ok(fwd)
+/// Containerd event delivery is required; never substitute log-only events.
+pub(crate) async fn new_event_publisher(namespace: &str) -> Result<ContainerdForwarder> {
+    let address =
+        env::var(TTRPC_ADDRESS_ENV).context("kata-fc requires containerd TTRPC_ADDRESS")?;
+    anyhow::ensure!(
+        !address.is_empty(),
+        "kata-fc requires nonempty containerd TTRPC_ADDRESS"
+    );
+    ContainerdForwarder::new(namespace, &address).await
 }
 
 /// Events are forwarded to containerd via ttrpc.
-struct ContainerdForwarder {
+pub(crate) struct ContainerdForwarder {
     namespace: String,
     publisher: RemotePublisher,
 }
@@ -91,9 +73,8 @@ impl ContainerdForwarder {
     }
 }
 
-#[async_trait]
-impl Forwarder for ContainerdForwarder {
-    async fn forward(&self, event: Arc<dyn Event + Send + Sync>) -> Result<()> {
+impl ContainerdForwarder {
+    pub(crate) async fn forward(&self, event: Arc<dyn Event + Send + Sync>) -> Result<()> {
         let req = self
             .build_forward_request(&event)
             .context("build forward request")?;
@@ -101,36 +82,6 @@ impl Forwarder for ContainerdForwarder {
             .forward(&default_ttrpc_context(), req)
             .await
             .context("forward")?;
-        Ok(())
-    }
-}
-
-/// Events are writen into logs.
-struct LogForwarder {
-    namespace: String,
-}
-
-impl LogForwarder {
-    async fn new(namespace: &str) -> Result<Self> {
-        Ok(Self {
-            namespace: namespace.to_string(),
-        })
-    }
-}
-
-#[async_trait]
-impl Forwarder for LogForwarder {
-    async fn forward(&self, event: Arc<dyn Event + Send + Sync>) -> Result<()> {
-        let ts = timestamp().map_err(|err| anyhow!("failed to get timestamp: {:?}", err))?;
-        info!(
-            sl!(),
-            "Received an event: topic: {}, namespace: {}, timestamp: {}, url: {}, value: {:?}",
-            event.r#type(),
-            self.namespace,
-            ts.seconds,
-            event.type_url(),
-            event
-        );
         Ok(())
     }
 }

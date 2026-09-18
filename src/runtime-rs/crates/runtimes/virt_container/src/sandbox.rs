@@ -5,10 +5,8 @@
 //
 
 use crate::health_check::HealthCheck;
-use crate::oom::CrioOomNotifier;
 use agent::kata::KataAgent;
-use agent::types::KernelModule;
-use agent::{self, Agent, GetGuestDetailsRequest, VolumeStatsRequest};
+use agent::{self, Agent, VolumeStatsRequest};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use common::error::is_normal_oom_shutdown_error;
@@ -111,7 +109,6 @@ pub struct VirtSandbox {
     shm_size: u64,
     factory: Option<Factory>,
     cancel_token: CancellationToken,
-    oom_notifier: Arc<CrioOomNotifier>,
 }
 
 impl std::fmt::Debug for VirtSandbox {
@@ -158,15 +155,7 @@ impl VirtSandbox {
             sandbox_config: Some(sandbox_config),
             factory: Some(factory),
             cancel_token,
-            oom_notifier: Arc::new(CrioOomNotifier::default()),
         })
-    }
-
-    /// The sandbox watches for OOM events but only the container manager knows
-    /// the bundle each container was created with, which is where CRI-O looks
-    /// for word of one.
-    pub fn oom_notifier(&self) -> Arc<CrioOomNotifier> {
-        self.oom_notifier.clone()
     }
 
     pub fn get_agent(&self) -> Arc<dyn Agent> {
@@ -286,19 +275,6 @@ impl VirtSandbox {
         // * spec details: https://github.com/opencontainers/runtime-spec/blob/c1662686cff159595277b79322d0272f5182941b/config.md#createruntime-hooks
         let mut create_runtime_hook_states = HookStates::new();
         create_runtime_hook_states.execute_hooks(create_runtime_hooks, Some(st.clone()))?;
-        Ok(())
-    }
-
-    // Query retained agent metadata only; Firecracker has static VM memory.
-    async fn store_guest_details(&self) -> Result<()> {
-        let details = self
-            .agent
-            .get_guest_details(GetGuestDetailsRequest::default())
-            .await
-            .context("failed to get guest details")?;
-        if let Some(agent) = details.agent_details {
-            info!(sl!(), "guest agent version {}", agent.version);
-        }
         Ok(())
     }
 
@@ -549,8 +525,6 @@ impl Sandbox for VirtSandbox {
             .context("setup device after start vm")?;
 
         // create sandbox in vm
-        let agent_config = self.agent.agent_config().await;
-        let kernel_modules = KernelModule::set_kernel_modules(agent_config.kernel_modules)?;
         let req = agent::CreateSandboxRequest {
             hostname: sandbox_config.hostname.clone(),
             dns: sandbox_config.dns.clone(),
@@ -561,13 +535,6 @@ impl Sandbox for VirtSandbox {
                 .context("get storages for sandbox")?,
             sandbox_pidns: false,
             sandbox_id: id.to_string(),
-            guest_hook_path: self
-                .hypervisor
-                .hypervisor_config()
-                .await
-                .security_info
-                .guest_hook_path,
-            kernel_modules,
         };
 
         self.agent
@@ -578,15 +545,9 @@ impl Sandbox for VirtSandbox {
         inner.state = SandboxState::Running;
         inner.created_at = Some(std::time::SystemTime::now());
 
-        // get and store guest details
-        self.store_guest_details()
-            .await
-            .context("failed to store guest details")?;
-
         let agent = self.agent.clone();
         let sender = self.msg_sender.clone();
         let cancel_token = self.cancel_token.clone();
-        let oom_notifier = self.oom_notifier.clone();
 
         info!(sl!(), "oom watcher start");
         tokio::spawn(async move {
@@ -602,8 +563,6 @@ impl Sandbox for VirtSandbox {
                             Ok(resp) => {
                                 let cid = &resp.container_id;
                                 warn!(sl!(), "send oom event for container {}", &cid);
-                                // CRI-O reads a file rather than the event below.
-                                oom_notifier.notify(cid).await;
                                 let event = TaskOOM {
                                     container_id: cid.to_string(),
                                     ..Default::default()
@@ -904,15 +863,11 @@ impl Sandbox for VirtSandbox {
             .get_volume_stats(req)
             .await
             .context("sandbox: failed to process direct volume stats query")?;
-        Ok(result.data)
-    }
-
-    async fn direct_volume_resize(&self, resize_req: agent::ResizeVolumeRequest) -> Result<()> {
-        self.agent
-            .resize_volume(resize_req)
-            .await
-            .context("sandbox: failed to resize direct-volume")?;
-        Ok(())
+        Ok(format!(
+            "Usage: {:?} Volume Condition: {:?}",
+            result.usage(),
+            result.volume_condition()
+        ))
     }
 
     async fn agent_metrics(&self) -> Result<String> {
@@ -925,10 +880,6 @@ impl Sandbox for VirtSandbox {
 
     async fn hypervisor_metrics(&self) -> Result<String> {
         self.hypervisor.get_hypervisor_metrics().await
-    }
-
-    async fn set_policy(&self, _policy: &str) -> Result<()> {
-        Err(anyhow!("kata-fc: agent policy is unsupported"))
     }
 }
 
@@ -1010,9 +961,6 @@ impl Persist for VirtSandbox {
             shm_size: DEFAULT_SHM_SIZE,
             factory: None,
             cancel_token: CancellationToken::default(),
-            // A restored sandbox is handed back its containers by the shim, so
-            // this starts out empty and fills up as they are created again.
-            oom_notifier: Arc::new(CrioOomNotifier::default()),
         })
     }
 }

@@ -8,13 +8,12 @@
 // the handler function should be invoked, and the corresponding data will be in the response
 
 use crate::shim_metrics::get_shim_metrics;
-use agent::ResizeVolumeRequest;
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use common::Sandbox;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
-use std::{str, sync::Arc};
+use std::sync::Arc;
 use url::Url;
 
 use shim_interface::shim_mgmt::{
@@ -38,10 +37,10 @@ pub(crate) async fn handler_mux(
         (&Method::GET, AGENT_URL) => agent_url_handler(sandbox, req).await,
         (&Method::POST, DIRECT_VOLUME_STATS_URL) => direct_volume_stats_handler(sandbox, req).await,
         (&Method::POST, DIRECT_VOLUME_RESIZE_URL) => {
-            direct_volume_resize_handler(sandbox, req).await
+            Ok(unsupported("kata-fc: volume resize is unsupported"))
         }
         (&Method::GET, METRICS_URL) => metrics_url_handler(sandbox, req).await,
-        (&Method::PUT, AGENT_POLICY_URL) => set_agent_policy_handler(sandbox, req).await,
+        (&Method::PUT, AGENT_POLICY_URL) => Ok(unsupported("kata-fc: agent policy is unsupported")),
         _ => Ok(not_found(req).await),
     }
 }
@@ -85,23 +84,6 @@ async fn direct_volume_stats_handler(
     }
 }
 
-async fn direct_volume_resize_handler(
-    sandbox: Arc<dyn Sandbox>,
-    req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>> {
-    let body = req.into_body().collect().await?.to_bytes();
-
-    // unserialize json body into resizeRequest struct
-    let resize_req: ResizeVolumeRequest =
-        serde_json::from_slice(&body).context("shim-mgmt: deserialize resizeRequest failed")?;
-    let result = sandbox.direct_volume_resize(resize_req).await;
-
-    match result {
-        Ok(_) => Ok(Response::new(Full::new(Bytes::from("")))),
-        _ => Err(anyhow!("handler: Failed to resize volume")),
-    }
-}
-
 // returns the url for metrics
 async fn metrics_url_handler(
     sandbox: Arc<dyn Sandbox>,
@@ -117,21 +99,9 @@ async fn metrics_url_handler(
     )))))
 }
 
-/// The set agent policy handler, for setting agent policy
-async fn set_agent_policy_handler(
-    sandbox: Arc<dyn Sandbox>,
-    req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>> {
-    match *req.method() {
-        Method::PUT => {
-            let data = req.into_body().collect().await?.to_bytes();
-            let policy: &str = str::from_utf8(&data)?;
-            sandbox
-                .set_policy(policy)
-                .await
-                .context("set agent policy handler failed")?;
-            Ok(Response::new(Full::new(Bytes::from(""))))
-        }
-        _ => Err(anyhow!("Set agent policy only takes PUT method")),
-    }
+fn unsupported(message: &'static str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::NOT_IMPLEMENTED)
+        .body(Full::new(Bytes::from(message)))
+        .unwrap()
 }

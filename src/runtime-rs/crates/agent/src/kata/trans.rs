@@ -6,31 +6,17 @@
 
 use std::convert::Into;
 
-use protocols::{
-    agent::{self, Metrics, OOMEvent},
-    csi, empty, health, types,
-};
-
 use crate::{
-    types::{
-        ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, AgentDetails, BlkioStats,
-        BlkioStatsEntry, CgroupStats, CheckRequest, ContainerID, CopyFileRequest, CpuStats,
-        CpuUsage, CreateContainerRequest, CreateSandboxRequest, Empty, ExecProcessRequest, FSGroup,
-        FSGroupChangePolicy, GetIPTablesRequest, GetIPTablesResponse, GuestDetailsResponse,
-        HealthCheckResponse, HugetlbStats, IPAddress, IPFamily, Interface, Interfaces,
-        KernelModule, MemHotplugByProbeRequest, MemoryData, MemoryStats, MetricsResponse,
-        NetworkStats, OnlineCPUMemRequest, PidsStats, ReadStreamRequest, ReadStreamResponse,
-        RemoveContainerRequest, ResizeVolumeRequest, Route, Routes, SetGuestDateTimeRequest,
-        SetIPTablesRequest, SetIPTablesResponse, SignalProcessRequest, StatsContainerResponse,
-        Storage, StringUser, ThrottlingData, TtyWinResizeRequest, UpdateContainerRequest,
-        UpdateInterfaceRequest, UpdateRoutesRequest, VersionCheckResponse, VolumeStatsRequest,
-        VolumeStatsResponse, WaitProcessRequest, WriteStreamRequest,
-    },
-    GetDiagnosticDataRequest, GetDiagnosticDataResponse, GetGuestDetailsRequest, OomEventResponse,
-    SetPolicyRequest, WaitProcessResponse, WriteStreamResponse,
+    ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, CheckRequest, ContainerID, CopyFileRequest,
+    CreateContainerRequest, CreateSandboxRequest, Empty, ExecProcessRequest, FSGroup,
+    FSGroupChangePolicy, GetDiagnosticDataRequest, IPAddress, IPFamily, Interface,
+    ReadStreamRequest, RemoveContainerRequest, Route, Routes, SignalProcessRequest, Storage,
+    StringUser, TtyWinResizeRequest, UpdateContainerRequest, UpdateInterfaceRequest,
+    UpdateRoutesRequest, VolumeStatsRequest, WaitProcessRequest, WriteStreamRequest,
 };
+use protocols::{agent, health, types};
 
-fn trans_vec<F: Sized + Clone, T: From<F>>(from: Vec<F>) -> Vec<T> {
+fn trans_vec<F: Sized, T: From<F>>(from: Vec<F>) -> Vec<T> {
     from.into_iter().map(|f| f.into()).collect()
 }
 
@@ -38,28 +24,6 @@ fn from_option<F: Sized, T: From<F>>(from: Option<F>) -> protobuf::MessageField<
     match from {
         Some(f) => protobuf::MessageField::from_option(Some(T::from(f))),
         None => protobuf::MessageField::none(),
-    }
-}
-
-fn into_option<F: Into<T>, T: Sized>(from: protobuf::MessageField<F>) -> Option<T> {
-    from.into_option().map(|f| f.into())
-}
-
-fn into_hash_map<F: Into<T>, T>(
-    from: std::collections::HashMap<String, F>,
-) -> std::collections::HashMap<String, T> {
-    let mut to: std::collections::HashMap<String, T> = Default::default();
-
-    for (key, value) in from {
-        to.insert(key, value.into());
-    }
-
-    to
-}
-
-impl From<empty::Empty> for Empty {
-    fn from(_: empty::Empty) -> Self {
-        Self {}
     }
 }
 
@@ -105,31 +69,12 @@ impl From<Storage> for agent::Storage {
     }
 }
 
-impl From<KernelModule> for agent::KernelModule {
-    fn from(from: KernelModule) -> Self {
-        Self {
-            name: from.name,
-            parameters: trans_vec(from.parameters),
-            ..Default::default()
-        }
-    }
-}
-
 impl From<IPFamily> for types::IPFamily {
     fn from(from: IPFamily) -> Self {
         if from == IPFamily::V4 {
             types::IPFamily::v4
         } else {
             types::IPFamily::v6
-        }
-    }
-}
-
-impl From<types::IPFamily> for IPFamily {
-    fn from(src: types::IPFamily) -> Self {
-        match src {
-            types::IPFamily::v4 => IPFamily::V4,
-            types::IPFamily::v6 => IPFamily::V6,
         }
     }
 }
@@ -141,16 +86,6 @@ impl From<IPAddress> for types::IPAddress {
             address: from.address,
             mask: from.mask,
             ..Default::default()
-        }
-    }
-}
-
-impl From<types::IPAddress> for IPAddress {
-    fn from(src: types::IPAddress) -> Self {
-        Self {
-            family: src.family.unwrap().into(),
-            address: "".to_string(),
-            mask: "".to_string(),
         }
     }
 }
@@ -171,29 +106,6 @@ impl From<Interface> for types::Interface {
     }
 }
 
-impl From<types::Interface> for Interface {
-    fn from(src: types::Interface) -> Self {
-        Self {
-            device: src.device,
-            name: src.name,
-            ip_addresses: trans_vec(src.IPAddresses),
-            mtu: src.mtu,
-            hw_addr: src.hwAddr,
-            device_path: src.devicePath,
-            field_type: src.type_,
-            raw_flags: src.raw_flags,
-        }
-    }
-}
-
-impl From<agent::Interfaces> for Interfaces {
-    fn from(src: agent::Interfaces) -> Self {
-        Self {
-            interfaces: trans_vec(src.Interfaces),
-        }
-    }
-}
-
 impl From<Route> for types::Route {
     fn from(from: Route) -> Self {
         Self {
@@ -210,34 +122,11 @@ impl From<Route> for types::Route {
     }
 }
 
-impl From<types::Route> for Route {
-    fn from(src: types::Route) -> Self {
-        Self {
-            dest: src.dest,
-            gateway: src.gateway,
-            device: src.device,
-            source: src.source,
-            scope: src.scope,
-            family: src.family.unwrap().into(),
-            flags: src.flags,
-            mtu: src.mtu,
-        }
-    }
-}
-
 impl From<Routes> for agent::Routes {
     fn from(from: Routes) -> Self {
         Self {
             Routes: trans_vec(from.routes),
             ..Default::default()
-        }
-    }
-}
-
-impl From<agent::Routes> for Routes {
-    fn from(src: agent::Routes) -> Self {
-        Self {
-            routes: trans_vec(src.Routes),
         }
     }
 }
@@ -347,47 +236,6 @@ impl From<WriteStreamRequest> for agent::WriteStreamRequest {
     }
 }
 
-impl From<agent::WriteStreamResponse> for WriteStreamResponse {
-    fn from(from: agent::WriteStreamResponse) -> Self {
-        Self { length: from.len }
-    }
-}
-
-impl From<GetIPTablesRequest> for agent::GetIPTablesRequest {
-    fn from(from: GetIPTablesRequest) -> Self {
-        Self {
-            is_ipv6: from.is_ipv6,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<agent::GetIPTablesResponse> for GetIPTablesResponse {
-    fn from(from: agent::GetIPTablesResponse) -> Self {
-        Self {
-            data: from.data().to_vec(),
-        }
-    }
-}
-
-impl From<SetIPTablesRequest> for agent::SetIPTablesRequest {
-    fn from(from: SetIPTablesRequest) -> Self {
-        Self {
-            is_ipv6: from.is_ipv6,
-            data: from.data,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<agent::SetIPTablesResponse> for SetIPTablesResponse {
-    fn from(from: agent::SetIPTablesResponse) -> Self {
-        Self {
-            data: from.data().to_vec(),
-        }
-    }
-}
-
 impl From<ExecProcessRequest> for agent::ExecProcessRequest {
     fn from(from: ExecProcessRequest) -> Self {
         Self {
@@ -403,143 +251,6 @@ impl From<ExecProcessRequest> for agent::ExecProcessRequest {
     }
 }
 
-impl From<agent::CpuUsage> for CpuUsage {
-    fn from(src: agent::CpuUsage) -> Self {
-        Self {
-            total_usage: src.total_usage,
-            percpu_usage: src.percpu_usage,
-            usage_in_kernelmode: src.usage_in_kernelmode,
-            usage_in_usermode: src.usage_in_usermode,
-        }
-    }
-}
-
-impl From<agent::ThrottlingData> for ThrottlingData {
-    fn from(src: agent::ThrottlingData) -> Self {
-        Self {
-            periods: src.periods,
-            throttled_periods: src.throttled_periods,
-            throttled_time: src.throttled_time,
-        }
-    }
-}
-
-impl From<agent::CpuStats> for CpuStats {
-    fn from(src: agent::CpuStats) -> Self {
-        Self {
-            cpu_usage: into_option(src.cpu_usage),
-            throttling_data: into_option(src.throttling_data),
-        }
-    }
-}
-
-impl From<agent::MemoryData> for MemoryData {
-    fn from(src: agent::MemoryData) -> Self {
-        Self {
-            usage: src.usage,
-            max_usage: src.max_usage,
-            failcnt: src.failcnt,
-            limit: src.limit,
-        }
-    }
-}
-
-impl From<agent::MemoryStats> for MemoryStats {
-    fn from(src: agent::MemoryStats) -> Self {
-        Self {
-            cache: src.cache,
-            usage: into_option(src.usage),
-            swap_usage: into_option(src.swap_usage),
-            kernel_usage: into_option(src.kernel_usage),
-            use_hierarchy: src.use_hierarchy,
-            stats: into_hash_map(src.stats),
-        }
-    }
-}
-
-impl From<agent::PidsStats> for PidsStats {
-    fn from(src: agent::PidsStats) -> Self {
-        Self {
-            current: src.current,
-            limit: src.limit,
-        }
-    }
-}
-
-impl From<agent::BlkioStatsEntry> for BlkioStatsEntry {
-    fn from(src: agent::BlkioStatsEntry) -> Self {
-        Self {
-            major: src.major,
-            minor: src.minor,
-            op: src.op,
-            value: src.value,
-        }
-    }
-}
-
-impl From<agent::BlkioStats> for BlkioStats {
-    fn from(src: agent::BlkioStats) -> Self {
-        Self {
-            io_service_bytes_recursive: trans_vec(src.io_service_bytes_recursive),
-            io_serviced_recursive: trans_vec(src.io_serviced_recursive),
-            io_queued_recursive: trans_vec(src.io_queued_recursive),
-            io_service_time_recursive: trans_vec(src.io_service_time_recursive),
-            io_wait_time_recursive: trans_vec(src.io_wait_time_recursive),
-            io_merged_recursive: trans_vec(src.io_merged_recursive),
-            io_time_recursive: trans_vec(src.io_time_recursive),
-            sectors_recursive: trans_vec(src.sectors_recursive),
-        }
-    }
-}
-
-impl From<agent::HugetlbStats> for HugetlbStats {
-    fn from(src: agent::HugetlbStats) -> Self {
-        Self {
-            usage: src.usage,
-            max_usage: src.max_usage,
-            failcnt: src.failcnt,
-        }
-    }
-}
-
-impl From<agent::CgroupStats> for CgroupStats {
-    fn from(src: agent::CgroupStats) -> Self {
-        Self {
-            cpu_stats: into_option(src.cpu_stats),
-            memory_stats: into_option(src.memory_stats),
-            pids_stats: into_option(src.pids_stats),
-            blkio_stats: into_option(src.blkio_stats),
-            hugetlb_stats: into_hash_map(src.hugetlb_stats),
-        }
-    }
-}
-
-impl From<agent::NetworkStats> for NetworkStats {
-    fn from(src: agent::NetworkStats) -> Self {
-        Self {
-            name: src.name,
-            rx_bytes: src.rx_bytes,
-            rx_packets: src.rx_packets,
-            rx_errors: src.rx_errors,
-            rx_dropped: src.rx_dropped,
-            tx_bytes: src.tx_bytes,
-            tx_packets: src.tx_packets,
-            tx_errors: src.tx_errors,
-            tx_dropped: src.tx_dropped,
-        }
-    }
-}
-
-// translate ttrpc::agent response to interface::agent response
-impl From<agent::StatsContainerResponse> for StatsContainerResponse {
-    fn from(src: agent::StatsContainerResponse) -> Self {
-        Self {
-            cgroup_stats: into_option(src.cgroup_stats),
-            network_stats: trans_vec(src.network_stats),
-        }
-    }
-}
-
 impl From<ReadStreamRequest> for agent::ReadStreamRequest {
     fn from(from: ReadStreamRequest) -> Self {
         Self {
@@ -548,12 +259,6 @@ impl From<ReadStreamRequest> for agent::ReadStreamRequest {
             len: from.len,
             ..Default::default()
         }
-    }
-}
-
-impl From<agent::ReadStreamResponse> for ReadStreamResponse {
-    fn from(from: agent::ReadStreamResponse) -> Self {
-        Self { data: from.data }
     }
 }
 
@@ -578,26 +283,10 @@ impl From<UpdateInterfaceRequest> for agent::UpdateInterfaceRequest {
     }
 }
 
-impl From<Empty> for agent::ListInterfacesRequest {
-    fn from(_: Empty) -> Self {
-        Self {
-            ..Default::default()
-        }
-    }
-}
-
 impl From<UpdateRoutesRequest> for agent::UpdateRoutesRequest {
     fn from(from: UpdateRoutesRequest) -> Self {
         Self {
             routes: from_option(from.route),
-            ..Default::default()
-        }
-    }
-}
-
-impl From<Empty> for agent::ListRoutesRequest {
-    fn from(_: Empty) -> Self {
-        Self {
             ..Default::default()
         }
     }
@@ -642,65 +331,6 @@ impl From<CreateSandboxRequest> for agent::CreateSandboxRequest {
             storages: trans_vec(from.storages),
             sandbox_pidns: from.sandbox_pidns,
             sandbox_id: from.sandbox_id,
-            guest_hook_path: from.guest_hook_path,
-            kernel_modules: trans_vec(from.kernel_modules),
-            ..Default::default()
-        }
-    }
-}
-
-impl From<Empty> for agent::DestroySandboxRequest {
-    fn from(_: Empty) -> Self {
-        Self {
-            ..Default::default()
-        }
-    }
-}
-
-impl From<OnlineCPUMemRequest> for agent::OnlineCPUMemRequest {
-    fn from(from: OnlineCPUMemRequest) -> Self {
-        Self {
-            wait: from.wait,
-            nb_cpus: from.nb_cpus,
-            cpu_only: from.cpu_only,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<MemHotplugByProbeRequest> for agent::MemHotplugByProbeRequest {
-    fn from(from: MemHotplugByProbeRequest) -> Self {
-        Self {
-            memHotplugProbeAddr: from.mem_hotplug_probe_addr,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<SetGuestDateTimeRequest> for agent::SetGuestDateTimeRequest {
-    fn from(from: SetGuestDateTimeRequest) -> Self {
-        Self {
-            Sec: from.sec,
-            Usec: from.usec,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<GetGuestDetailsRequest> for agent::GuestDetailsRequest {
-    fn from(from: GetGuestDetailsRequest) -> Self {
-        Self {
-            mem_block_size: from.mem_block_size,
-            mem_hotplug_probe: from.mem_hotplug_probe,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<SetPolicyRequest> for agent::SetPolicyRequest {
-    fn from(from: SetPolicyRequest) -> Self {
-        Self {
-            policy: from.policy,
             ..Default::default()
         }
     }
@@ -712,35 +342,6 @@ impl From<GetDiagnosticDataRequest> for agent::GetDiagnosticDataRequest {
             log_type: from.log_type,
             container_id: from.container_id,
             ..Default::default()
-        }
-    }
-}
-
-impl From<agent::GetDiagnosticDataResponse> for GetDiagnosticDataResponse {
-    fn from(from: agent::GetDiagnosticDataResponse) -> Self {
-        Self { data: from.data }
-    }
-}
-
-impl From<agent::AgentDetails> for AgentDetails {
-    fn from(src: agent::AgentDetails) -> Self {
-        Self {
-            version: src.version,
-            init_daemon: src.init_daemon,
-            device_handlers: trans_vec(src.device_handlers),
-            storage_handlers: trans_vec(src.storage_handlers),
-            supports_seccomp: src.supports_seccomp,
-            extra_features: trans_vec(src.extra_features),
-        }
-    }
-}
-
-impl From<agent::GuestDetailsResponse> for GuestDetailsResponse {
-    fn from(src: agent::GuestDetailsResponse) -> Self {
-        Self {
-            mem_block_size_bytes: src.mem_block_size_bytes,
-            agent_details: into_option(src.agent_details),
-            support_mem_hotplug_probe: src.support_mem_hotplug_probe,
         }
     }
 }
@@ -757,14 +358,6 @@ impl From<CopyFileRequest> for agent::CopyFileRequest {
             offset: from.offset,
             data: from.data,
             ..Default::default()
-        }
-    }
-}
-
-impl From<agent::WaitProcessResponse> for WaitProcessResponse {
-    fn from(from: agent::WaitProcessResponse) -> Self {
-        Self {
-            status: from.status,
         }
     }
 }
@@ -794,64 +387,10 @@ impl From<CheckRequest> for health::CheckRequest {
     }
 }
 
-impl From<health::HealthCheckResponse> for HealthCheckResponse {
-    fn from(from: health::HealthCheckResponse) -> Self {
-        Self {
-            status: from.status.value() as u32,
-        }
-    }
-}
-
-impl From<health::VersionCheckResponse> for VersionCheckResponse {
-    fn from(from: health::VersionCheckResponse) -> Self {
-        Self {
-            grpc_version: from.grpc_version,
-            agent_version: from.agent_version,
-        }
-    }
-}
-
-impl From<agent::Metrics> for MetricsResponse {
-    fn from(from: Metrics) -> Self {
-        Self {
-            metrics: from.metrics,
-        }
-    }
-}
-
-impl From<agent::OOMEvent> for OomEventResponse {
-    fn from(from: OOMEvent) -> Self {
-        Self {
-            container_id: from.container_id,
-        }
-    }
-}
-
 impl From<VolumeStatsRequest> for agent::VolumeStatsRequest {
     fn from(from: VolumeStatsRequest) -> Self {
         Self {
             volume_guest_path: from.volume_guest_path,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<csi::VolumeStatsResponse> for VolumeStatsResponse {
-    fn from(from: csi::VolumeStatsResponse) -> Self {
-        let result: String = format!(
-            "Usage: {:?} Volume Condition: {:?}",
-            from.usage(),
-            from.volume_condition()
-        );
-        Self { data: result }
-    }
-}
-
-impl From<ResizeVolumeRequest> for agent::ResizeVolumeRequest {
-    fn from(from: ResizeVolumeRequest) -> Self {
-        Self {
-            volume_guest_path: from.volume_guest_path,
-            size: from.size,
             ..Default::default()
         }
     }

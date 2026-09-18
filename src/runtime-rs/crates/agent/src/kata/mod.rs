@@ -7,29 +7,19 @@
 mod agent;
 mod trans;
 
-use std::{os::unix::io::RawFd, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use kata_types::config::Agent as AgentConfig;
-use protocols::{agent_ttrpc_async as agent_ttrpc, health_ttrpc_async as health_ttrpc};
+use protobuf::Message;
 use tokio::sync::RwLock;
 use ttrpc::asynchronous::Client;
 
 use crate::{log_forwarder::LogForwarder, sock};
 
-// https://github.com/firecracker-microvm/firecracker/blob/master/docs/vsock.md
-#[derive(Debug, Default)]
-pub struct Vsock {
-    pub context_id: u64,
-    pub port: u32,
-}
-
 pub(crate) struct KataAgentInner {
     /// TTRPC client
     pub client: Option<Client>,
-
-    /// Client fd
-    pub client_fd: RawFd,
 
     /// Unix domain socket address
     pub socket_address: String,
@@ -44,15 +34,12 @@ pub(crate) struct KataAgentInner {
 impl std::fmt::Debug for KataAgentInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KataAgentInner")
-            .field("client_fd", &self.client_fd)
             .field("socket_address", &self.socket_address)
             .field("config", &self.config)
             .finish()
     }
 }
 
-unsafe impl Send for KataAgent {}
-unsafe impl Sync for KataAgent {}
 #[derive(Debug)]
 pub struct KataAgent {
     pub(crate) inner: Arc<RwLock<KataAgentInner>>,
@@ -63,7 +50,6 @@ impl KataAgent {
         KataAgent {
             inner: Arc::new(RwLock::new(KataAgentInner {
                 client: None,
-                client_fd: -1,
                 socket_address: "".to_string(),
                 config,
                 log_forwarder: LogForwarder::new(),
@@ -71,26 +57,36 @@ impl KataAgent {
         }
     }
 
-    pub async fn get_health_client(&self) -> Option<(health_ttrpc::HealthClient, i64, RawFd)> {
-        let inner = self.inner.read().await;
-        inner.client.as_ref().map(|c| {
+    // No handwritten framing or status parser: ttrpc validates the envelope.
+    async fn request<M: Message>(
+        &self,
+        service: &str,
+        method: &str,
+        request: &M,
+        timeout: Option<i64>,
+    ) -> Result<Vec<u8>> {
+        let (client, timeout_ms) = {
+            let inner = self.inner.read().await;
+            let configured = if service == "grpc.Health" {
+                inner.config.health_check_request_timeout_ms
+            } else {
+                inner.config.request_timeout_ms
+            };
             (
-                health_ttrpc::HealthClient::new(c.clone()),
-                inner.config.health_check_request_timeout_ms as i64,
-                inner.client_fd,
+                inner.client.clone().context("agent is disconnected")?,
+                timeout.unwrap_or(configured as i64),
             )
-        })
-    }
-
-    pub async fn get_agent_client(&self) -> Option<(agent_ttrpc::AgentServiceClient, i64, RawFd)> {
-        let inner = self.inner.read().await;
-        inner.client.as_ref().map(|c| {
-            (
-                agent_ttrpc::AgentServiceClient::new(c.clone()),
-                inner.config.request_timeout_ms as i64,
-                inner.client_fd,
-            )
-        })
+        };
+        let response = client
+            .request(ttrpc::Request {
+                service: service.to_owned(),
+                method: method.to_owned(),
+                payload: request.write_to_bytes()?,
+                timeout_nano: timeout_ms * 1_000_000,
+                ..Default::default()
+            })
+            .await?;
+        Ok(response.payload)
     }
 
     pub(crate) async fn set_socket_address(&self, address: &str) -> Result<()> {
@@ -110,17 +106,7 @@ impl KataAgent {
             sock::new(&inner.socket_address, inner.config.server_port).context("new sock")?;
         info!(sl!(), "try to connect agent server through {:?}", sock);
         let stream = sock.connect(&config).await.context("connect")?;
-        let client_fd = stream.raw_fd();
-        info!(
-            sl!(),
-            "get stream raw fd {:?} with socket address: {:?} and server_port {:?}",
-            client_fd,
-            &inner.socket_address,
-            inner.config.server_port
-        );
-        let c = Client::new(stream.into_ttrpc_socket());
-        inner.client = Some(c);
-        inner.client_fd = client_fd;
+        inner.client = Some(Client::new(stream.into()));
         Ok(())
     }
 
@@ -154,11 +140,6 @@ impl KataAgent {
         ))
     }
 
-    pub(crate) async fn agent_config(&self) -> AgentConfig {
-        let inner = self.inner.read().await;
-        inner.config.clone()
-    }
-
     /// Disconnect from the agent gRPC server and clean up related resources.
     pub(crate) async fn disconnect(&self) -> Result<()> {
         let mut inner = self.inner.write().await;
@@ -166,7 +147,6 @@ impl KataAgent {
 
         // If there is a valid client, drop it (closes the connection).
         inner.client.take();
-        inner.client_fd = -1;
 
         Ok(())
     }

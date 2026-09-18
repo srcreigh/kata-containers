@@ -13,9 +13,6 @@ use tokio::sync::{mpsc, Mutex};
 /// monitor check interval 30s
 const HEALTH_CHECK_TIMER_INTERVAL: u64 = 30;
 
-/// version check threshold 5min
-const VERSION_CHECK_THRESHOLD: u64 = 5 * 60 / HEALTH_CHECK_TIMER_INTERVAL;
-
 /// health check stop channel buffer size
 const HEALTH_CHECK_STOP_CHANNEL_BUFFER_SIZE: usize = 1;
 
@@ -48,8 +45,6 @@ impl HealthCheck {
         let stop_rx = self.stop_rx.clone();
         let keep_abnormal = self.keep_abnormal;
         tokio::spawn(async move {
-            let mut version_check_threshold_count = 0;
-
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(HEALTH_CHECK_TIMER_INTERVAL))
                     .await;
@@ -69,18 +64,6 @@ impl HealthCheck {
                         {
                             Ok(_) => {
                                 debug!(sl!(), "check {} agent health successfully", id);
-                                version_check_threshold_count += 1;
-                                if version_check_threshold_count >= VERSION_CHECK_THRESHOLD {
-                                    // need to check version
-                                    version_check_threshold_count = 0;
-                                    if let Ok(v) = agent
-                                        .version(agent::CheckRequest::new(""))
-                                        .await
-                                        .context("check version")
-                                    {
-                                        info!(sl!(), "agent {}", v.agent_version)
-                                    }
-                                }
                                 continue;
                             }
                             Err(e) => {

@@ -16,7 +16,7 @@ use runtimes::RuntimeHandlerManager;
 use tokio::sync::mpsc::{channel, Receiver};
 use ttrpc::asynchronous::Server;
 
-use crate::event::{new_event_publisher, Forwarder};
+use crate::event::{new_event_publisher, ContainerdForwarder};
 use crate::sandbox_service::SandboxService;
 use crate::task_service::TaskService;
 use containerd_shim_protos::sandbox_async;
@@ -31,7 +31,7 @@ pub struct ServiceManager {
     binary: String,
     address: String,
     namespace: String,
-    event_publisher: Box<dyn Forwarder>,
+    event_publisher: ContainerdForwarder,
 }
 
 impl std::fmt::Debug for ServiceManager {

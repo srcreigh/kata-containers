@@ -5,13 +5,12 @@
 //
 
 use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
 
-use super::{ConnectConfig, Sock, Stream};
+use super::ConnectConfig;
 
 #[derive(Debug, PartialEq)]
 pub struct HybridVsock {
@@ -28,9 +27,8 @@ impl HybridVsock {
     }
 }
 
-#[async_trait]
-impl Sock for HybridVsock {
-    async fn connect(&self, config: &ConnectConfig) -> Result<Stream> {
+impl HybridVsock {
+    pub async fn connect(&self, config: &ConnectConfig) -> Result<UnixStream> {
         let mut last_err = None;
         let retry_times = 1 + (config.reconnect_timeout_ms / config.dial_timeout_ms);
 
@@ -38,7 +36,7 @@ impl Sock for HybridVsock {
             match connect_helper(&self.uds, self.port).await {
                 Ok(stream) => {
                     info!(sl!(), "hybrid vsock: connected to {:?}", self);
-                    return Ok(Stream::Unix(stream));
+                    return Ok(stream);
                 }
                 Err(err) => {
                     trace!(

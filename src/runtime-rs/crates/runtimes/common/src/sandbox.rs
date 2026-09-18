@@ -40,7 +40,6 @@ pub trait Sandbox: Send + Sync {
 
     // utils
     async fn direct_volume_stats(&self, volume_path: &str) -> Result<String>;
-    async fn direct_volume_resize(&self, resize_req: agent::ResizeVolumeRequest) -> Result<()>;
     async fn agent_sock(&self) -> Result<String>;
     async fn wait_process(
         &self,
@@ -56,7 +55,4 @@ pub trait Sandbox: Send + Sync {
     // metrics function
     async fn agent_metrics(&self) -> Result<String>;
     async fn hypervisor_metrics(&self) -> Result<String>;
-
-    // set agent policy
-    async fn set_policy(&self, policy: &str) -> Result<()>;
 }
