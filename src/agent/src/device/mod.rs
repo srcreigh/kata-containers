@@ -4,10 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use self::block_device_handler::{VirtioBlkMmioDeviceHandler, VirtioBlkPciDeviceHandler};
-use self::nvdimm_device_handler::VirtioNvdimmDeviceHandler;
-use self::scsi_device_handler::ScsiDeviceHandler;
-use self::vfio_device_handler::{VfioApDeviceHandler, VfioPciDeviceHandler};
+use self::block_device_handler::VirtioBlkMmioDeviceHandler;
 use crate::pci;
 use crate::sandbox::PciHostGuestMapping;
 use crate::sandbox::Sandbox;
@@ -37,9 +34,6 @@ use tracing::instrument;
 
 pub mod block_device_handler;
 pub mod network_device_handler;
-pub mod nvdimm_device_handler;
-pub mod scsi_device_handler;
-pub mod vfio_device_handler;
 
 pub const BLOCK: &str = "block";
 
@@ -165,13 +159,6 @@ lazy_static! {
 
         let handlers: Vec<Arc<dyn DeviceHandler>> = vec![
             Arc::new(VirtioBlkMmioDeviceHandler {}),
-            Arc::new(VirtioBlkPciDeviceHandler {}),
-            Arc::new(VirtioNvdimmDeviceHandler {}),
-            Arc::new(ScsiDeviceHandler {}),
-            Arc::new(VfioPciDeviceHandler {}),
-            Arc::new(VfioApDeviceHandler {}),
-            #[cfg(target_arch = "s390x")]
-            Arc::new(self::block_device_handler::VirtioBlkCcwDeviceHandler {}),
         ];
 
         for handler in handlers {

@@ -318,53 +318,7 @@ impl DeviceManager {
                     .await
                     .context("failed to create block device modern")?
             }
-            DeviceConfig::VfioCfg(config) => {
-                let mut vfio_dev_config = config.clone();
-                let dev_host_path = vfio_dev_config.host_path.clone();
-                if let Some(device_matched_id) = self.find_device(dev_host_path).await {
-                    return Ok(device_matched_id);
-                }
-                let virt_path = self.get_dev_virt_path(vfio_dev_config.dev_type.as_str(), false)?;
-                vfio_dev_config.virt_path = virt_path;
 
-                Arc::new(Mutex::new(VfioDevice::new(
-                    device_id.clone(),
-                    &vfio_dev_config,
-                )?))
-            }
-            DeviceConfig::VfioModernCfg(config) => {
-                let dev_host_path = config.host_path.clone();
-                if let Some(device_matched_id) = self.find_device(dev_host_path.clone()).await {
-                    return Ok(device_matched_id);
-                }
-
-                let virt_path = self.get_dev_virt_path(&config.dev_type, false)?;
-                let mut vfio_base = config.clone();
-                vfio_base.iommu_group_devnode = PathBuf::from(dev_host_path);
-                vfio_base.virt_path = virt_path;
-
-                Arc::new(Mutex::new(VfioDeviceModernHandle::new(
-                    device_id.clone(),
-                    &vfio_base,
-                )?))
-            }
-            DeviceConfig::VhostUserBlkCfg(config) => {
-                // try to find the device, found and just return id.
-                if let Some(dev_id_matched) = self.find_device(config.socket_path.clone()).await {
-                    info!(
-                        sl!(),
-                        "vhost blk device with path:{:?} found. just return device id: {:?}",
-                        config.socket_path.clone(),
-                        dev_id_matched
-                    );
-
-                    return Ok(dev_id_matched);
-                }
-
-                self.create_vhost_blk_device(config, device_id.clone())
-                    .await
-                    .context("failed to create vhost blk device")?
-            }
             DeviceConfig::NetworkCfg(config) => {
                 // try to find the device, found and just return id.
                 let host_path = config.host_dev_name.as_str();
@@ -381,58 +335,13 @@ impl DeviceManager {
 
                 Arc::new(Mutex::new(NetworkDevice::new(device_id.clone(), config)))
             }
-            DeviceConfig::VhostUserNetworkCfg(config) => {
-                if let Some(dev_id) = self.find_device(config.socket_path.clone()).await {
-                    info!(
-                        sl!(),
-                        "vhost-user-net device {} found, just return device id {}",
-                        config.socket_path,
-                        dev_id
-                    );
-                    return Ok(dev_id);
-                }
 
-                Arc::new(Mutex::new(VhostUserNetDevice::new(
-                    device_id.clone(),
-                    config.clone(),
-                )))
-            }
             DeviceConfig::HybridVsockCfg(hvconfig) => {
                 // No need to do find device for hybrid vsock device.
                 Arc::new(Mutex::new(HybridVsockDevice::new(&device_id, hvconfig)))
             }
-            DeviceConfig::VsockCfg(vconfig) => {
-                // No need to do find device for vsock device.
-                Arc::new(Mutex::new(
-                    VsockDevice::new(device_id.clone(), vconfig).await?,
-                ))
-            }
-            DeviceConfig::ShareFsCfg(config) => {
-                // Try to find the sharefs device. If found, just return matched device id.
-                if let Some(device_id_matched) =
-                    self.find_device(config.host_shared_path.clone()).await
-                {
-                    info!(
-                        sl!(),
-                        "share-fs device with path:{:?} found, device id: {:?}",
-                        config.host_shared_path,
-                        device_id_matched
-                    );
-                    return Ok(device_id_matched);
-                }
 
-                Arc::new(Mutex::new(ShareFsDevice::new(&device_id, config)))
-            }
-            DeviceConfig::ProtectionDevCfg(pconfig) => {
-                // No need to do find device for protection device.
-                Arc::new(Mutex::new(ProtectionDevice::new(
-                    device_id.clone(),
-                    pconfig,
-                )))
-            }
-            DeviceConfig::PortDeviceCfg(config) => {
-                Arc::new(Mutex::new(PCIePortDevice::new(&device_id, config)))
-            }
+            _ => anyhow::bail!("kata-fc-minimal: unsupported device configuration"),
         };
 
         // register device to devices
@@ -690,7 +599,7 @@ mod tests {
     use super::DeviceManager;
     use crate::{
         device::{device_manager::get_block_device_info, DeviceConfig, DeviceType},
-        qemu::Qemu,
+        firecracker::Firecracker,
         BlockConfigModern, KATA_BLK_DEV_TYPE,
     };
     use anyhow::{anyhow, Context, Result};
@@ -700,7 +609,7 @@ mod tests {
     use tokio::sync::RwLock;
 
     async fn new_device_manager() -> Result<Arc<RwLock<DeviceManager>>> {
-        let hypervisor_name: &str = "qemu";
+        let hypervisor_name: &str = "firecracker";
         let toml_config = load_test_config(hypervisor_name.to_owned())?;
         let topo_config = TopologyConfigInfo::new(&toml_config);
         let hypervisor_config = toml_config
@@ -708,7 +617,7 @@ mod tests {
             .get(hypervisor_name)
             .ok_or_else(|| anyhow!("failed to get hypervisor for {}", &hypervisor_name))?;
 
-        let hypervisor = Qemu::new();
+        let hypervisor = Firecracker::new();
         hypervisor
             .set_hypervisor_config(hypervisor_config.clone())
             .await;

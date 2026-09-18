@@ -12,14 +12,8 @@ edition = { workspace = true }
 name = "containerd-shim-kata-v2"
 path = "crates/shim/src/bin/main.rs"
 
-[[bin]]
-name = "shim-ctl"
-path = "crates/shim-ctl/src/main.rs"
 
 [features]
-dragonball = ["runtimes/dragonball"]
-cloud-hypervisor = ["runtimes/cloud-hypervisor"]
-openvmm = ["runtimes/openvmm"]
 
 [dependencies]
 anyhow = { workspace = true }

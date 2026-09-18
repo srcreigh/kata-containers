@@ -26,30 +26,16 @@ use common::{
 };
 
 use containerd_shim_protos::events::task::{TaskExit, TaskOOM};
-#[cfg(all(
-    feature = "cloud-hypervisor",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-use hypervisor::ch::CloudHypervisor;
+
 use hypervisor::device::topology::PCIePort;
 use hypervisor::device::util::{get_host_path, DEVICE_TYPE_CHAR};
-use hypervisor::remote::Remote;
+
 use hypervisor::VsockConfig;
-use hypervisor::HYPERVISOR_REMOTE;
-#[cfg(all(
-    feature = "dragonball",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-use hypervisor::{dragonball::Dragonball, HYPERVISOR_DRAGONBALL};
+
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use hypervisor::{firecracker::Firecracker, HYPERVISOR_FIRECRACKER};
 use hypervisor::{is_vfio_ap_device, BlockConfigModern, Hypervisor, VfioDeviceBase};
-#[cfg(all(
-    feature = "openvmm",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-use hypervisor::{openvmm::OpenVmm, HYPERVISOR_NAME_OPENVMM};
-use hypervisor::{qemu::Qemu, HYPERVISOR_QEMU};
+
 use hypervisor::{
     utils::{
         get_hvsock_path, remove_vmm_user_runtime_dir, uses_native_ccw_bus, vmm_user_runtime_dir,
@@ -63,11 +49,7 @@ use kata_sys_util::protection::{available_guest_protection, GuestProtection};
 use kata_sys_util::spec::load_oci_spec;
 use kata_types::capabilities::CapabilityBits;
 use kata_types::config::hypervisor::Hypervisor as HypervisorConfig;
-#[cfg(all(
-    feature = "cloud-hypervisor",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-use kata_types::config::hypervisor::HYPERVISOR_NAME_CH;
+
 use kata_types::config::hypervisor::{VIRTIO_BLK_CCW, VIRTIO_BLK_PCI};
 use kata_types::config::{hypervisor::Factory, TomlConfig};
 use kata_types::initdata::{calculate_initdata_digest, ProtectedPlatform};
@@ -1569,25 +1551,9 @@ impl Persist for VirtSandbox {
             sandbox_type: VIRTCONTAINER.to_string(),
             resource: Some(self.resource_manager.save().await?),
             hypervisor: match hypervisor_state.hypervisor_type.as_str() {
-                #[cfg(all(
-                    feature = "dragonball",
-                    any(target_arch = "x86_64", target_arch = "aarch64")
-                ))]
-                HYPERVISOR_DRAGONBALL => Ok(Some(hypervisor_state)),
-                #[cfg(all(
-                    feature = "cloud-hypervisor",
-                    any(target_arch = "x86_64", target_arch = "aarch64")
-                ))]
-                HYPERVISOR_NAME_CH => Ok(Some(hypervisor_state)),
                 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                 HYPERVISOR_FIRECRACKER => Ok(Some(hypervisor_state)),
-                HYPERVISOR_QEMU => Ok(Some(hypervisor_state)),
-                HYPERVISOR_REMOTE => Ok(Some(hypervisor_state)),
-                #[cfg(all(
-                    feature = "openvmm",
-                    any(target_arch = "x86_64", target_arch = "aarch64")
-                ))]
-                HYPERVISOR_NAME_OPENVMM => Ok(Some(hypervisor_state)),
+
                 _ => Err(anyhow!(
                     "Unsupported hypervisor {}",
                     hypervisor_state.hypervisor_type
@@ -1619,45 +1585,13 @@ impl Persist for VirtSandbox {
         let r = sandbox_state.resource.unwrap_or_default();
         let h = sandbox_state.hypervisor.unwrap_or_default();
         let hypervisor = match h.hypervisor_type.as_str() {
-            #[cfg(all(
-                feature = "dragonball",
-                any(target_arch = "x86_64", target_arch = "aarch64")
-            ))]
-            HYPERVISOR_DRAGONBALL => {
-                let hypervisor = Arc::new(Dragonball::restore((), h).await?) as Arc<dyn Hypervisor>;
-                Ok(hypervisor)
-            }
-            #[cfg(all(
-                feature = "cloud-hypervisor",
-                any(target_arch = "x86_64", target_arch = "aarch64")
-            ))]
-            HYPERVISOR_NAME_CH => {
-                let hypervisor =
-                    Arc::new(CloudHypervisor::restore((), h).await?) as Arc<dyn Hypervisor>;
-                Ok(hypervisor)
-            }
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             HYPERVISOR_FIRECRACKER => {
                 let hypervisor =
                     Arc::new(Firecracker::restore((), h).await?) as Arc<dyn Hypervisor>;
                 Ok(hypervisor)
             }
-            HYPERVISOR_QEMU => {
-                let hypervisor = Arc::new(Qemu::restore((), h).await?) as Arc<dyn Hypervisor>;
-                Ok(hypervisor)
-            }
-            HYPERVISOR_REMOTE => {
-                let hypervisor = Arc::new(Remote::restore((), h).await?) as Arc<dyn Hypervisor>;
-                Ok(hypervisor)
-            }
-            #[cfg(all(
-                feature = "openvmm",
-                any(target_arch = "x86_64", target_arch = "aarch64")
-            ))]
-            HYPERVISOR_NAME_OPENVMM => {
-                let hypervisor = Arc::new(OpenVmm::restore((), h).await?) as Arc<dyn Hypervisor>;
-                Ok(hypervisor)
-            }
+
             _ => Err(anyhow!("Unsupported hypervisor {}", &h.hypervisor_type)),
         }?;
         let agent = Arc::new(KataAgent::new(kata_types::config::Agent::default()));

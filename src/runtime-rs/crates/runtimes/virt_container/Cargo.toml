@@ -29,7 +29,7 @@ uuid = { version = "1", features = ["v4"] }
 # Local dependencies
 agent = { workspace = true }
 common = { workspace = true }
-hypervisor = { workspace = true, features = ["cloud-hypervisor"] }
+hypervisor = { workspace = true }
 kata-sys-util = { workspace = true }
 pod-resources-rs = { workspace = true }
 kata-types = { workspace = true }
@@ -42,16 +42,13 @@ resource = { workspace = true }
 tempfile = { workspace = true }
 
 [features]
-default = ["cloud-hypervisor"]
+default = []
 
 # Enable the Cloud Hypervisor driver
-cloud-hypervisor = ["hypervisor/cloud-hypervisor"]
 
 # Enable the build-in VMM Dragtonball
-dragonball = ["hypervisor/dragonball"]
 
 # Enable the OpenVMM driver
-openvmm = ["hypervisor/openvmm"]
 
 [package.metadata.cargo-machete]
 ignored = ["slog-scope"]

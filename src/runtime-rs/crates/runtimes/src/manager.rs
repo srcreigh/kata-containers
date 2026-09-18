@@ -34,8 +34,7 @@ use kata_types::{
     prefix_with_rootless_dir,
     rootless::{is_rootless, rootless_dir, set_rootless},
 };
-#[cfg(feature = "linux")]
-use linux_container::LinuxContainer;
+
 use logging::FILTER_RULE;
 use netns_rs::{Env, NetNs};
 use nix::{sys::statfs, unistd::User};
@@ -66,8 +65,6 @@ use virt_container::{
     sandbox_persist::SandboxState,
     VirtContainer,
 };
-#[cfg(feature = "wasm")]
-use wasm_container::WasmContainer;
 
 use crate::{
     shim_mgmt::server::MgmtServer,
@@ -130,10 +127,6 @@ impl RuntimeHandlerManagerInner {
     ) -> Result<()> {
         info!(sl!(), "new runtime handler {}", &config.runtime.name);
         let runtime_handler = match config.runtime.name.as_str() {
-            #[cfg(feature = "linux")]
-            name if name == LinuxContainer::name() => LinuxContainer::new_handler(),
-            #[cfg(feature = "wasm")]
-            name if name == WasmContainer::name() => WasmContainer::new_handler(),
             #[cfg(feature = "virt")]
             name if name == VirtContainer::name() || name.is_empty() => {
                 VirtContainer::new_handler()
@@ -177,10 +170,6 @@ impl RuntimeHandlerManagerInner {
         spec: Option<&oci::Spec>,
         options: &Option<Vec<u8>>,
     ) -> Result<()> {
-        #[cfg(feature = "linux")]
-        LinuxContainer::init().context("init linux container")?;
-        #[cfg(feature = "wasm")]
-        WasmContainer::init().context("init wasm container")?;
         #[cfg(feature = "virt")]
         VirtContainer::init().context("init virt container")?;
 
@@ -328,16 +317,6 @@ impl RuntimeHandlerManager {
             sender,
         };
         match sandbox_state.sandbox_type.clone() {
-            #[cfg(feature = "linux")]
-            name if name == LinuxContainer::name() => {
-                // TODO :support linux container (https://github.com/kata-containers/kata-containers/issues/4905)
-                return Ok(());
-            }
-            #[cfg(feature = "wasm")]
-            name if name == WasmContainer::name() => {
-                // TODO :support wasm container (https://github.com/kata-containers/kata-containers/issues/4906)
-                return Ok(());
-            }
             #[cfg(feature = "virt")]
             name if name == VirtContainer::name() => {
                 if sandbox_args.toml_config.runtime.keep_abnormal {
@@ -834,6 +813,7 @@ impl Env for RootlessEnv {
 #[instrument]
 fn load_config(an: &HashMap<String, String>, option: &Option<Vec<u8>>) -> Result<TomlConfig> {
     const KATA_CONF_FILE: &str = "KATA_CONF_FILE";
+    virt_container::contract::validate_annotations(an)?;
     let annotation = Annotation::new(an.clone());
     // Clone a logger from global logger to ensure the logs in this function get flushed when drop
     let logger = slog::Logger::clone(&slog_scope::logger());
@@ -878,6 +858,7 @@ fn load_config(an: &HashMap<String, String>, option: &Option<Vec<u8>>) -> Result
 
     // validate configuration and return the error
     toml_config.validate()?;
+    virt_container::contract::validate(&toml_config)?;
 
     info!(logger, "get config content {:?}", &toml_config);
     Ok(toml_config)

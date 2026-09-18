@@ -28,12 +28,8 @@ path-clean = "1.0.1"
 lazy_static = { workspace = true }
 tracing = { workspace = true }
 ttrpc = { workspace = true, features = ["async"] }
-protobuf = { workspace = true, optional = true }
 futures = "0.3.25"
 crossbeam-channel = "0.5.6"
-qapi = { version = "0.15", features = ["qmp", "async-tokio-all"] }
-qapi-spec = "0.3.2"
-qapi-qmp = "0.15.0"
 bytes = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
@@ -47,7 +43,6 @@ kata-types = { workspace = true }
 logging = { workspace = true }
 protocols = { workspace = true, features = ["async"] }
 persist = { workspace = true }
-ch-config = { workspace = true, optional = true }
 safe-path = { workspace = true }
 tests_utils = { workspace = true }
 tempfile = { workspace = true }
@@ -71,28 +66,9 @@ tempfile = { workspace = true }
 dbs-utils = { workspace = true }
 # `hyperlocal` is only used by the firecracker driver (UDS HTTP client).
 hyperlocal = { workspace = true }
-dragonball = { workspace = true, features = [
-    "atomic-guest-memory",
-    "virtio-vsock",
-    "hotplug",
-    "virtio-blk",
-    "virtio-net",
-    "virtio-fs",
-    "vhost-net",
-    "dbs-upcall",
-    "virtio-mem",
-    "virtio-balloon",
-    "virtio-rng",
-    "vhost-user-net",
-    "host-device",
-], optional = true }
 
 [features]
-default = ["cloud-hypervisor"]
-
-dragonball = ["dep:dragonball"]
-cloud-hypervisor = ["ch-config"]
-openvmm = ["dep:protobuf"]
+default = []
 
 [dev-dependencies]
 rstest = { workspace = true }
@@ -103,7 +79,6 @@ hypervisor = { workspace = true }
 test-utils = { workspace = true }
 
 [build-dependencies]
-ttrpc-codegen = "0.6.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

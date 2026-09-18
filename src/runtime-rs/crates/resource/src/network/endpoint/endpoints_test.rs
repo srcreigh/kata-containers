@@ -27,10 +27,10 @@ mod tests {
         network_pair::{NetworkInterface, NetworkPair, TapInterface},
         utils::link::net_test_utils::delete_link,
     };
-    use hypervisor::{device::device_manager::DeviceManager, qemu::Qemu};
+    use hypervisor::{device::device_manager::DeviceManager, firecracker::Firecracker};
 
     async fn get_device_manager() -> Result<Arc<RwLock<DeviceManager>>> {
-        let hypervisor_name: &str = "qemu";
+        let hypervisor_name: &str = "firecracker";
         let toml_config = load_test_config(hypervisor_name.to_owned())?;
         let topo_config = TopologyConfigInfo::new(&toml_config);
         let hypervisor_config = toml_config
@@ -38,7 +38,7 @@ mod tests {
             .get(hypervisor_name)
             .ok_or_else(|| anyhow!("failed to get hypervisor for {}", &hypervisor_name))?;
 
-        let hypervisor = Qemu::new();
+        let hypervisor = Firecracker::new();
         hypervisor
             .set_hypervisor_config(hypervisor_config.clone())
             .await;

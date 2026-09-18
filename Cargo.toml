@@ -25,29 +25,11 @@ members = [
   "src/agent/vsock-exporter",
 
   # Dragonball
-  "src/dragonball",
-  "src/dragonball/crates/dbs_acpi",
-  "src/dragonball/crates/dbs_address_space",
-  "src/dragonball/crates/dbs_allocator",
-  "src/dragonball/crates/dbs_arch",
-  "src/dragonball/crates/dbs_boot",
-  "src/dragonball/crates/dbs_device",
-  "src/dragonball/crates/dbs_interrupt",
-  "src/dragonball/crates/dbs_legacy_devices",
-  "src/dragonball/crates/dbs_pci",
-  "src/dragonball/crates/dbs_snapshot",
-  "src/dragonball/crates/dbs_upcall",
   "src/dragonball/crates/dbs_utils",
-  "src/dragonball/crates/dbs_virtio_devices",
 
   # tools
-  "src/tools/agent-ctl",
-  "src/tools/genpolicy",
-  "src/tools/kata-ctl",
-  "src/tools/trace-forwarder",
 
   # kata-deploy (Kubernetes installer binary)
-  "tools/packaging/kata-deploy/binary",
 
   # runtime-rs
   "src/runtime-rs",
@@ -58,7 +40,6 @@ members = [
   "src/runtime-rs/crates/runtimes",
   "src/runtime-rs/crates/service",
   "src/runtime-rs/crates/shim",
-  "src/runtime-rs/crates/shim-ctl",
   "src/runtime-rs/tests/utils",
 ]
 resolver = "2"
@@ -76,11 +57,6 @@ exclude = [
   "vendor",
   "src/agent/vendor",
   "src/runtime-rs/vendor",
-  "src/tools/agent-ctl/vendor",
-  "src/tools/genpolicy/vendor",
-  "src/tools/kata-ctl/vendor",
-  "src/tools/trace-forwarder/vendor",
-  "tools/packaging/kata-deploy/binary/vendor",
 ]
 
 [workspace.dependencies]
@@ -100,20 +76,7 @@ vm-superio = "0.8.0"
 vmm-sys-util = "0.15.0"
 
 # Local dependencies from Dragonball Sandbox crates
-dragonball = { path = "src/dragonball" }
-dbs-acpi = { path = "src/dragonball/crates/dbs_acpi" }
-dbs-address-space = { path = "src/dragonball/crates/dbs_address_space" }
-dbs-allocator = { path = "src/dragonball/crates/dbs_allocator" }
-dbs-arch = { path = "src/dragonball/crates/dbs_arch" }
-dbs-boot = { path = "src/dragonball/crates/dbs_boot" }
-dbs-device = { path = "src/dragonball/crates/dbs_device" }
-dbs-interrupt = { path = "src/dragonball/crates/dbs_interrupt" }
-dbs-legacy-devices = { path = "src/dragonball/crates/dbs_legacy_devices" }
-dbs-pci = { path = "src/dragonball/crates/dbs_pci" }
-dbs-upcall = { path = "src/dragonball/crates/dbs_upcall" }
-dbs-snapshot = { path = "src/dragonball/crates/dbs_snapshot" }
 dbs-utils = { path = "src/dragonball/crates/dbs_utils" }
-dbs-virtio-devices = { path = "src/dragonball/crates/dbs_virtio_devices" }
 
 # Local dependencies from runtime-rs
 agent = { path = "src/runtime-rs/crates/agent" }
@@ -123,11 +86,8 @@ resource = { path = "src/runtime-rs/crates/resource" }
 runtimes = { path = "src/runtime-rs/crates/runtimes" }
 service = { path = "src/runtime-rs/crates/service" }
 tests_utils = { path = "src/runtime-rs/tests/utils" }
-ch-config = { path = "src/runtime-rs/crates/hypervisor/ch-config" }
 common = { path = "src/runtime-rs/crates/runtimes/common" }
-linux_container = { path = "src/runtime-rs/crates/runtimes/linux_container" }
 virt_container = { path = "src/runtime-rs/crates/runtimes/virt_container" }
-wasm_container = { path = "src/runtime-rs/crates/runtimes/wasm_container" }
 
 # Local dependencies from `src/lib`
 kata-sys-util = { path = "src/libs/kata-sys-util" }
@@ -221,13 +181,3 @@ url = "2.5.4"
 which = "4.3.0"
 gpt = "4.1.0"
 devicemapper = { git = "https://github.com/stratis-storage/devicemapper-rs", rev = "078e70ceecf0d08eb0c800626827c9bc0a9a8adc" }
-
-# Per-package release profile overrides for kata-deploy. The kata-deploy
-# binary runs once at pod start and then idles waiting for SIGTERM, so we
-# size-optimise it (opt-level = "z") and keep codegen-units = 1 to give
-# the optimiser the whole picture. These overrides only affect the
-# kata-deploy crate; agent / runtime-rs / dragonball compile with their
-# usual defaults.
-[profile.release.package."kata-deploy"]
-opt-level = "z"
-codegen-units = 1

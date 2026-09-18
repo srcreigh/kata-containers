@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+compile_error!("kata-fc-minimal supports only x86_64 Linux");
+
 #[macro_use]
 extern crate lazy_static;
 extern crate capctl;

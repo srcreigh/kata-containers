@@ -1097,28 +1097,6 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
-    async fn remove_stale_virtiofs_share_mounts(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::RemoveStaleVirtiofsShareMountsRequest,
-    ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "remove_stale_virtiofs_share_mounts", req);
-        is_allowed(&req).await?;
-        let mount_infos = parse_mount_table("/proc/self/mountinfo").map_ttrpc_err(same)?;
-        for m in &mount_infos {
-            if m.mount_point.starts_with(KATA_GUEST_SHARE_DIR) {
-                // stat the mount point, virtiofs daemon will remove the stale cache and release the fds if the mount point doesn't exist any more.
-                // More details in https://github.com/kata-containers/kata-containers/issues/6455#issuecomment-1477137277
-                match stat::stat(Path::new(&m.mount_point)) {
-                    Ok(_) => info!(sl(), "stat {} success", m.mount_point),
-                    Err(e) => info!(sl(), "stat {} failed: {}", m.mount_point, e),
-                }
-            }
-        }
-
-        Ok(Empty::new())
-    }
-
     async fn write_stdin(
         &self,
         _ctx: &TtrpcContext,
@@ -1695,19 +1673,6 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(resp)
     }
 
-    async fn mem_hotplug_by_probe(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::MemHotplugByProbeRequest,
-    ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "mem_hotplug_by_probe", req);
-        is_allowed(&req).await?;
-
-        do_mem_hotplug_by_probe(&req.memHotplugProbeAddr).map_ttrpc_err(same)?;
-
-        Ok(Empty::new())
-    }
-
     async fn set_guest_date_time(
         &self,
         ctx: &TtrpcContext,
@@ -1832,32 +1797,6 @@ impl agent_ttrpc::AgentService for AgentService {
         ))
     }
 
-    async fn add_swap(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::AddSwapRequest,
-    ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "add_swap", req);
-        is_allowed(&req).await?;
-
-        do_add_swap(&self.sandbox, &req).await.map_ttrpc_err(same)?;
-
-        Ok(Empty::new())
-    }
-
-    async fn add_swap_path(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::AddSwapPathRequest,
-    ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "add_swap_path", req);
-        is_allowed(&req).await?;
-
-        do_add_swap_path(&req).await.map_ttrpc_err(same)?;
-
-        Ok(Empty::new())
-    }
-
     #[cfg(feature = "agent-policy")]
     async fn set_policy(
         &self,
@@ -1889,56 +1828,6 @@ impl agent_ttrpc::AgentService for AgentService {
                 format!("unsupported diagnostic log_type: {other}"),
             )),
         }
-    }
-
-    async fn mem_agent_memcg_set(
-        &self,
-        _ctx: &::ttrpc::r#async::TtrpcContext,
-        config: protocols::agent::MemAgentMemcgConfig,
-    ) -> ::ttrpc::Result<Empty> {
-        is_allowed(&config).await?;
-        if let Some(ma) = &self.oma {
-            ma.memcg_set_config_async(mem_agent_memcgconfig_to_memcg_optionconfig(&config))
-                .await
-                .map_err(|e| {
-                    let estr = format!("ma.memcg_set_config_async fail: {e}");
-                    error!(sl(), "{}", estr);
-                    ttrpc::Error::RpcStatus(ttrpc::get_status(ttrpc::Code::INTERNAL, estr))
-                })?;
-        } else {
-            let estr = "mem-agent is disabled";
-            error!(sl(), "{}", estr);
-            return Err(ttrpc::Error::RpcStatus(ttrpc::get_status(
-                ttrpc::Code::INTERNAL,
-                estr,
-            )));
-        }
-        Ok(Empty::new())
-    }
-
-    async fn mem_agent_compact_set(
-        &self,
-        _ctx: &::ttrpc::r#async::TtrpcContext,
-        config: protocols::agent::MemAgentCompactConfig,
-    ) -> ::ttrpc::Result<Empty> {
-        is_allowed(&config).await?;
-        if let Some(ma) = &self.oma {
-            ma.compact_set_config_async(mem_agent_compactconfig_to_compact_optionconfig(&config))
-                .await
-                .map_err(|e| {
-                    let estr = format!("ma.compact_set_config_async fail: {e}");
-                    error!(sl(), "{}", estr);
-                    ttrpc::Error::RpcStatus(ttrpc::get_status(ttrpc::Code::INTERNAL, estr))
-                })?;
-        } else {
-            let estr = "mem-agent is disabled";
-            error!(sl(), "{}", estr);
-            return Err(ttrpc::Error::RpcStatus(ttrpc::get_status(
-                ttrpc::Code::INTERNAL,
-                estr,
-            )));
-        }
-        Ok(Empty::new())
     }
 }
 

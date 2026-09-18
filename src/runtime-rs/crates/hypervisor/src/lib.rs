@@ -4,6 +4,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+compile_error!("kata-fc-minimal supports only x86_64 Linux");
+
 #[macro_use]
 extern crate slog;
 
@@ -14,11 +17,7 @@ pub mod hypervisor_persist;
 pub use device::driver::*;
 pub use device::pci_path::PciPath;
 use device::DeviceType;
-#[cfg(all(
-    feature = "dragonball",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub mod dragonball;
+
 // Firecracker upstream only releases binaries for x86_64 and aarch64
 // (see https://github.com/firecracker-microvm/firecracker/releases), so there
 // is no point compiling the in-tree driver on other architectures. Use the
@@ -26,23 +25,11 @@ pub mod dragonball;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod firecracker;
 mod kernel_param;
-#[cfg(all(
-    feature = "openvmm",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub mod openvmm;
-pub mod qemu;
-pub mod remote;
+
 pub mod selinux;
 pub use kernel_param::Param;
 pub mod utils;
 use std::collections::HashMap;
-
-#[cfg(all(
-    feature = "cloud-hypervisor",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub mod ch;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -51,12 +38,6 @@ use kata_types::capabilities::{Capabilities, CapabilityBits};
 use kata_types::config::hypervisor::Hypervisor as HypervisorConfig;
 
 pub use kata_types::config::hypervisor::HYPERVISOR_NAME_CH;
-
-#[cfg(all(
-    feature = "openvmm",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub use kata_types::config::hypervisor::HYPERVISOR_NAME_OPENVMM;
 
 // Config which driver to use as vm root dev
 const VM_ROOTFS_DRIVER_BLK: &str = "virtio-blk-pci";
@@ -76,21 +57,6 @@ pub const HUGETLBFS: &str = "hugetlbfs";
 // Constants required for Dragonball VMM when enabled.
 // Gated on both feature and arch so they activate together with `pub mod
 // dragonball;` above (the dragonball crate only builds on x86_64/aarch64).
-#[cfg(all(
-    feature = "dragonball",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-const DEV_HUGEPAGES: &str = "/dev/hugepages";
-#[cfg(all(
-    feature = "dragonball",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-const SHMEM: &str = "shmem";
-#[cfg(all(
-    feature = "dragonball",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-const HUGE_SHMEM: &str = "hugeshmem";
 
 pub const HYPERVISOR_DRAGONBALL: &str = "dragonball";
 pub const HYPERVISOR_QEMU: &str = "qemu";
