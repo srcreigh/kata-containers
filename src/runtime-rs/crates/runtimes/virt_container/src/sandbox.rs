@@ -30,8 +30,6 @@ use containerd_shim_protos::events::task::{TaskExit, TaskOOM};
 use hypervisor::device::topology::PCIePort;
 use hypervisor::device::util::{get_host_path, DEVICE_TYPE_CHAR};
 
-use hypervisor::VsockConfig;
-
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use hypervisor::{firecracker::Firecracker, HYPERVISOR_FIRECRACKER};
 use hypervisor::{is_vfio_ap_device, BlockConfigModern, Hypervisor, VfioDeviceBase};
@@ -727,27 +725,11 @@ impl VirtSandbox {
     }
 
     async fn prepare_vm_socket_config(&self) -> Result<ResourceConfig> {
-        // It will check the hypervisor's capabilities to see if it supports hybrid-vsock.
-        // If it does not, it'll assume that it only supports legacy vsock.
-        let vm_socket = if self
-            .hypervisor
-            .capabilities()
-            .await?
-            .is_hybrid_vsock_supported()
-        {
-            // Firecracker/Dragonball/CLH use the hybrid-vsock device model.
-            ResourceConfig::HybridVsock(HybridVsockConfig {
-                guest_cid: DEFAULT_GUEST_VSOCK_CID,
-                uds_path: get_hvsock_path(&self.sid),
-            })
-        } else {
-            // Qemu uses the vsock device model.
-            ResourceConfig::Vsock(VsockConfig {
-                guest_cid: libc::VMADDR_CID_ANY,
-            })
-        };
-
-        Ok(vm_socket)
+        // This fork has exactly one VMM and one agent transport.
+        Ok(ResourceConfig::HybridVsock(HybridVsockConfig {
+            guest_cid: DEFAULT_GUEST_VSOCK_CID,
+            uds_path: get_hvsock_path(&self.sid),
+        }))
     }
 
     async fn prepare_protection_device_config(

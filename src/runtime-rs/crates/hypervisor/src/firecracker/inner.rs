@@ -52,7 +52,7 @@ pub struct FcInner {
 impl FcInner {
     pub fn new(exit_notify: mpsc::Sender<()>) -> FcInner {
         let mut capabilities = Capabilities::new();
-        capabilities.set(CapabilityBits::BlockDeviceSupport);
+        capabilities.set(CapabilityBits::BlockDeviceSupport | CapabilityBits::HybridVsockSupport);
 
         FcInner {
             id: String::default(),
@@ -261,5 +261,18 @@ impl Persist for FcInner {
             fc_process: Mutex::new(None),
             exit_notify: Some(exit_notify),
         })
+    }
+}
+
+#[cfg(test)]
+mod minimal_tests {
+    use super::*;
+    #[test]
+    fn firecracker_requires_hybrid_vsock() {
+        let (tx, _) = mpsc::channel(1);
+        let fc = FcInner::new(tx);
+        assert!(fc.capabilities.is_hybrid_vsock_supported());
+        assert!(fc.capabilities.is_block_device_supported());
+        assert!(!fc.capabilities.is_fs_sharing_supported());
     }
 }
