@@ -59,12 +59,9 @@ pub trait Agent: AgentManager + HealthService + Send + Sync {
     // sandbox
     async fn create_sandbox(&self, req: CreateSandboxRequest) -> Result<Empty>;
     async fn destroy_sandbox(&self, req: Empty) -> Result<Empty>;
-    async fn online_cpu_mem(&self, req: OnlineCPUMemRequest) -> Result<Empty>;
 
     // network
     async fn add_arp_neighbors(&self, req: AddArpNeighborRequest) -> Result<Empty>;
-    async fn list_interfaces(&self, req: Empty) -> Result<Interfaces>;
-    async fn list_routes(&self, req: Empty) -> Result<Routes>;
     async fn update_interface(&self, req: UpdateInterfaceRequest) -> Result<Interface>;
     async fn update_routes(&self, req: UpdateRoutesRequest) -> Result<Routes>;
 
@@ -93,8 +90,6 @@ pub trait Agent: AgentManager + HealthService + Send + Sync {
     async fn copy_file(&self, req: CopyFileRequest) -> Result<Empty>;
     async fn get_metrics(&self, req: Empty) -> Result<MetricsResponse>;
     async fn get_oom_event(&self, req: Empty) -> Result<OomEventResponse>;
-    async fn get_ip_tables(&self, req: GetIPTablesRequest) -> Result<GetIPTablesResponse>;
-    async fn set_ip_tables(&self, req: SetIPTablesRequest) -> Result<SetIPTablesResponse>;
     async fn get_volume_stats(&self, req: VolumeStatsRequest) -> Result<VolumeStatsResponse>;
     async fn resize_volume(&self, req: ResizeVolumeRequest) -> Result<Empty>;
     async fn get_guest_details(&self, req: GetGuestDetailsRequest) -> Result<GuestDetailsResponse>;

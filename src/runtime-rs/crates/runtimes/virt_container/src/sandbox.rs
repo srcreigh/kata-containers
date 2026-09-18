@@ -8,9 +8,7 @@ use crate::health_check::HealthCheck;
 use crate::oom::CrioOomNotifier;
 use agent::kata::KataAgent;
 use agent::types::{KernelModule, SetPolicyRequest};
-use agent::{
-    self, Agent, GetGuestDetailsRequest, GetIPTablesRequest, SetIPTablesRequest, VolumeStatsRequest,
-};
+use agent::{self, Agent, GetGuestDetailsRequest, VolumeStatsRequest};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use common::error::is_normal_oom_shutdown_error;
@@ -1466,28 +1464,6 @@ impl Sandbox for VirtSandbox {
             .await
             .context("sandbox: failed to resize direct-volume")?;
         Ok(())
-    }
-
-    async fn set_iptables(&self, is_ipv6: bool, data: Vec<u8>) -> Result<Vec<u8>> {
-        info!(sl!(), "sb: set_iptables invoked");
-        let req = SetIPTablesRequest { is_ipv6, data };
-        let resp = self
-            .agent
-            .set_ip_tables(req)
-            .await
-            .context("sandbox: failed to set iptables")?;
-        Ok(resp.data)
-    }
-
-    async fn get_iptables(&self, is_ipv6: bool) -> Result<Vec<u8>> {
-        info!(sl!(), "sb: get_iptables invoked");
-        let req = GetIPTablesRequest { is_ipv6 };
-        let resp = self
-            .agent
-            .get_ip_tables(req)
-            .await
-            .context("sandbox: failed to get iptables")?;
-        Ok(resp.data)
     }
 
     async fn agent_metrics(&self) -> Result<String> {

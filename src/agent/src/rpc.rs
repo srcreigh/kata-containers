@@ -31,15 +31,14 @@ use ttrpc::{
 
 use anyhow::{anyhow, Context, Result};
 use cgroups::FreezerState;
-use oci::{Hooks, LinuxNamespace, Spec};
+use oci::{LinuxNamespace, Spec};
 use oci_spec::runtime as oci;
 #[cfg(feature = "agent-policy")]
 use protobuf::MessageDyn;
 use protobuf::MessageField;
 use protocols::agent::{
-    AddSwapPathRequest, AddSwapRequest, AgentDetails, CopyFileRequest, GetIPTablesRequest,
-    GetIPTablesResponse, GuestDetailsResponse, Interfaces, Metrics, OOMEvent, ReadStreamResponse,
-    ResizeVolumeRequest, Routes, SetIPTablesRequest, SetIPTablesResponse, StatsContainerResponse,
+    AddSwapPathRequest, AddSwapRequest, AgentDetails, CopyFileRequest, GuestDetailsResponse,
+    Metrics, OOMEvent, ReadStreamResponse, ResizeVolumeRequest, Routes, StatsContainerResponse,
     VolumeStatsRequest, WaitProcessResponse, WriteStreamResponse,
 };
 use protocols::csi::{
@@ -54,7 +53,6 @@ use protocols::types::Interface;
 use protocols::{agent_ttrpc_async as agent_ttrpc, health_ttrpc_async as health_ttrpc};
 use rustjail::cgroups::notifier;
 use rustjail::container::{BaseContainer, Container, LinuxContainer, SYSTEMD_CGROUP_PATH_FORMAT};
-use rustjail::mount::parse_mount_table;
 use rustjail::process::Process;
 use rustjail::specconv::CreateOpts;
 
@@ -87,8 +85,7 @@ use crate::passfd_io;
 use crate::pci;
 use crate::random;
 use crate::sandbox::{Sandbox, SandboxError};
-use crate::storage::{add_storages, update_ephemeral_mounts, STORAGE_HANDLERS};
-use crate::util;
+use crate::storage::{add_storages, STORAGE_HANDLERS};
 use crate::version::{AGENT_VERSION, API_VERSION};
 use crate::AGENT_CONFIG;
 use crate::{confidential_data_hub, linux_abi::*};
@@ -110,41 +107,23 @@ use tracing::instrument;
 use libc::{self, c_char, c_ushort, pid_t, winsize, TIOCSWINSZ};
 use std::fs;
 use std::os::unix::prelude::PermissionsExt;
-use std::process::{Command, Stdio};
 
 use nix::unistd::{Gid, Uid};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 
 use kata_types::k8s;
 
 pub const CONTAINER_BASE: &str = "/run/kata-containers";
-const MODPROBE_PATH: &str = "/sbin/modprobe";
 const TRUSTED_IMAGE_STORAGE_DEVICE: &str = "/dev/trusted_store";
-/// the iptables seriers binaries could appear either in /sbin
-/// or /usr/sbin, we need to check both of them
-const USR_IPTABLES_SAVE: &str = "/usr/sbin/iptables-save";
-const IPTABLES_SAVE: &str = "/sbin/iptables-save";
-const USR_IPTABLES_RESTORE: &str = "/usr/sbin/iptables-restore";
-const IPTABLES_RESTORE: &str = "/sbin/iptables-restore";
-const USR_IP6TABLES_SAVE: &str = "/usr/sbin/ip6tables-save";
-const IP6TABLES_SAVE: &str = "/sbin/ip6tables-save";
-const USR_IP6TABLES_RESTORE: &str = "/usr/sbin/ip6tables-restore";
-const IP6TABLES_RESTORE: &str = "/sbin/ip6tables-restore";
 const KATA_GUEST_SHARE_DIR: &str = "/run/kata-containers/shared/containers/";
 
 const ERR_CANNOT_GET_WRITER: &str = "Cannot get writer";
 const ERR_INVALID_BLOCK_SIZE: &str = "Invalid block size";
 const ERR_NO_LINUX_FIELD: &str = "Spec does not contain linux field";
 const ERR_NO_SANDBOX_PIDNS: &str = "Sandbox does not have sandbox_pidns";
-
-// IPTABLES_RESTORE_WAIT_SEC is the timeout value provided to iptables-restore --wait. Since we
-// don't expect other writers to iptables, we don't expect contention for grabbing the iptables
-// filesystem lock. Based on this, 5 seconds seems a resonable timeout period in case the lock is
-// not available.
-const IPTABLES_RESTORE_WAIT_SEC: u64 = 5;
 
 /// This mask is applied to parent directories implicitly created for CopyFile requests.
 const IMPLICIT_DIRECTORY_PERMISSION_MASK: u32 = 0o777;
@@ -153,6 +132,17 @@ const IMPLICIT_DIRECTORY_PERMISSION_MASK: u32 = 0o777;
 /// In addition to the permissions, it allows setuid/setgid/sticky bits.
 /// Note that the setuid bit does not have an effect on Linux, though.
 const FILE_PERMISSION_MASK: u32 = 0o7777;
+
+// Validate before mutating sandbox state or touching guest files/namespaces.
+fn validate_sandbox_features(req: &protocols::agent::CreateSandboxRequest) -> ttrpc::Result<()> {
+    if !req.kernel_modules.is_empty() || !req.guest_hook_path.is_empty() {
+        return Err(ttrpc_error(
+            ttrpc::Code::INVALID_ARGUMENT,
+            "kata-fc: guest kernel modules and guest hooks are unsupported",
+        ));
+    }
+    Ok(())
+}
 
 // Convenience function to obtain the scope logger.
 fn sl() -> slog::Logger {
@@ -341,7 +331,6 @@ impl AgentService {
         update_container_namespaces(&s, &mut oci, use_sandbox_pidns)?;
 
         // Append guest hooks
-        append_guest_hooks(&s, &mut oci)?;
 
         // write spec to bundle path, hooks might
         // read ocispec
@@ -1311,198 +1300,6 @@ impl agent_ttrpc::AgentService for AgentService {
         })
     }
 
-    async fn update_ephemeral_mounts(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::UpdateEphemeralMountsRequest,
-    ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "update_mounts", req);
-        is_allowed(&req).await?;
-
-        update_ephemeral_mounts(sl(), &req.storages, &self.sandbox)
-            .await
-            .map_ttrpc_err(|e| format!("Failed to update mounts: {e:?}"))?;
-        Ok(Empty::new())
-    }
-
-    async fn get_ip_tables(
-        &self,
-        ctx: &TtrpcContext,
-        req: GetIPTablesRequest,
-    ) -> ttrpc::Result<GetIPTablesResponse> {
-        trace_rpc_call!(ctx, "get_iptables", req);
-        is_allowed(&req).await?;
-
-        info!(sl(), "get_ip_tables: request received");
-
-        // the binary could exists in either /usr/sbin or /sbin
-        // here check both of the places and return the one exists
-        // if none exists, return the /sbin one, and the rpc will
-        // returns an internal error
-        let cmd = if req.is_ipv6 {
-            if Path::new(USR_IP6TABLES_SAVE).exists() {
-                USR_IP6TABLES_SAVE
-            } else {
-                IP6TABLES_SAVE
-            }
-        } else if Path::new(USR_IPTABLES_SAVE).exists() {
-            USR_IPTABLES_SAVE
-        } else {
-            IPTABLES_SAVE
-        }
-        .to_string();
-
-        let output = Command::new(cmd.clone())
-            .output()
-            .map_ttrpc_err_do(|e| warn!(sl(), "failed to run {}: {:?}", cmd, e.kind()))?;
-        Ok(GetIPTablesResponse {
-            data: output.stdout,
-            ..Default::default()
-        })
-    }
-
-    async fn set_ip_tables(
-        &self,
-        ctx: &TtrpcContext,
-        req: SetIPTablesRequest,
-    ) -> ttrpc::Result<SetIPTablesResponse> {
-        trace_rpc_call!(ctx, "set_iptables", req);
-        is_allowed(&req).await?;
-
-        info!(sl(), "set_ip_tables request received");
-
-        // the binary could exists in both /usr/sbin and /sbin
-        // here check both of the places and return the one exists
-        // if none exists, return the /sbin one, and the rpc will
-        // returns an internal error
-        let cmd = if req.is_ipv6 {
-            if Path::new(USR_IP6TABLES_RESTORE).exists() {
-                USR_IP6TABLES_RESTORE
-            } else {
-                IP6TABLES_RESTORE
-            }
-        } else if Path::new(USR_IPTABLES_RESTORE).exists() {
-            USR_IPTABLES_RESTORE
-        } else {
-            IPTABLES_RESTORE
-        }
-        .to_string();
-
-        let mut child = Command::new(cmd.clone())
-            .arg("--wait")
-            .arg(IPTABLES_RESTORE_WAIT_SEC.to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_ttrpc_err_do(|e| warn!(sl(), "failure to spawn {}: {:?}", cmd, e.kind()))?;
-
-        let mut stdin = match child.stdin.take() {
-            Some(si) => si,
-            None => {
-                println!("failed to get stdin from child");
-                return Err(ttrpc_error(
-                    ttrpc::Code::INTERNAL,
-                    "failed to take stdin from child",
-                ));
-            }
-        };
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<i32>();
-        let handle = tokio::spawn(async move {
-            let _ = match stdin.write_all(&req.data) {
-                Ok(o) => o,
-                Err(e) => {
-                    warn!(sl(), "error writing stdin: {:?}", e.kind());
-                    return;
-                }
-            };
-            if tx.send(1).is_err() {
-                warn!(sl(), "stdin writer thread receiver dropped");
-            };
-        });
-
-        let _ = tokio::time::timeout(Duration::from_secs(IPTABLES_RESTORE_WAIT_SEC), rx)
-            .await
-            .map_ttrpc_err(|_| "timeout waiting for stdin writer to complete")?;
-
-        handle
-            .await
-            .map_ttrpc_err(|_| "stdin writer thread failure")?;
-
-        let output = child.wait_with_output().map_ttrpc_err_do(|e| {
-            warn!(
-                sl(),
-                "failure waiting for spawned {} to complete: {:?}",
-                cmd,
-                e.kind()
-            )
-        })?;
-
-        if !output.status.success() {
-            warn!(sl(), "{} failed: {:?}", cmd, output.stderr);
-            return Err(ttrpc_error(
-                ttrpc::Code::INTERNAL,
-                format!(
-                    "{} failed: {:?}",
-                    cmd,
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            ));
-        }
-
-        Ok(SetIPTablesResponse {
-            data: output.stdout,
-            ..Default::default()
-        })
-    }
-
-    async fn list_interfaces(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::ListInterfacesRequest,
-    ) -> ttrpc::Result<Interfaces> {
-        trace_rpc_call!(ctx, "list_interfaces", req);
-        is_allowed(&req).await?;
-
-        let list = self
-            .sandbox
-            .lock()
-            .await
-            .rtnl
-            .list_interfaces()
-            .await
-            .map_ttrpc_err(|e| format!("Failed to list interfaces: {e:?}"))?;
-
-        Ok(protocols::agent::Interfaces {
-            Interfaces: list,
-            ..Default::default()
-        })
-    }
-
-    async fn list_routes(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::ListRoutesRequest,
-    ) -> ttrpc::Result<Routes> {
-        trace_rpc_call!(ctx, "list_routes", req);
-        is_allowed(&req).await?;
-
-        let list = self
-            .sandbox
-            .lock()
-            .await
-            .rtnl
-            .list_routes()
-            .await
-            .map_ttrpc_err(|e| format!("list routes: {e:?}"))?;
-
-        Ok(protocols::agent::Routes {
-            Routes: list,
-            ..Default::default()
-        })
-    }
-
     async fn create_sandbox(
         &self,
         ctx: &TtrpcContext,
@@ -1510,6 +1307,7 @@ impl agent_ttrpc::AgentService for AgentService {
     ) -> ttrpc::Result<Empty> {
         trace_rpc_call!(ctx, "create_sandbox", req);
         is_allowed(&req).await?;
+        validate_sandbox_features(&req)?;
 
         {
             let mut s = self.sandbox.lock().await;
@@ -1524,10 +1322,6 @@ impl agent_ttrpc::AgentService for AgentService {
                 s.id = req.sandbox_id.clone();
             }
 
-            for m in req.kernel_modules.iter() {
-                load_kernel_module(m).map_ttrpc_err(same)?;
-            }
-
             s.setup_shared_namespaces().await.map_ttrpc_err(same)?;
         }
 
@@ -1535,20 +1329,6 @@ impl agent_ttrpc::AgentService for AgentService {
             .await
             .map_ttrpc_err(same)?;
         self.sandbox.lock().await.mounts = m;
-
-        // Scan guest hooks upon creating new sandbox and append
-        // them to guest OCI spec before running containers.
-        {
-            let mut s = self.sandbox.lock().await;
-            if !req.guest_hook_path.is_empty() {
-                let _ = s.add_hooks(&req.guest_hook_path).map_err(|e| {
-                    error!(
-                        sl(),
-                        "add guest hook {} failed: {:?}", req.guest_hook_path, e
-                    );
-                });
-            }
-        }
 
         setup_guest_dns(sl(), &req.dns).map_ttrpc_err(same)?;
         {
@@ -1617,20 +1397,6 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
-    async fn online_cpu_mem(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::OnlineCPUMemRequest,
-    ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "online_cpu_mem", req);
-        is_allowed(&req).await?;
-        let sandbox = self.sandbox.lock().await;
-
-        sandbox.online_cpu_memory(&req).map_ttrpc_err(same)?;
-
-        Ok(Empty::new())
-    }
-
     async fn reseed_random_dev(
         &self,
         ctx: &TtrpcContext,
@@ -1671,19 +1437,6 @@ impl agent_ttrpc::AgentService for AgentService {
         resp.agent_details = MessageField::some(detail);
 
         Ok(resp)
-    }
-
-    async fn set_guest_date_time(
-        &self,
-        ctx: &TtrpcContext,
-        req: protocols::agent::SetGuestDateTimeRequest,
-    ) -> ttrpc::Result<Empty> {
-        trace_rpc_call!(ctx, "set_guest_date_time", req);
-        is_allowed(&req).await?;
-
-        do_set_guest_date_time(req.Sec, req.Usec).map_ttrpc_err(same)?;
-
-        Ok(Empty::new())
     }
 
     async fn copy_file(
@@ -2095,25 +1848,6 @@ async fn remove_container_resources(sandbox: &mut Sandbox, cid: &str) -> Result<
     Ok(())
 }
 
-fn append_guest_hooks(s: &Sandbox, oci: &mut Spec) -> Result<()> {
-    if let Some(ref guest_hooks) = s.hooks {
-        if let Some(hooks) = oci.hooks_mut() {
-            util::merge(hooks.poststart_mut(), guest_hooks.prestart());
-            util::merge(hooks.poststart_mut(), guest_hooks.poststart());
-            util::merge(hooks.poststop_mut(), guest_hooks.poststop());
-        } else {
-            let _oci_hooks = oci.set_hooks(Some(Hooks::default()));
-            if let Some(hooks) = oci.hooks_mut() {
-                hooks.set_prestart(guest_hooks.prestart().clone());
-                hooks.set_poststart(guest_hooks.poststart().clone());
-                hooks.set_poststop(guest_hooks.poststop().clone());
-            }
-        }
-    }
-
-    Ok(())
-}
-
 // Check if the container process installed the
 // handler for specific signal.
 fn is_signal_handled(proc_status_file: &str, signum: u32) -> bool {
@@ -2168,24 +1902,6 @@ fn do_mem_hotplug_by_probe(addrs: &[u64]) -> Result<()> {
     for addr in addrs.iter() {
         fs::write(SYSFS_MEMORY_HOTPLUG_PROBE_PATH, format!("{:#X}", *addr))?;
     }
-    Ok(())
-}
-
-fn do_set_guest_date_time(sec: i64, usec: i64) -> Result<()> {
-    let tv = libc::timeval {
-        tv_sec: sec,
-        tv_usec: usec,
-    };
-
-    let ret = unsafe {
-        libc::settimeofday(
-            &tv as *const libc::timeval,
-            std::ptr::null::<libc::timezone>(),
-        )
-    };
-
-    Errno::result(ret).map(drop)?;
-
     Ok(())
 }
 
@@ -2452,44 +2168,6 @@ pub fn setup_bundle(cid: &str, spec: &mut Spec) -> Result<PathBuf> {
     Ok(olddir)
 }
 
-fn load_kernel_module(module: &protocols::agent::KernelModule) -> Result<()> {
-    if module.name.is_empty() {
-        return Err(anyhow!("Kernel module name is empty"));
-    }
-
-    info!(
-        sl(),
-        "load_kernel_module {}: {:?}", module.name, module.parameters
-    );
-
-    let mut args = vec!["-v", &module.name];
-
-    if !module.parameters.is_empty() {
-        args.extend(module.parameters.iter().map(String::as_str));
-    }
-
-    let output = Command::new(MODPROBE_PATH)
-        .args(args.as_slice())
-        .stdout(Stdio::piped())
-        .output()?;
-
-    let status = output.status;
-    if status.success() {
-        return Ok(());
-    }
-
-    match status.code() {
-        Some(code) => {
-            let std_out = String::from_utf8_lossy(&output.stdout);
-            let std_err = String::from_utf8_lossy(&output.stderr);
-            let msg =
-                format!("load_kernel_module return code: {code} stdout:{std_out} stderr:{std_err}");
-            Err(anyhow!(msg))
-        }
-        None => Err(anyhow!("Process terminated by signal")),
-    }
-}
-
 fn is_sealed_secret_path(source_path: &str) -> bool {
     // Base path to check
     let base_path = "/run/kata-containers/shared/containers";
@@ -2648,23 +2326,17 @@ mod tests {
     use crate::{namespace::Namespace, protocols::agent_ttrpc_async::AgentService as _};
     use anyhow::{bail, ensure};
     use nix::mount;
-    use nix::sched::{unshare, CloneFlags};
     use oci::{
-        HookBuilder, HooksBuilder, Linux, LinuxBuilder, LinuxDeviceCgroupBuilder, LinuxNamespace,
-        LinuxNamespaceBuilder, LinuxResourcesBuilder, SpecBuilder,
+        Linux, LinuxBuilder, LinuxDeviceCgroupBuilder, LinuxNamespace, LinuxNamespaceBuilder,
+        LinuxResourcesBuilder, SpecBuilder,
     };
     use oci_spec::runtime::{LinuxNamespaceType, Root};
     use serial_test::serial;
     use tempfile::{tempdir, TempDir};
     use test_utils::{assert_result, skip_if_not_root};
     use ttrpc::{r#async::TtrpcContext, MessageHeader};
-    use which::which;
 
     const CGROUP_PARENT: &str = "kata.agent.test.k8s.io";
-
-    fn check_command(cmd: &str) -> bool {
-        which(cmd).is_ok()
-    }
 
     fn mk_ttrpc_context() -> TtrpcContext {
         TtrpcContext {
@@ -2672,6 +2344,73 @@ mod tests {
             metadata: std::collections::HashMap::new(),
             timeout_nano: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn minimal_removed_rpcs_are_unimplemented() {
+        let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
+        let service = AgentService {
+            sandbox: Arc::new(Mutex::new(sandbox)),
+            init_mode: true,
+            oma: None,
+        };
+        let ctx = mk_ttrpc_context();
+        macro_rules! reject {
+            ($method:ident) => {
+                match service.$method(&ctx, Default::default()).await.unwrap_err() {
+                    ttrpc::Error::RpcStatus(status) => {
+                        assert_eq!(status.code(), ttrpc::Code::UNIMPLEMENTED)
+                    }
+                    error => panic!("unexpected error: {:?}", error),
+                }
+            };
+        }
+        reject!(get_ip_tables);
+        reject!(set_ip_tables);
+        reject!(list_interfaces);
+        reject!(list_routes);
+        reject!(online_cpu_mem);
+        reject!(update_ephemeral_mounts);
+        reject!(set_guest_date_time);
+        reject!(remove_stale_virtiofs_share_mounts);
+        reject!(mem_agent_memcg_set);
+        reject!(mem_agent_compact_set);
+        reject!(mem_hotplug_by_probe);
+        reject!(add_swap);
+        reject!(add_swap_path);
+        reject!(resize_volume);
+        #[cfg(not(feature = "agent-policy"))]
+        reject!(set_policy);
+    }
+
+    #[tokio::test]
+    async fn minimal_sandbox_rejects_extensions_before_side_effects() {
+        let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
+        let service = AgentService {
+            sandbox: Arc::new(Mutex::new(sandbox)),
+            init_mode: true,
+            oma: None,
+        };
+        let ctx = mk_ttrpc_context();
+        for req in [
+            protocols::agent::CreateSandboxRequest {
+                kernel_modules: vec![Default::default()],
+                ..Default::default()
+            },
+            protocols::agent::CreateSandboxRequest {
+                guest_hook_path: "/hooks".into(),
+                ..Default::default()
+            },
+        ] {
+            match service.create_sandbox(&ctx, req).await.unwrap_err() {
+                ttrpc::Error::RpcStatus(status) => {
+                    assert_eq!(status.code(), ttrpc::Code::INVALID_ARGUMENT)
+                }
+                error => panic!("unexpected error: {:?}", error),
+            }
+            assert!(!service.sandbox.lock().await.running);
+        }
+        validate_sandbox_features(&Default::default()).unwrap();
     }
 
     fn create_dummy_opts() -> CreateOpts {
@@ -2736,68 +2475,6 @@ mod tests {
             .unwrap(),
             dir,
         )
-    }
-
-    #[test]
-    fn test_load_kernel_module() {
-        let mut m = protocols::agent::KernelModule {
-            name: "module_not_exists".to_string(),
-            ..Default::default()
-        };
-
-        // case 1: module not exists
-        let result = load_kernel_module(&m);
-        assert!(result.is_err(), "load module should failed");
-
-        // case 2: module name is empty
-        m.name = "".to_string();
-        let result = load_kernel_module(&m);
-        assert!(result.is_err(), "load module should failed");
-
-        skip_if_not_root!();
-        // case 3: normal module.
-        // normally this module should eixsts...
-        m.name = "bridge".to_string();
-        let result = load_kernel_module(&m);
-
-        // Skip test if loading kernel modules is not permitted
-        // or kernel module is not found
-        if let Err(e) = &result {
-            let error_string = format!("{e:?}");
-            // Let's print out the error message first
-            println!("DEBUG: error: {error_string}");
-            if error_string.contains("Operation not permitted")
-                || error_string.contains("EPERM")
-                || error_string.contains("Permission denied")
-            {
-                println!("INFO: skipping test - loading kernel modules is not permitted in this environment");
-                return;
-            }
-            if error_string.contains("not found") {
-                println!("INFO: skipping test - kernel module is not found in this environment");
-                return;
-            }
-        }
-
-        assert!(result.is_ok(), "load module should success");
-    }
-
-    #[tokio::test]
-    async fn test_append_guest_hooks() {
-        let logger = slog::Logger::root(slog::Discard, o!());
-        let mut s = Sandbox::new(&logger).unwrap();
-        let hooks = HooksBuilder::default()
-            .prestart(vec![HookBuilder::default()
-                .path(PathBuf::from("foo"))
-                .build()
-                .unwrap()])
-            .build()
-            .unwrap();
-        s.hooks = Some(hooks);
-
-        let mut oci = Spec::default();
-        append_guest_hooks(&s, &mut oci).unwrap();
-        assert_eq!(s.hooks, oci.hooks().clone());
     }
 
     #[tokio::test]
@@ -3439,183 +3116,6 @@ OtherField:other
 
         assert_eq!(stats.used, 3);
         assert_eq!(stats.available, available - 2);
-    }
-
-    #[tokio::test]
-    async fn test_ip_tables() {
-        skip_if_not_root!();
-
-        let iptables_cmd_pairs = [
-            (USR_IPTABLES_SAVE, IPTABLES_SAVE),
-            (USR_IP6TABLES_SAVE, IP6TABLES_SAVE),
-            (USR_IPTABLES_RESTORE, IPTABLES_RESTORE),
-            (USR_IP6TABLES_RESTORE, IP6TABLES_RESTORE),
-        ];
-
-        for (usr_sbin_cmd, sbin_cmd) in iptables_cmd_pairs {
-            if !check_command(usr_sbin_cmd) && !check_command(sbin_cmd) {
-                warn!(
-                    sl(),
-                    "one or more commands for ip tables test are missing, skip it"
-                );
-                return;
-            }
-        }
-
-        let logger = slog::Logger::root(slog::Discard, o!());
-        let sandbox = Sandbox::new(&logger).unwrap();
-        let agent_service = Box::new(AgentService {
-            sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
-            oma: None,
-        });
-
-        let ctx = mk_ttrpc_context();
-
-        // Move to a new netns in order to ensure we don't trash the hosts' iptables
-        unshare(CloneFlags::CLONE_NEWNET).unwrap();
-
-        // Get initial iptables, we expect to be empty:
-        let result = agent_service
-            .get_ip_tables(
-                &ctx,
-                GetIPTablesRequest {
-                    is_ipv6: false,
-                    ..Default::default()
-                },
-            )
-            .await;
-        assert!(result.is_ok(), "get ip tables should succeed");
-        assert_eq!(
-            result.unwrap().data.len(),
-            0,
-            "ip tables should be empty initially"
-        );
-
-        // Initial ip6 ip tables should also be empty:
-        let result = agent_service
-            .get_ip_tables(
-                &ctx,
-                GetIPTablesRequest {
-                    is_ipv6: true,
-                    ..Default::default()
-                },
-            )
-            .await;
-        assert!(result.is_ok(), "get ip6 tables should succeed");
-        assert_eq!(
-            result.unwrap().data.len(),
-            0,
-            "ip tables should be empty initially"
-        );
-
-        // Verify that attempting to write 'empty' iptables results in no error:
-        let empty_rules = "";
-        let result = agent_service
-            .set_ip_tables(
-                &ctx,
-                SetIPTablesRequest {
-                    is_ipv6: false,
-                    data: empty_rules.as_bytes().to_vec(),
-                    ..Default::default()
-                },
-            )
-            .await;
-        assert!(result.is_ok(), "set ip tables with no data should succeed");
-
-        // Verify that attempting to write "garbage" iptables results in an error:
-        let garbage_rules = r#"
-this
-is
-just garbage
-"#;
-        let result = agent_service
-            .set_ip_tables(
-                &ctx,
-                SetIPTablesRequest {
-                    is_ipv6: false,
-                    data: garbage_rules.as_bytes().to_vec(),
-                    ..Default::default()
-                },
-            )
-            .await;
-        assert!(result.is_err(), "set iptables with garbage should fail");
-
-        // Verify setup of valid iptables:Setup  valid set of iptables:
-        let valid_rules = r#"
-*nat
--A PREROUTING -d 192.168.103.153/32 -j DNAT --to-destination 192.168.188.153
-
-COMMIT
-
-"#;
-        let result = agent_service
-            .set_ip_tables(
-                &ctx,
-                SetIPTablesRequest {
-                    is_ipv6: false,
-                    data: valid_rules.as_bytes().to_vec(),
-                    ..Default::default()
-                },
-            )
-            .await;
-        assert!(result.is_ok(), "set ip tables should succeed");
-
-        let result = agent_service
-            .get_ip_tables(
-                &ctx,
-                GetIPTablesRequest {
-                    is_ipv6: false,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert!(!result.data.is_empty(), "we should have non-zero output:");
-        assert!(
-            std::str::from_utf8(&result.data).unwrap().contains(
-                "PREROUTING -d 192.168.103.153/32 -j DNAT --to-destination 192.168.188.153"
-            ),
-            "We should see the resulting rule"
-        );
-
-        // Verify setup of valid ip6tables:
-        let valid_ipv6_rules = r#"
-*filter
--A INPUT -s 2001:db8:100::1/128 -i sit+ -p tcp -m tcp --sport 512:65535
-
-COMMIT
-
-"#;
-        let result = agent_service
-            .set_ip_tables(
-                &ctx,
-                SetIPTablesRequest {
-                    is_ipv6: true,
-                    data: valid_ipv6_rules.as_bytes().to_vec(),
-                    ..Default::default()
-                },
-            )
-            .await;
-        assert!(result.is_ok(), "set ip6 tables should succeed");
-
-        let result = agent_service
-            .get_ip_tables(
-                &ctx,
-                GetIPTablesRequest {
-                    is_ipv6: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert!(!result.data.is_empty(), "we should have non-zero output:");
-        assert!(
-            std::str::from_utf8(&result.data)
-                .unwrap()
-                .contains("INPUT -s 2001:db8:100::1/128 -i sit+ -p tcp -m tcp --sport 512:65535"),
-            "We should see the resulting rule"
-        );
     }
 
     #[tokio::test]

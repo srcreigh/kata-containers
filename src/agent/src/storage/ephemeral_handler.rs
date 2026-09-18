@@ -12,23 +12,18 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use kata_sys_util::mount::parse_mount_options;
 use kata_types::mount::{StorageDevice, KATA_MOUNT_OPTION_FS_GID};
 use nix::unistd::Gid;
 use protocols::agent::Storage;
 use slog::Logger;
-use tokio::sync::Mutex;
 use tracing::instrument;
 
-use crate::mount::baremount;
-use crate::sandbox::Sandbox;
 use crate::storage::{
     common_storage_handler, new_device, parse_options, StorageContext, StorageHandler, MODE_SETGID,
 };
 use kata_types::device::DRIVER_EPHEMERAL_TYPE;
 
 const FS_TYPE_HUGETLB: &str = "hugetlbfs";
-const FS_GID_EQ: &str = "fsgid=";
 const SYS_FS_HUGEPAGES_PREFIX: &str = "/sys/kernel/mm/hugepages";
 
 #[derive(Debug)]
@@ -174,67 +169,6 @@ impl EphemeralHandler {
 
         Ok((pagesize, size))
     }
-}
-
-// update_ephemeral_mounts takes a list of ephemeral mounts and remounts them
-// with mount options passed by the caller
-#[instrument]
-pub async fn update_ephemeral_mounts(
-    logger: Logger,
-    storages: &[Storage],
-    _sandbox: &Arc<Mutex<Sandbox>>,
-) -> Result<()> {
-    for storage in storages {
-        let handler_name = &storage.driver;
-        let logger = logger.new(o!(
-            "msg" => "updating tmpfs storage",
-            "subsystem" => "storage",
-            "storage-type" => handler_name.to_owned()));
-
-        match handler_name.as_str() {
-            DRIVER_EPHEMERAL_TYPE => {
-                fs::create_dir_all(&storage.mount_point)?;
-
-                if storage.options.is_empty() {
-                    continue;
-                } else {
-                    // assume that fsGid has already been set
-                    let mount_path = Path::new(&storage.mount_point);
-                    let src_path = Path::new(&storage.source);
-                    let opts: Vec<&String> = storage
-                        .options
-                        .iter()
-                        .filter(|&opt| !opt.starts_with(FS_GID_EQ))
-                        .collect();
-                    let (flags, options) = parse_mount_options(&opts)?;
-
-                    info!(logger, "mounting storage";
-                        "mount-source" => src_path.display(),
-                        "mount-destination" => mount_path.display(),
-                        "mount-fstype"  => storage.fstype.as_str(),
-                        "mount-options" => options.as_str(),
-                    );
-
-                    baremount(
-                        src_path,
-                        mount_path,
-                        storage.fstype.as_str(),
-                        flags,
-                        options.as_str(),
-                        &logger,
-                    )?;
-                }
-            }
-            _ => {
-                return Err(anyhow!(
-                    "Unsupported storage type for syncing mounts {}. Only ephemeral storage update is supported",
-                    storage.driver
-                ));
-            }
-        };
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

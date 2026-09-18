@@ -21,7 +21,6 @@ use tokio::sync::Mutex;
 use tracing::instrument;
 
 use self::block_handler::VirtioBlkMmioHandler;
-pub use self::ephemeral_handler::update_ephemeral_mounts;
 use self::ephemeral_handler::EphemeralHandler;
 use self::local_handler::LocalHandler;
 use crate::mount::{baremount, is_mounted, remove_mounts};

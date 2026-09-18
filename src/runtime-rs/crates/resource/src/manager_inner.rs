@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc, thread};
 
-use agent::{types::Device, ARPNeighbor, Agent, OnlineCPUMemRequest, Storage};
+use agent::{types::Device, ARPNeighbor, Agent, Storage};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use hypervisor::{
@@ -28,7 +28,7 @@ use kata_types::{
     mount::{adjust_rootfs_mounts, KATA_IMAGE_FORCE_GUEST_PULL},
 };
 use libc::NUD_PERMANENT;
-use oci::{Linux, LinuxCpu, LinuxResources};
+use oci::{Linux, LinuxResources};
 use oci_spec::runtime::{self as oci, LinuxDeviceType};
 use persist::sandbox_persist::Persist;
 use std::path::{Path, PathBuf};
@@ -1015,28 +1015,10 @@ impl ResourceManagerInner {
         linux_resources: Option<&LinuxResources>,
         op: ResourceUpdateOp,
     ) -> Result<Option<LinuxResources>> {
-        let linux_cpus = || -> Option<&LinuxCpu> { linux_resources.as_ref()?.cpu().as_ref() }();
-
-        // if static_sandbox_resource_mgmt, we will not have to update sandbox's cpu or mem resource
-        if !self.toml_config.runtime.static_sandbox_resource_mgmt {
-            // update cpu
-            self.cpu_resource
-                .update_cpu_resources(cid, linux_cpus, op, self.hypervisor.as_ref())
-                .await?;
-            // update memory
-            self.mem_resource
-                .update_mem_resources(cid, linux_resources, op, self.hypervisor.as_ref())
-                .await?;
-
-            self.agent
-                .online_cpu_mem(OnlineCPUMemRequest {
-                    wait: false,
-                    nb_cpus: self.cpu_resource.current_vcpu().await.ceil() as u32,
-                    cpu_only: false,
-                })
-                .await
-                .context("online vcpus")?;
-        }
+        anyhow::ensure!(
+            self.toml_config.runtime.static_sandbox_resource_mgmt,
+            "kata-fc: dynamic VM sizing is unsupported"
+        );
 
         // we should firstly update the vcpus and mems, and then update the host cgroups
         self.cgroups_resource

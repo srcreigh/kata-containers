@@ -19,7 +19,7 @@ use url::Url;
 
 use shim_interface::shim_mgmt::{
     AGENT_POLICY_URL, AGENT_URL, DIRECT_VOLUME_PATH_KEY, DIRECT_VOLUME_RESIZE_URL,
-    DIRECT_VOLUME_STATS_URL, IP6_TABLE_URL, IP_TABLE_URL, METRICS_URL,
+    DIRECT_VOLUME_STATS_URL, METRICS_URL,
 };
 
 // main router for response, this works as a multiplexer on
@@ -36,12 +36,6 @@ pub(crate) async fn handler_mux(
     );
     match (req.method(), req.uri().path()) {
         (&Method::GET, AGENT_URL) => agent_url_handler(sandbox, req).await,
-        (&Method::PUT, IP_TABLE_URL) | (&Method::GET, IP_TABLE_URL) => {
-            ip_table_handler(sandbox, req).await
-        }
-        (&Method::PUT, IP6_TABLE_URL) | (&Method::GET, IP6_TABLE_URL) => {
-            ipv6_table_handler(sandbox, req).await
-        }
         (&Method::POST, DIRECT_VOLUME_STATS_URL) => direct_volume_stats_handler(sandbox, req).await,
         (&Method::POST, DIRECT_VOLUME_RESIZE_URL) => {
             direct_volume_resize_handler(sandbox, req).await
@@ -70,53 +64,6 @@ async fn agent_url_handler(
         .await
         .unwrap_or_else(|_| String::from(""));
     Ok(Response::new(Full::new(Bytes::from(agent_sock))))
-}
-
-/// the ipv4 handler of iptable operation
-async fn ip_table_handler(
-    sandbox: Arc<dyn Sandbox>,
-    req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>> {
-    generic_ip_table_handler(sandbox, req, false).await
-}
-
-/// the ipv6 handler of iptable operation
-async fn ipv6_table_handler(
-    sandbox: Arc<dyn Sandbox>,
-    req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>> {
-    generic_ip_table_handler(sandbox, req, true).await
-}
-
-/// the generic iptable handler, for both ipv4 and ipv6
-/// this requires iptables-series binaries to be inside guest rootfs
-async fn generic_ip_table_handler(
-    sandbox: Arc<dyn Sandbox>,
-    req: Request<Incoming>,
-    is_ipv6: bool,
-) -> Result<Response<Full<Bytes>>> {
-    info!(sl!(), "handler: iptable  ipv6?: {}", is_ipv6);
-    match *req.method() {
-        Method::GET => match sandbox.get_iptables(is_ipv6).await {
-            Ok(data) => {
-                let body = Full::new(Bytes::from(data));
-                Response::builder().body(body).map_err(|e| anyhow!(e))
-            }
-            _ => Err(anyhow!("Failed to get iptable")),
-        },
-
-        Method::PUT => {
-            let data = req.into_body().collect().await?.to_bytes();
-            match sandbox.set_iptables(is_ipv6, data.to_vec()).await {
-                Ok(resp_data) => Response::builder()
-                    .body(Full::new(Bytes::from(resp_data)))
-                    .map_err(|e| anyhow!(e)),
-                _ => Err(anyhow!("Failed to set iptable")),
-            }
-        }
-
-        _ => Err(anyhow!("IP Tables only takes PUT and GET")),
-    }
 }
 
 async fn direct_volume_stats_handler(

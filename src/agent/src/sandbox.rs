@@ -8,26 +8,20 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::fs;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
+use std::thread;
 use std::time::{Duration, Instant};
-use std::{thread, time};
 
 use anyhow::{anyhow, Context, Result};
-use kata_types::cpu::CpuSet;
 use kata_types::mount::StorageDevice;
 use libc::{pid_t, syscall};
 use nix::fcntl::{self, OFlag};
 use nix::sched::{setns, unshare, CloneFlags};
 use nix::sys::stat::Mode;
-use oci::{Hook, Hooks};
-use oci_spec::runtime as oci;
-use protocols::agent::{OnlineCPUMemRequest, SharedMount};
-use regex::Regex;
-use rustjail::cgroups::{self as rustjail_cgroups, DevicesCgroupInfo};
+use protocols::agent::SharedMount;
+use rustjail::cgroups::DevicesCgroupInfo;
 use rustjail::container::BaseContainer;
 use rustjail::container::LinuxContainer;
 use rustjail::process::Process;
@@ -38,7 +32,6 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tracing::instrument;
 
-use crate::linux_abi::*;
 use crate::mount::{get_mount_fs_type, TYPE_ROOTFS};
 use crate::namespace::Namespace;
 use crate::netlink::Handle;
@@ -132,7 +125,6 @@ pub struct Sandbox {
     pub no_pivot_root: bool,
     pub sender: Option<tokio::sync::oneshot::Sender<i32>>,
     pub rtnl: Handle,
-    pub hooks: Option<Hooks>,
     pub event_rx: Arc<Mutex<Receiver<String>>>,
     pub event_tx: Option<Sender<String>>,
     pub bind_watcher: BindWatcher,
@@ -167,7 +159,6 @@ impl Sandbox {
             no_pivot_root: fs_type.eq(TYPE_ROOTFS),
             sender: None,
             rtnl: Handle::new()?,
-            hooks: None,
             event_rx,
             event_tx: Some(tx),
             bind_watcher: BindWatcher::new(),
@@ -343,98 +334,6 @@ impl Sandbox {
             ctr.destroy().await?;
         }
         Ok(())
-    }
-
-    #[instrument]
-    pub fn online_cpu_memory(&self, req: &OnlineCPUMemRequest) -> Result<()> {
-        if req.nb_cpus > 0 {
-            // online cpus
-            online_cpus(&self.logger, req.nb_cpus as i32).context("online cpus")?;
-        }
-
-        if !req.cpu_only {
-            // online memory
-            online_memory(&self.logger).context("online memory")?;
-        }
-
-        if req.nb_cpus == 0 {
-            return Ok(());
-        }
-
-        let guest_cpuset = rustjail_cgroups::fs::get_guest_cpuset()?;
-
-        for (_, ctr) in self.containers.iter() {
-            match ctr
-                .config
-                .spec
-                .as_ref()
-                .and_then(|spec| spec.linux().as_ref())
-                .and_then(|linux| linux.resources().as_ref())
-                .and_then(|resources| resources.cpu().as_ref())
-                .and_then(|cpus| cpus.cpus().as_ref())
-            {
-                Some(cpu_set) => {
-                    info!(self.logger, "updating {}", ctr.id.as_str());
-                    ctr.cgroup_manager
-                        .update_cpuset_path(guest_cpuset.as_str(), cpu_set)?;
-                }
-                None => continue,
-            }
-        }
-
-        Ok(())
-    }
-
-    #[instrument]
-    pub fn add_hooks(&mut self, dir: &str) -> Result<()> {
-        let mut hooks = Hooks::default();
-        if let Ok(hook) = self.find_hooks(dir, "prestart") {
-            hooks.set_prestart(Some(hook));
-        }
-        if let Ok(hook) = self.find_hooks(dir, "poststart") {
-            hooks.set_poststart(Some(hook));
-        }
-        if let Ok(hook) = self.find_hooks(dir, "poststop") {
-            hooks.set_poststop(Some(hook));
-        }
-        self.hooks = Some(hooks);
-
-        Ok(())
-    }
-
-    #[instrument]
-    fn find_hooks(&self, hook_path: &str, hook_type: &str) -> Result<Vec<Hook>> {
-        let mut hooks = Vec::new();
-        for entry in fs::read_dir(Path::new(hook_path).join(hook_type))? {
-            let entry = entry?;
-            // Reject non-file, symlinks and non-executable files
-            if !entry.file_type()?.is_file()
-                || entry.file_type()?.is_symlink()
-                || entry.metadata()?.permissions().mode() & 0o111 == 0
-            {
-                continue;
-            }
-
-            let name = entry.file_name();
-            let mut hook = oci::Hook::default();
-            hook.set_path(PathBuf::from(hook_path).join(hook_type).join(&name));
-            hook.set_args(Some(vec![
-                name.to_str().unwrap().to_owned(),
-                hook_type.to_owned(),
-            ]));
-
-            info!(
-                self.logger,
-                "found {} hook {:?} mode {:o}",
-                hook_type,
-                hook,
-                entry.metadata()?.permissions().mode()
-            );
-
-            hooks.push(hook);
-        }
-
-        Ok(hooks)
     }
 
     #[instrument]
@@ -619,93 +518,6 @@ impl Sandbox {
 
         Ok(())
     }
-}
-
-#[instrument]
-fn online_resources(logger: &Logger, path: &str, pattern: &str, num: i32) -> Result<i32> {
-    let mut count = 0;
-    let re = Regex::new(pattern)?;
-
-    for e in fs::read_dir(path)? {
-        let entry = e?;
-        // Skip direntry which doesn't match the pattern.
-        match entry.file_name().to_str() {
-            None => continue,
-            Some(v) => {
-                if !re.is_match(v) {
-                    continue;
-                }
-            }
-        };
-
-        let p = entry.path().join(SYSFS_ONLINE_FILE);
-        if let Ok(c) = fs::read_to_string(&p) {
-            // Try to online the object in offline state.
-            if c.trim().contains('0') && fs::write(&p, "1").is_ok() && num > 0 {
-                count += 1;
-                if count == num {
-                    break;
-                }
-            }
-        }
-    }
-
-    Ok(count)
-}
-
-#[instrument]
-fn online_memory(logger: &Logger) -> Result<()> {
-    online_resources(logger, SYSFS_MEMORY_ONLINE_PATH, r"memory[0-9]+", -1)
-        .context("online memory resource")?;
-    Ok(())
-}
-
-// max wait for all CPUs to online will use 50 * 100 = 5 seconds.
-const ONLINE_CPUMEM_WAIT_MILLIS: u64 = 50;
-const ONLINE_CPUMEM_MAX_RETRIES: i32 = 100;
-
-#[instrument]
-fn online_cpus(logger: &Logger, num: i32) -> Result<i32> {
-    let mut onlined_cpu_count = onlined_cpus().context("onlined cpu count")?;
-    // for some vmms, like dragonball, they will online cpus for us
-    // so check first whether agent need to do the online operation
-    if onlined_cpu_count >= num {
-        return Ok(num);
-    }
-
-    for i in 0..ONLINE_CPUMEM_MAX_RETRIES {
-        // online num resources
-        online_resources(
-            logger,
-            SYSFS_CPU_PATH,
-            r"cpu[0-9]+",
-            num - onlined_cpu_count,
-        )
-        .context("online cpu resource")?;
-
-        onlined_cpu_count = onlined_cpus().context("onlined cpu count")?;
-        if onlined_cpu_count >= num {
-            info!(
-                logger,
-                "Currently {} onlined CPU(s) after {} retries", onlined_cpu_count, i
-            );
-            return Ok(num);
-        }
-        thread::sleep(time::Duration::from_millis(ONLINE_CPUMEM_WAIT_MILLIS));
-    }
-
-    Err(anyhow!(
-        "failed to online {} CPU(s) after {} retries",
-        num,
-        ONLINE_CPUMEM_MAX_RETRIES
-    ))
-}
-
-fn onlined_cpus() -> Result<i32> {
-    let content =
-        fs::read_to_string(SYSFS_CPU_ONLINE_PATH).context("read sysfs cpu online file")?;
-    let online_cpu_set = CpuSet::from_str(content.trim())?;
-    Ok(online_cpu_set.len() as i32)
 }
 
 #[cfg(test)]
@@ -1005,39 +817,6 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn add_guest_hooks() {
-        let logger = slog::Logger::root(slog::Discard, o!());
-        let mut s = Sandbox::new(&logger).unwrap();
-        let tmpdir = Builder::new().tempdir().unwrap();
-        let tmpdir_path = tmpdir.path().to_str().unwrap();
-
-        assert!(fs::create_dir_all(tmpdir.path().join("prestart")).is_ok());
-        assert!(fs::create_dir_all(tmpdir.path().join("poststop")).is_ok());
-
-        let file = File::create(tmpdir.path().join("prestart").join("prestart.sh")).unwrap();
-        let mut perm = file.metadata().unwrap().permissions();
-        perm.set_mode(0o777);
-        assert!(file.set_permissions(perm).is_ok());
-        assert!(File::create(tmpdir.path().join("poststop").join("poststop.sh")).is_ok());
-
-        assert!(s.add_hooks(tmpdir_path).is_ok());
-        assert!(s.hooks.is_some());
-        assert!(s.hooks.as_ref().unwrap().prestart().clone().unwrap().len() == 1);
-        // As we don't create poststart/xxx, the poststart will be none
-        assert!(s.hooks.as_ref().unwrap().poststart().clone().is_none());
-        // poststop path is created but as the problem of file perm is rejected.
-        assert!(s
-            .hooks
-            .as_ref()
-            .unwrap()
-            .poststop()
-            .clone()
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
-    #[serial]
     async fn test_sandbox_set_destroy() {
         let logger = slog::Logger::root(slog::Discard, o!());
         let mut s = Sandbox::new(&logger).unwrap();
@@ -1159,204 +938,5 @@ mod tests {
             find_result.is_none(),
             "Shouldn't find a process for non existent pid"
         );
-    }
-
-    #[tokio::test]
-    async fn test_online_resources() {
-        #[derive(Debug, Default)]
-        struct TestFile {
-            name: String,
-            content: String,
-        }
-
-        #[derive(Debug, Default)]
-        struct TestDirectory<'a> {
-            name: String,
-            files: &'a [TestFile],
-        }
-
-        #[derive(Debug)]
-        struct TestData<'a> {
-            directory_autogen_name: String,
-            number_autogen_directories: u32,
-
-            extra_directories: &'a [TestDirectory<'a>],
-            pattern: String,
-            to_enable: i32,
-
-            result: Result<i32>,
-        }
-
-        impl Default for TestData<'_> {
-            fn default() -> Self {
-                TestData {
-                    directory_autogen_name: Default::default(),
-                    number_autogen_directories: Default::default(),
-                    extra_directories: Default::default(),
-                    pattern: Default::default(),
-                    to_enable: Default::default(),
-                    result: Ok(Default::default()),
-                }
-            }
-        }
-
-        let tests = &[
-            // 4 well formed directories, request enabled 4,
-            // correct result 4 enabled, should pass
-            TestData {
-                directory_autogen_name: String::from("cpu"),
-                number_autogen_directories: 4,
-                pattern: String::from(r"cpu[0-9]+"),
-                to_enable: 4,
-                result: Ok(4),
-                ..Default::default()
-            },
-            // 0 well formed directories, request enabled 4,
-            // correct result 0 enabled, should pass
-            TestData {
-                number_autogen_directories: 0,
-                to_enable: 4,
-                result: Ok(0),
-                ..Default::default()
-            },
-            // 10 well formed directories, request enabled 4,
-            // correct result 4 enabled, should pass
-            TestData {
-                directory_autogen_name: String::from("cpu"),
-                number_autogen_directories: 10,
-                pattern: String::from(r"cpu[0-9]+"),
-                to_enable: 4,
-                result: Ok(4),
-                ..Default::default()
-            },
-            // 0 well formed directories, request enabled 0,
-            // correct result 0 enabled, should pass
-            TestData {
-                number_autogen_directories: 0,
-                pattern: String::from(r"cpu[0-9]+"),
-                to_enable: 0,
-                result: Ok(0),
-                ..Default::default()
-            },
-            // 4 well formed directories, 1 malformed (no online file),
-            // request enable 5, correct result 4
-            TestData {
-                directory_autogen_name: String::from("cpu"),
-                number_autogen_directories: 4,
-                pattern: String::from(r"cpu[0-9]+"),
-                extra_directories: &[TestDirectory {
-                    name: String::from("cpu4"),
-                    files: &[],
-                }],
-                to_enable: 5,
-                result: Ok(4),
-            },
-            // 3 malformed directories (no online files),
-            // request enable 3, correct result 0
-            TestData {
-                pattern: String::from(r"cpu[0-9]+"),
-                extra_directories: &[
-                    TestDirectory {
-                        name: String::from("cpu0"),
-                        files: &[],
-                    },
-                    TestDirectory {
-                        name: String::from("cpu1"),
-                        files: &[],
-                    },
-                    TestDirectory {
-                        name: String::from("cpu2"),
-                        files: &[],
-                    },
-                ],
-                to_enable: 3,
-                result: Ok(0),
-                ..Default::default()
-            },
-            // 1 malformed directories (online file with content "1"),
-            // request enable 1, correct result 0
-            TestData {
-                pattern: String::from(r"cpu[0-9]+"),
-                extra_directories: &[TestDirectory {
-                    name: String::from("cpu0"),
-                    files: &[TestFile {
-                        name: SYSFS_ONLINE_FILE.to_string(),
-                        content: String::from("1"),
-                    }],
-                }],
-                to_enable: 1,
-                result: Ok(0),
-                ..Default::default()
-            },
-            // 2 well formed directories, 1 malformed (online file with content "1"),
-            // request enable 3, correct result 2
-            TestData {
-                directory_autogen_name: String::from("cpu"),
-                number_autogen_directories: 2,
-                pattern: String::from(r"cpu[0-9]+"),
-                extra_directories: &[TestDirectory {
-                    name: String::from("cpu2"),
-                    files: &[TestFile {
-                        name: SYSFS_ONLINE_FILE.to_string(),
-                        content: String::from("1"),
-                    }],
-                }],
-                to_enable: 3,
-                result: Ok(2),
-            },
-        ];
-
-        let logger = slog::Logger::root(slog::Discard, o!());
-        let tmpdir = Builder::new().tempdir().unwrap();
-        let tmpdir_path = tmpdir.path().to_str().unwrap();
-
-        for (i, d) in tests.iter().enumerate() {
-            let current_test_dir_path = format!("{tmpdir_path}/test_{i}");
-            fs::create_dir(&current_test_dir_path).unwrap();
-
-            // create numbered directories and fill using root name
-            for j in 0..d.number_autogen_directories {
-                let subdir_path = format!(
-                    "{}/{}{}",
-                    current_test_dir_path, d.directory_autogen_name, j
-                );
-                let subfile_path = format!("{subdir_path}/{SYSFS_ONLINE_FILE}");
-                fs::create_dir(&subdir_path).unwrap();
-                let mut subfile = File::create(subfile_path).unwrap();
-                subfile.write_all(b"0").unwrap();
-            }
-            // create extra directories and fill to specification
-            for j in d.extra_directories {
-                let subdir_path = format!("{}/{}", current_test_dir_path, j.name);
-                fs::create_dir(&subdir_path).unwrap();
-                for file in j.files {
-                    let subfile_path = format!("{}/{}", subdir_path, file.name);
-                    let mut subfile = File::create(subfile_path).unwrap();
-                    subfile.write_all(file.content.as_bytes()).unwrap();
-                }
-            }
-
-            // run created directory structure against online_resources
-            let result = online_resources(&logger, &current_test_dir_path, &d.pattern, d.to_enable);
-
-            let mut msg = format!(
-                "test[{}]: {:?}, expected {}, actual {}",
-                i,
-                d,
-                d.result.is_ok(),
-                result.is_ok()
-            );
-
-            assert_eq!(result.is_ok(), d.result.is_ok(), "{msg}");
-
-            if d.result.is_ok() {
-                let test_result_val = *d.result.as_ref().ok().unwrap();
-                let result_val = result.ok().unwrap();
-
-                msg = format!("test[{i}]: {d:?}, expected {test_result_val}, actual {result_val}");
-
-                assert_eq!(test_result_val, result_val, "{msg}");
-            }
-        }
     }
 }
