@@ -877,10 +877,6 @@ impl Sandbox for VirtSandbox {
             .map_err(|err| anyhow!("failed to get agent metrics {:?}", err))
             .map(|resp| resp.metrics)
     }
-
-    async fn hypervisor_metrics(&self) -> Result<String> {
-        self.hypervisor.get_hypervisor_metrics().await
-    }
 }
 
 #[async_trait]

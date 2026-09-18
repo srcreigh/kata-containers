@@ -54,5 +54,4 @@ pub trait Sandbox: Send + Sync {
 
     // metrics function
     async fn agent_metrics(&self) -> Result<String>;
-    async fn hypervisor_metrics(&self) -> Result<String>;
 }

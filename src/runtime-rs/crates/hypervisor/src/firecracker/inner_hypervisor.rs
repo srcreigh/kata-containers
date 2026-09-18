@@ -219,9 +219,4 @@ impl FcInner {
         debug!(sl(), "Capabilities");
         Ok(self.capabilities.clone())
     }
-
-    pub(crate) async fn get_hypervisor_metrics(&self) -> Result<String> {
-        warn!(sl(), "Get Hypervisor Metrics: Not implemented");
-        todo!()
-    }
 }

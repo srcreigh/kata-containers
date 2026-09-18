@@ -89,13 +89,12 @@ async fn metrics_url_handler(
     sandbox: Arc<dyn Sandbox>,
     _req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>> {
-    // get metrics from agent, hypervisor, and shim
+    // Firecracker has no implemented VMM metrics source; retain agent and shim metrics.
     let agent_metrics = sandbox.agent_metrics().await.unwrap_or_default();
-    let hypervisor_metrics = sandbox.hypervisor_metrics().await.unwrap_or_default();
     let shim_metrics = get_shim_metrics().unwrap_or_default();
 
     Ok(Response::new(Full::new(Bytes::from(format!(
-        "{agent_metrics}{hypervisor_metrics}{shim_metrics}"
+        "{agent_metrics}{shim_metrics}"
     )))))
 }
 
