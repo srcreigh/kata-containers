@@ -6,8 +6,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::fs;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -353,7 +351,7 @@ mod tests {
     use std::fs::{self, File};
     use std::io::prelude::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::{tempdir, Builder, TempDir};
     use test_utils::skip_if_not_root;
