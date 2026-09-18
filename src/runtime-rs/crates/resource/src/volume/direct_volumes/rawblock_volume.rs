@@ -43,7 +43,7 @@ impl RawblockVolume {
         let blkdev_info = get_block_device_info(d).await;
 
         // check volume type
-        if mount_info.volume_type != KATA_DIRECT_VOLUME_TYPE {
+        if !supported_volume_type(&mount_info.volume_type) {
             return Err(anyhow!(
                 "volume type {:?} is invalid",
                 mount_info.volume_type
@@ -140,5 +140,24 @@ impl Volume for RawblockVolume {
 
     fn get_device_id(&self) -> Result<Option<String>> {
         Ok(Some(self.device_id.clone()))
+    }
+}
+
+// "blk" is the format emitted by kata-runtime direct-volume and compatible CSI drivers.
+// Retain the Rust-native spelling for callers already using it; never default unknown types.
+fn supported_volume_type(value: &str) -> bool {
+    matches!(value, "blk" | KATA_DIRECT_VOLUME_TYPE)
+}
+#[cfg(test)]
+mod minimal_tests {
+    use super::*;
+    #[test]
+    fn direct_volume_types_fail_closed() {
+        for value in ["blk", "directvol"] {
+            assert!(supported_volume_type(value));
+        }
+        for value in ["", "spdkvol", "spoolvol", "vfiovol", "anything"] {
+            assert!(!supported_volume_type(value));
+        }
     }
 }

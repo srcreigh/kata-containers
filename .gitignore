@@ -24,3 +24,6 @@ opt/
 tools/packaging/kernel/configs/**/.config
 root_hash.txt
 /dist/
+
+__pycache__/
+*.pyc
