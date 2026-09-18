@@ -29,7 +29,7 @@ async-recursion.workspace = true
 futures.workspace = true
 
 # Async runtime
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-vsock.workspace = true
 
 netlink-sys.workspace = true
@@ -70,12 +70,10 @@ strum_macros.workspace = true
 
 # Local dependencies
 kata-agent-policy = { workspace = true, optional = true }
-mem-agent.workspace = true
 rustjail.workspace = true
 protocols = { workspace = true, features = ["async", "with-serde"] }
 kata-sys-util.workspace = true
 kata-types.workspace = true
-pcilibs-rs.workspace = true
 runtime-spec.workspace = true
 safe-path.workspace = true
 # Note: this crate sets the slog 'max_*' features which allows the log level
@@ -89,7 +87,6 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 async-compression = { version = "0.4.22", features = ["tokio", "gzip"] }
 
-container-device-interface.workspace = true
 
 [target.'cfg(target_arch = "s390x")'.dependencies]
 pv_core = { git = "https://github.com/ibm-s390-linux/s390-tools", rev = "4942504a9a2977d49989a5e5b7c1c8e07dc0fa41", package = "s390_pv_core" }

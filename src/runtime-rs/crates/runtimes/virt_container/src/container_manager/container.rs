@@ -26,9 +26,7 @@ use kata_types::{
 use oci_spec::runtime as oci;
 
 use oci::{LinuxResources, Process as OCIProcess};
-use resource::{
-    cdi_devices::container_device::annotate_container_devices, ResourceManager, ResourceUpdateOp,
-};
+use resource::{ResourceManager, ResourceUpdateOp};
 use tokio::sync::RwLock;
 
 use super::{
@@ -112,6 +110,7 @@ impl Container {
     }
 
     pub async fn create(&self, mut spec: oci::Spec) -> Result<()> {
+        kata_types::device::validate_spec_device_features(&spec)?;
         // process oci spec
         let mut inner = self.inner.write().await;
         let toml_config = self.resource_manager.config().await;
@@ -119,13 +118,6 @@ impl Container {
         let sandbox_pidns = is_pid_namespace_enabled(&spec);
         let disable_guest_selinux = get_disable_guest_selinux(&toml_config);
         let annotations = spec.annotations().clone().unwrap_or_default();
-        // Tag the spec with the actual container type. Previously every
-        // non-pod-container was forced to "pod_sandbox", which made standalone
-        // engines (Docker/nerdctl/podman) look like a pod sandbox. The agent
-        // skips CDI device injection for "pod_sandbox", so the NVIDIA CDI edits
-        // carried in the "cdi.k8s.io/*" annotations were never applied and the
-        // GPU userspace (e.g. nvidia-smi) was missing in the guest. Emitting
-        // "single_container" matches the Go runtime and lets the agent inject.
         let container_typ = container_type(&spec);
         let pod_type_anno = (CONTAINER_TYPE_KEY.to_string(), container_typ.to_string());
 
@@ -204,13 +196,10 @@ impl Container {
             .as_ref()
             .context("OCI spec missing linux field")?;
 
-        let container_devices = self
+        let devices_agent = self
             .resource_manager
             .handler_devices(&config.container_id, linux)
             .await?;
-        let devices_agent = annotate_container_devices(&mut spec, container_devices)
-            .context("annotate container devices failed")?;
-
         // update vcpus, mems and host cgroups
         let resources = self
             .resource_manager

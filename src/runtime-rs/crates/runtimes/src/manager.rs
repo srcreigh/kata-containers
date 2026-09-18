@@ -487,6 +487,7 @@ impl RuntimeHandlerManager {
                 spec::OCI_SPEC_CONFIG_FILE_NAME
             );
             let mut spec = oci::Spec::load(&bundler_path).context("load spec")?;
+            kata_types::device::validate_spec_device_features(&spec)?;
             let state = spec::State {
                 version: spec.version().clone(),
                 id: container_config.container_id.to_string(),

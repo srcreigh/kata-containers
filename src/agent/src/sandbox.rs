@@ -36,10 +36,8 @@ use crate::mount::{get_mount_fs_type, TYPE_ROOTFS};
 use crate::namespace::Namespace;
 use crate::netlink::Handle;
 use crate::network::Network;
-use crate::pci;
 use crate::storage::StorageDeviceGeneric;
 use crate::uevent::{Uevent, UeventMatcher};
-use crate::watcher::BindWatcher;
 
 /// Errors that can occur when looking up processes in the sandbox.
 #[derive(Debug, Error)]
@@ -102,8 +100,6 @@ impl StorageState {
     }
 }
 
-pub type PciHostGuestMapping = HashMap<pci::Address, pci::Address>;
-
 #[derive(Debug)]
 pub struct Sandbox {
     pub logger: Logger,
@@ -127,8 +123,6 @@ pub struct Sandbox {
     pub rtnl: Handle,
     pub event_rx: Arc<Mutex<Receiver<String>>>,
     pub event_tx: Option<Sender<String>>,
-    pub bind_watcher: BindWatcher,
-    pub pcimap: HashMap<String, PciHostGuestMapping>,
     pub devcg_info: Arc<RwLock<DevicesCgroupInfo>>,
 }
 
@@ -161,8 +155,6 @@ impl Sandbox {
             rtnl: Handle::new()?,
             event_rx,
             event_tx: Some(tx),
-            bind_watcher: BindWatcher::new(),
-            pcimap: HashMap::new(),
             devcg_info: Arc::new(RwLock::new(DevicesCgroupInfo::default())),
         })
     }

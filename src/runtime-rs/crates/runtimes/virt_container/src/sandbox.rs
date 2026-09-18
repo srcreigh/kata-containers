@@ -25,12 +25,9 @@ use common::{
 
 use containerd_shim_protos::events::task::{TaskExit, TaskOOM};
 
-use hypervisor::device::topology::PCIePort;
-use hypervisor::device::util::{get_host_path, DEVICE_TYPE_CHAR};
-
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use hypervisor::{firecracker::Firecracker, HYPERVISOR_FIRECRACKER};
-use hypervisor::{is_vfio_ap_device, BlockConfigModern, Hypervisor, VfioDeviceBase};
+use hypervisor::{BlockConfigModern, Hypervisor};
 
 use hypervisor::{
     utils::{
@@ -51,7 +48,6 @@ use kata_types::config::{hypervisor::Factory, TomlConfig};
 use kata_types::initdata::{calculate_initdata_digest, ProtectedPlatform};
 use oci_spec::runtime as oci;
 use persist::{self, sandbox_persist::Persist};
-use pod_resources_rs::handle_cdi_devices;
 use protobuf::SpecialFields;
 use resource::coco_data::initdata::{
     kata_shared_init_data_path, InitDataConfig, KATA_INIT_DATA_IMAGE,
@@ -61,8 +57,7 @@ use resource::manager::ManagerArgs;
 use resource::network::{dan_config_path, DanNetworkConfig, NetworkConfig, NetworkWithNetNsConfig};
 use resource::{ResourceConfig, ResourceManager};
 use runtime_spec as spec;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 use strum::Display;
@@ -275,35 +270,6 @@ impl VirtSandbox {
             None
         };
 
-        // Cold-plug VFIO devices using two mutually exclusive paths:
-        // 1. CDI path: Query Kubernetes Pod Resources API for devices managed by device plugins
-        //    (typical in K8s environments with device plugins)
-        // 2. Raw VFIO path: Parse OCI spec's linux.devices for directly specified VFIO devices
-        //    (typical in standalone containers like `ctr --device /dev/vfio/0`)
-        //
-        // These paths are mutually exclusive from a user perspective:
-        // - In K8s, devices come through device plugins, not raw OCI device specs
-        // - In standalone containers, there's no Pod Resources API available
-        //
-        // Therefore, we only attempt the raw VFIO path if CDI finds no devices,
-        // avoiding unnecessary file I/O and OCI spec parsing in the common K8s case.
-        let mut vfio_devices = self.prepare_coldplug_cdi_devices(sandbox_config).await?;
-        if vfio_devices.is_empty() {
-            let raw_vfio = self
-                .prepare_coldplug_raw_vfio_devices(sandbox_config)
-                .await?;
-            vfio_devices.extend(raw_vfio);
-        }
-        if !vfio_devices.is_empty() {
-            info!(
-                sl!(),
-                "prepare pod devices {vfio_devices:?} for sandbox done."
-            );
-            resource_configs.extend(vfio_devices);
-        } else {
-            info!(sl!(), "no pod devices to prepare for sandbox.");
-        }
-
         // prepare protection device config
         if let Some(protection_dev_config) = self
             .prepare_protection_device_config(&self.hypervisor.hypervisor_config().await, init_data)
@@ -347,189 +313,6 @@ impl VirtSandbox {
                 None
             }
         }
-    }
-
-    async fn prepare_coldplug_cdi_devices(
-        &self,
-        sandbox_config: &SandboxConfig,
-    ) -> Result<Vec<ResourceConfig>> {
-        let hypervisor_config = self.hypervisor.hypervisor_config().await;
-        let cold_plug_vfio = &hypervisor_config.device_info.cold_plug_vfio;
-        if cold_plug_vfio.is_empty() || cold_plug_vfio == "no-port" {
-            return Ok(Vec::new());
-        }
-
-        let port = match cold_plug_vfio.as_str() {
-            "root-port" => PCIePort::RootPort,
-            other => {
-                return Err(anyhow!(
-                    "unsupported cold_plug_vfio value {:?}; only \"root-port\" is supported",
-                    other
-                ))
-            }
-        };
-
-        let config = self.resource_manager.config().await;
-
-        // Collect the VFIO device nodes to cold-plug from two sources so that Kubernetes, docker,
-        // and nerdctl are handled by the same path:
-        //
-        //   1. Kubernetes: the kubelet PodResources API enumerates the CDI devices allocated to the
-        //      pod.
-        //   2. Docker/nerdctl: the CDI runtime applies the device's containerEdits directly to the
-        //      OCI spec, so the VFIO nodes show up in linux.devices (e.g. /dev/vfio/devices/vfio0).
-        let mut paths: Vec<String> = Vec::new();
-
-        let pod_resource_socket = &config.runtime.pod_resource_api_sock;
-        info!(
-            sl!(),
-            "sandbox pod_resource_socket: {:?}", pod_resource_socket
-        );
-        if !pod_resource_socket.is_empty() && Path::new(pod_resource_socket).exists() {
-            let annotations = &sandbox_config.annotations;
-            debug!(
-                sl!(),
-                "cold-plug: sandbox-name={:?} sandbox-namespace={:?}",
-                annotations.get("io.kubernetes.cri.sandbox-name"),
-                annotations.get("io.kubernetes.cri.sandbox-namespace")
-            );
-
-            let cdi_devices = pod_resources_rs::pod_resources::get_pod_cdi_devices(
-                pod_resource_socket,
-                annotations,
-            )
-            .await
-            .context("failed to query Pod Resources CDI devices")?;
-            info!(sl!(), "pod cdi devices: {:?}", cdi_devices);
-
-            let device_nodes = handle_cdi_devices(&cdi_devices).await?;
-            paths.extend(
-                device_nodes
-                    .iter()
-                    .filter_map(pod_resources_rs::device_node_host_path),
-            );
-        }
-
-        paths.extend(oci_spec_vfio_device_paths());
-
-        // De-duplicate while preserving discovery order.
-        let mut seen = HashSet::new();
-        paths.retain(|path| seen.insert(path.clone()));
-
-        if paths.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut vfio_configs = Vec::new();
-        for path in paths.iter() {
-            let dev_info = VfioDeviceBase {
-                host_path: path.clone(),
-                iommu_group_devnode: PathBuf::from(path),
-                dev_type: "c".to_string(),
-                port,
-                hostdev_prefix: "vfio_device".to_owned(),
-                ..Default::default()
-            };
-            vfio_configs.push(dev_info);
-        }
-
-        Ok(vfio_configs
-            .into_iter()
-            .map(ResourceConfig::VfioDeviceModern)
-            .collect())
-    }
-
-    // Fallback cold-plug path for standalone containers (e.g. `ctr --device /dev/vfio/0`).
-    // Reads the OCI spec from the bundle and cold-plugs any VFIO char devices found in
-    // linux.devices before VM boot, mirroring Go's coldOrHotPlugVFIO().
-    // Returns empty when the pod resources API path already handles devices (K8s) or
-    // when cold_plug_vfio is not configured.
-    async fn prepare_coldplug_raw_vfio_devices(
-        &self,
-        sandbox_config: &SandboxConfig,
-    ) -> Result<Vec<ResourceConfig>> {
-        let hypervisor_config = self.hypervisor.hypervisor_config().await;
-        let cold_plug_vfio = &hypervisor_config.device_info.cold_plug_vfio;
-        if cold_plug_vfio.is_empty() || cold_plug_vfio == "no-port" {
-            return Ok(Vec::new());
-        }
-
-        let port = match cold_plug_vfio.as_str() {
-            "root-port" => PCIePort::RootPort,
-            other => {
-                return Err(anyhow!(
-                    "unsupported cold_plug_vfio value {:?}; only \"root-port\" is supported",
-                    other
-                ))
-            }
-        };
-
-        let bundle = &sandbox_config.state.bundle;
-        if bundle.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let spec_path = format!("{}/{}", bundle, spec::OCI_SPEC_CONFIG_FILE_NAME);
-        let oci_spec = match oci::Spec::load(&spec_path) {
-            Ok(s) => s,
-            Err(e) => {
-                info!(
-                    sl!(),
-                    "no OCI spec at {:?}: {:?}, skipping raw VFIO cold-plug", spec_path, e
-                );
-                return Ok(Vec::new());
-            }
-        };
-
-        let linux_devices = oci_spec
-            .linux()
-            .as_ref()
-            .and_then(|l| l.devices().as_ref())
-            .cloned()
-            .unwrap_or_default();
-
-        let mut vfio_configs = Vec::new();
-        for d in linux_devices.iter() {
-            if d.typ() != oci::LinuxDeviceType::C {
-                continue;
-            }
-            let host_path = match get_host_path(DEVICE_TYPE_CHAR, d.major(), d.minor()) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!(
-                        sl!(),
-                        "failed to resolve host path for {:?}: {:?}",
-                        d.path(),
-                        e
-                    );
-                    continue;
-                }
-            };
-            // Only process VFIO passthrough devices under /dev/vfio/*.
-            // Skip non-VFIO devices and the legacy VFIO control node (/dev/vfio/vfio).
-            if !host_path.starts_with("/dev/vfio/") || host_path == "/dev/vfio/vfio" {
-                continue;
-            }
-            let device_port = if is_vfio_ap_device(Path::new(&host_path)) {
-                PCIePort::NoPort
-            } else {
-                port
-            };
-            vfio_configs.push(VfioDeviceBase {
-                host_path: host_path.clone(),
-                iommu_group_devnode: PathBuf::from(&host_path),
-                dev_type: "c".to_string(),
-                port: device_port,
-                hostdev_prefix: "vfio_device".to_owned(),
-                ..Default::default()
-            });
-        }
-        info!(sl!(), "raw VFIO cold-plug candidates: {:?}", vfio_configs);
-
-        Ok(vfio_configs
-            .into_iter()
-            .map(ResourceConfig::VfioDeviceModern)
-            .collect())
     }
 
     async fn prepare_network_resource(
@@ -936,29 +719,6 @@ impl VirtSandbox {
             network_created: false,
         })
     }
-}
-
-/// Collect VFIO character device nodes (e.g. /dev/vfio/devices/vfio0) that a CDI
-/// runtime injected directly into the OCI spec for the Docker/nerdctl/podman
-/// flow, where there is no kubelet PodResources API to query. The legacy
-/// `/dev/vfio/vfio` control node is skipped as it is not a pass-through device.
-fn oci_spec_vfio_device_paths() -> Vec<String> {
-    let Ok(spec) = load_oci_spec() else {
-        return Vec::new();
-    };
-    let Some(linux) = spec.linux() else {
-        return Vec::new();
-    };
-    let Some(devices) = linux.devices() else {
-        return Vec::new();
-    };
-
-    devices
-        .iter()
-        .filter(|dev| dev.typ() == oci::LinuxDeviceType::C)
-        .map(|dev| dev.path().display().to_string())
-        .filter(|path| path.starts_with("/dev/vfio") && path != "/dev/vfio/vfio")
-        .collect()
 }
 
 #[async_trait]

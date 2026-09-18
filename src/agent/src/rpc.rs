@@ -15,9 +15,8 @@ use tokio::time::{timeout, Duration};
 use std::convert::TryFrom;
 #[cfg(feature = "agent-policy")]
 use std::convert::TryInto as _;
-use std::ffi::{CString, OsStr};
+use std::ffi::OsStr;
 use std::fmt::Debug;
-use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 #[cfg(target_arch = "s390x")]
@@ -37,9 +36,9 @@ use oci_spec::runtime as oci;
 use protobuf::MessageDyn;
 use protobuf::MessageField;
 use protocols::agent::{
-    AddSwapPathRequest, AddSwapRequest, AgentDetails, CopyFileRequest, GuestDetailsResponse,
-    Metrics, OOMEvent, ReadStreamResponse, ResizeVolumeRequest, Routes, StatsContainerResponse,
-    VolumeStatsRequest, WaitProcessResponse, WriteStreamResponse,
+    AgentDetails, CopyFileRequest, GuestDetailsResponse, Metrics, OOMEvent, ReadStreamResponse,
+    ResizeVolumeRequest, Routes, StatsContainerResponse, VolumeStatsRequest, WaitProcessResponse,
+    WriteStreamResponse,
 };
 use protocols::csi::{
     volume_usage::Unit as VolumeUsage_Unit, VolumeCondition, VolumeStatsResponse, VolumeUsage,
@@ -64,25 +63,14 @@ use rustjail::process::ProcessOperations;
 #[cfg(all(test, not(target_arch = "powerpc64")))]
 use std::os::fd::AsRawFd;
 
-#[cfg(target_arch = "s390x")]
-use crate::ccw;
 use crate::confidential_data_hub::image::KATA_IMAGE_WORK_DIR;
-use crate::device::block_device_handler::get_virtio_blk_pci_device_name;
-#[cfg(target_arch = "s390x")]
-use crate::device::network_device_handler::wait_for_ccw_net_interface;
-#[cfg(not(target_arch = "s390x"))]
-use crate::device::network_device_handler::wait_for_pci_net_interface;
-use crate::device::{
-    add_devices, cdi_devices_from_visible_devices, dump_nvidia_cdi_yaml, handle_cdi_devices,
-    update_env_pci,
-};
+use crate::device::add_devices;
 use crate::features::get_build_features;
 use crate::metrics::get_metrics;
 use crate::mount::baremount;
 use crate::namespace::{NSTYPEIPC, NSTYPEPID, NSTYPEUTS};
 use crate::network::setup_guest_dns;
 use crate::passfd_io;
-use crate::pci;
 use crate::random;
 use crate::sandbox::{Sandbox, SandboxError};
 use crate::storage::{add_storages, STORAGE_HANDLERS};
@@ -104,7 +92,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use tracing::instrument;
 
-use libc::{self, c_char, c_ushort, pid_t, winsize, TIOCSWINSZ};
+use libc::{self, c_ushort, pid_t, winsize, TIOCSWINSZ};
 use std::fs;
 use std::os::unix::prelude::PermissionsExt;
 
@@ -225,11 +213,29 @@ impl<T> OptionToTtrpcResult<T> for Option<T> {
     }
 }
 
+fn validate_container_device_features(
+    req: &protocols::agent::CreateContainerRequest,
+) -> ttrpc::Result<()> {
+    for device in &req.devices {
+        if device.type_ != kata_types::device::DRIVER_BLK_MMIO_TYPE || !device.options.is_empty() {
+            return Err(ttrpc_error(
+                ttrpc::Code::INVALID_ARGUMENT,
+                "kata-fc: only MMIO block devices without driver options are supported",
+            ));
+        }
+    }
+    if let Some(spec) = req.OCI.as_ref() {
+        let spec: Spec = spec.clone().into();
+        kata_types::device::validate_spec_device_features(&spec)
+            .map_err(|e| ttrpc_error(ttrpc::Code::INVALID_ARGUMENT, e.to_string()))?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentService {
     sandbox: Arc<Mutex<Sandbox>>,
     init_mode: bool,
-    oma: Option<mem_agent::agent::MemAgent>,
 }
 
 impl AgentService {
@@ -238,6 +244,7 @@ impl AgentService {
         &self,
         req: protocols::agent::CreateContainerRequest,
     ) -> Result<()> {
+        validate_container_device_features(&req)?;
         // create the proc_io first, in case there's some error occur below, thus we can make sure
         // the io stream closed when error occur.
         let proc_io = if AGENT_CONFIG.passfd_listener_port != 0 {
@@ -273,32 +280,7 @@ impl AgentService {
         // updates the devices listed in the OCI spec, so that they actually
         // match real devices inside the VM. This step is necessary since we
         // cannot predict everything from the caller.
-        add_devices(&cid, &sl(), &req.devices, &mut oci, &self.sandbox).await?;
-
-        // In guest-kernel mode some devices need extra handling. Taking the
-        // GPU as an example the shim will inject CDI annotations that will
-        // be used by the kata-agent to do containerEdits according to the
-        // CDI spec coming from a registry that is created on the fly by UDEV
-        // or other entities for a specifc device.
-        // In Kata we only consider the directory "/var/run/cdi", "/etc" may be
-        // readonly
-        dump_nvidia_cdi_yaml(&sl())?;
-        // When enabled, translate the container's VISIBLE_CDI_DEVICES
-        // environment variable into CDI GPU device requests, so that a
-        // container can select which of the VM's GPUs it sees at runtime.
-        let visible_cdi_devices = if AGENT_CONFIG.visible_cdi_devices {
-            cdi_devices_from_visible_devices(&oci)?
-        } else {
-            Vec::new()
-        };
-        handle_cdi_devices(
-            &sl(),
-            &mut oci,
-            "/var/run/cdi",
-            AGENT_CONFIG.cdi_timeout,
-            &visible_cdi_devices,
-        )
-        .await?;
+        add_devices(&sl(), &req.devices, &mut oci, &self.sandbox).await?;
 
         // Handle trusted storage configuration before mounting any storage
         cdh_handler_trusted_storage(&mut oci)
@@ -437,12 +419,8 @@ impl AgentService {
     ) -> Result<()> {
         let cid = req.container_id;
 
-        // Drop the host guest mapping for this container so we can reuse the
-        // PCI slots for the next containers
-
         if req.timeout == 0 {
             let mut sandbox = self.sandbox.lock().await;
-            sandbox.bind_watcher.remove_container(&cid).await;
             sandbox
                 .get_container(&cid)
                 .ok_or_else(|| anyhow!("Invalid container id"))?
@@ -457,7 +435,6 @@ impl AgentService {
         let cid2 = cid.clone();
         let handle = tokio::spawn(async move {
             let mut sandbox = s.lock().await;
-            sandbox.bind_watcher.remove_container(&cid2).await;
             sandbox
                 .get_container(&cid2)
                 .ok_or_else(|| anyhow!("Invalid container id"))?
@@ -489,13 +466,12 @@ impl AgentService {
         };
 
         let mut sandbox = self.sandbox.lock().await;
-        let mut process = req
+        let process = req
             .process
             .into_option()
             .ok_or_else(|| anyhow!("Unable to parse process from ExecProcessRequest"))?;
 
         // Apply any necessary corrections for PCI addresses
-        update_env_pci(&cid, &mut process.Env, &sandbox.pcimap)?;
 
         let pipe_size = AGENT_CONFIG.container_pipe_size;
         let ocip = process.into();
@@ -895,39 +871,6 @@ impl AgentService {
     }
 }
 
-fn mem_agent_memcgconfig_to_memcg_optionconfig(
-    mc: &protocols::agent::MemAgentMemcgConfig,
-) -> mem_agent::memcg::OptionConfig {
-    mem_agent::memcg::OptionConfig {
-        default: mem_agent::memcg::SingleOptionConfig {
-            disabled: mc.disabled,
-            swap: mc.swap,
-            swappiness_max: mc.swappiness_max.map(|x| x as u8),
-            period_secs: mc.period_secs,
-            period_psi_percent_limit: mc.period_psi_percent_limit.map(|x| x as u8),
-            eviction_psi_percent_limit: mc.eviction_psi_percent_limit.map(|x| x as u8),
-            eviction_run_aging_count_min: mc.eviction_run_aging_count_min,
-        },
-        ..Default::default()
-    }
-}
-
-fn mem_agent_compactconfig_to_compact_optionconfig(
-    cc: &protocols::agent::MemAgentCompactConfig,
-) -> mem_agent::compact::OptionConfig {
-    mem_agent::compact::OptionConfig {
-        disabled: cc.disabled,
-        period_secs: cc.period_secs,
-        period_psi_percent_limit: cc.period_psi_percent_limit.map(|x| x as u8),
-        compact_psi_percent_limit: cc.compact_psi_percent_limit.map(|x| x as u8),
-        compact_sec_max: cc.compact_sec_max,
-        compact_order: cc.compact_order.map(|x| x as u8),
-        compact_threshold: cc.compact_threshold,
-        compact_force_times: cc.compact_force_times,
-        ..Default::default()
-    }
-}
-
 #[async_trait]
 impl agent_ttrpc::AgentService for AgentService {
     async fn create_container(
@@ -1189,73 +1132,13 @@ impl agent_ttrpc::AgentService for AgentService {
             "empty update interface request",
         )?;
 
-        // For network devices passed, check for the network interface
-        // to be available first.
         if !interface.devicePath.is_empty() {
-            #[cfg(not(target_arch = "s390x"))]
-            {
-                let (root_complex, pcipath) = pcipath_from_dev_tree_path(&interface.devicePath)
-                    .map_ttrpc_err(|e| {
-                        format!("Invalid PCI path for network interface: {:?}", e)
-                    })?;
-                wait_for_pci_net_interface(&self.sandbox, root_complex, &pcipath)
-                    .await
-                    .map_ttrpc_err(|e| format!("interface not available: {e:?}"))?;
-            }
-            #[cfg(target_arch = "s390x")]
-            {
-                let ccw_dev = ccw::Device::from_str(&interface.devicePath).map_ttrpc_err(|e| {
-                    format!("Unexpected CCW path for network interface: {e:?}")
-                })?;
-                wait_for_ccw_net_interface(&self.sandbox, &ccw_dev)
-                    .await
-                    .map_ttrpc_err(|e| format!("interface not available: {e:?}"))?;
-            }
+            return Err(ttrpc_error(
+                ttrpc::Code::INVALID_ARGUMENT,
+                "kata-fc: PCI/CCW network device paths are unsupported",
+            ));
         }
-
         let mut sandbox = self.sandbox.lock().await;
-
-        #[cfg(not(target_arch = "s390x"))]
-        if !interface.devicePath.is_empty() && !interface.hwAddr.is_empty() {
-            match sandbox
-                .rtnl
-                .netdev_name_from_pci_path(&interface.devicePath)
-            {
-                Ok(Some(netdev_name)) => {
-                    if let Err(err) = sandbox
-                        .rtnl
-                        .set_link_mac_by_name(&netdev_name, &interface.hwAddr)
-                        .await
-                    {
-                        warn!(
-                            sl(),
-                            "update_interface: VFIO MAC reconciliation failed, fallback to by-MAC lookup";
-                            "device-path" => interface.devicePath.as_str(),
-                            "target-mac" => interface.hwAddr.as_str(),
-                            "netdev" => netdev_name.as_str(),
-                            "error" => format!("{:?}", err),
-                        );
-                    }
-                }
-                Ok(None) => {
-                    info!(
-                        sl(),
-                        "update_interface: no netdev found for PCI path before by-MAC lookup";
-                        "device-path" => interface.devicePath.as_str(),
-                        "target-mac" => interface.hwAddr.as_str(),
-                    );
-                }
-                Err(err) => {
-                    warn!(
-                        sl(),
-                        "update_interface: unable to resolve netdev from PCI path, fallback to by-MAC lookup";
-                        "device-path" => interface.devicePath.as_str(),
-                        "target-mac" => interface.hwAddr.as_str(),
-                        "error" => format!("{:?}", err),
-                    );
-                }
-            }
-        }
 
         sandbox
             .rtnl
@@ -1721,12 +1604,10 @@ pub async fn start(
     s: Arc<Mutex<Sandbox>>,
     server_address: &str,
     init_mode: bool,
-    oma: Option<mem_agent::agent::MemAgent>,
 ) -> Result<TtrpcServer> {
     let agent_service = Box::new(AgentService {
         sandbox: s,
         init_mode,
-        oma,
     });
     let aservice = agent_ttrpc::create_agent_service(Arc::new(*agent_service));
 
@@ -1844,7 +1725,6 @@ async fn remove_container_resources(sandbox: &mut Sandbox, cid: &str) -> Result<
     sandbox.container_mounts.remove(cid);
     sandbox.containers.remove(cid);
     // Remove any host -> guest mappings for this container
-    sandbox.pcimap.remove(cid);
     Ok(())
 }
 
@@ -1896,13 +1776,6 @@ fn is_signal_handled(proc_status_file: &str, signum: u32) -> bool {
             }
             false
         })
-}
-
-fn do_mem_hotplug_by_probe(addrs: &[u64]) -> Result<()> {
-    for addr in addrs.iter() {
-        fs::write(SYSFS_MEMORY_HOTPLUG_PROBE_PATH, format!("{:#X}", *addr))?;
-    }
-    Ok(())
 }
 
 /// do_copy_file creates a file, directory or symlink beneath the provided directory.
@@ -2072,41 +1945,6 @@ fn do_copy_file(req: &CopyFileRequest, shared_dir: &PathBuf) -> Result<()> {
     .context("fchown")?;
 
     nix::fcntl::renameat(&root, &tmpfile, &root, path).context("renameat")?;
-
-    Ok(())
-}
-
-async fn do_add_swap(sandbox: &Arc<Mutex<Sandbox>>, req: &AddSwapRequest) -> Result<()> {
-    let mut slots = Vec::new();
-    for slot in &req.PCIPath {
-        slots.push(pci::SlotFn::new(*slot, 0)?);
-    }
-    let pcipath = pci::Path::new(slots)?;
-    // Default all virtio devices to root_complex 00 aka pcie.0
-    let root_complex = "00";
-    let dev_name = get_virtio_blk_pci_device_name(sandbox, root_complex, &pcipath).await?;
-
-    let c_str = CString::new(dev_name)?;
-    let ret = unsafe { libc::swapon(c_str.as_ptr() as *const c_char, 0) };
-    if ret != 0 {
-        return Err(anyhow!(
-            "libc::swapon get error {}",
-            io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
-}
-
-async fn do_add_swap_path(req: &AddSwapPathRequest) -> Result<()> {
-    let c_str = CString::new(req.path.clone())?;
-    let ret = unsafe { libc::swapon(c_str.as_ptr() as *const c_char, 0) };
-    if ret != 0 {
-        return Err(anyhow!(
-            "libc::swapon get error {}",
-            io::Error::last_os_error()
-        ));
-    }
 
     Ok(())
 }
@@ -2347,12 +2185,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn minimal_device_rejections_precede_side_effects() {
+        let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
+        let service = AgentService {
+            sandbox: Arc::new(Mutex::new(sandbox)),
+            init_mode: true,
+        };
+        let ctx = mk_ttrpc_context();
+        let mut requests = Vec::new();
+        for driver in [
+            "blk",
+            "blk-ccw",
+            "scsi",
+            "nvdimm",
+            "vfio-pci",
+            "vfio-pci-gk",
+            "vfio-ap",
+            "unknown",
+        ] {
+            // A valid first entry must not start waiting for a device before
+            // we discover the excluded second entry.
+            requests.push(protocols::agent::CreateContainerRequest {
+                container_id: "device-rejection-test".into(),
+                devices: vec![
+                    protocols::agent::Device {
+                        type_: "mmioblk".into(),
+                        vm_path: "/dev/missing-canary-disk".into(),
+                        container_path: "/dev/test".into(),
+                        ..Default::default()
+                    },
+                    protocols::agent::Device {
+                        type_: driver.into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+        }
+        requests.push(protocols::agent::CreateContainerRequest {
+            devices: vec![protocols::agent::Device {
+                type_: "mmioblk".into(),
+                options: vec!["unsupported=true".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let mut spec = protocols::oci::Spec::default();
+        spec.Annotations
+            .insert("cdi.k8s.io/gpu".into(), "nvidia.com/gpu=all".into());
+        requests.push(protocols::agent::CreateContainerRequest {
+            OCI: MessageField::some(spec),
+            ..Default::default()
+        });
+        let mut spec = protocols::oci::Spec::default();
+        spec.Process = MessageField::some(protocols::oci::Process {
+            Env: vec!["VISIBLE_CDI_DEVICES=nvidia.com/gpu=all".into()],
+            ..Default::default()
+        });
+        requests.push(protocols::agent::CreateContainerRequest {
+            OCI: MessageField::some(spec),
+            ..Default::default()
+        });
+        // Hold the state lock: an invalid request must finish without acquiring
+        // it, touching container state, or waiting for uevents.
+        let state = service.sandbox.lock().await;
+        for req in requests {
+            let err = timeout(Duration::from_secs(1), service.create_container(&ctx, req))
+                .await
+                .expect("validation must precede sandbox operations")
+                .unwrap_err();
+            match err {
+                ttrpc::Error::RpcStatus(status) => {
+                    assert_eq!(status.code(), ttrpc::Code::INVALID_ARGUMENT)
+                }
+                error => panic!("unexpected error: {:?}", error),
+            }
+        }
+        let req = protocols::agent::UpdateInterfaceRequest {
+            interface: MessageField::some(Interface {
+                devicePath: "00/01".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match timeout(Duration::from_secs(1), service.update_interface(&ctx, req))
+            .await
+            .unwrap()
+            .unwrap_err()
+        {
+            ttrpc::Error::RpcStatus(status) => {
+                assert_eq!(status.code(), ttrpc::Code::INVALID_ARGUMENT)
+            }
+            error => panic!("unexpected error: {:?}", error),
+        }
+        assert!(state.containers.is_empty());
+        assert!(state.uevent_map.is_empty());
+        validate_container_device_features(&protocols::agent::CreateContainerRequest {
+            devices: vec![protocols::agent::Device {
+                type_: "mmioblk".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn minimal_removed_rpcs_are_unimplemented() {
         let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
         let service = AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
             init_mode: true,
-            oma: None,
         };
         let ctx = mk_ttrpc_context();
         macro_rules! reject {
@@ -2389,7 +2332,6 @@ mod tests {
         let service = AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
             init_mode: true,
-            oma: None,
         };
         let ctx = mk_ttrpc_context();
         for req in [
@@ -2485,7 +2427,6 @@ mod tests {
         let agent_service = Box::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
             init_mode: true,
-            oma: None,
         });
 
         let req = protocols::agent::UpdateInterfaceRequest::default();
@@ -2503,7 +2444,6 @@ mod tests {
         let agent_service = Box::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
             init_mode: true,
-            oma: None,
         });
 
         let req = protocols::agent::UpdateRoutesRequest::default();
@@ -2521,7 +2461,6 @@ mod tests {
         let agent_service = Box::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
             init_mode: true,
-            oma: None,
         });
 
         let req = protocols::agent::AddARPNeighborsRequest::default();
@@ -2660,7 +2599,6 @@ mod tests {
             let agent_service = Box::new(AgentService {
                 sandbox: Arc::new(Mutex::new(sandbox)),
                 init_mode: true,
-                oma: None,
             });
 
             let result = agent_service
@@ -3176,7 +3114,6 @@ OtherField:other
         let agent_service = Arc::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
             init_mode: true,
-            oma: None,
         });
 
         let svc1 = agent_service.clone();
@@ -3695,7 +3632,6 @@ OtherField:other
         let agent_service = Arc::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
             init_mode: true,
-            oma: None,
         });
 
         // Fire stats_container; get_stats() will block on the blocking thread pool.

@@ -64,6 +64,12 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
         "{fail}: IOMMU/device passthrough"
     );
     ensure!(
+        matches!(h.device_info.cold_plug_vfio.as_str(), "" | "no-port")
+            && h.device_info.pcie_root_port == 0
+            && h.device_info.pcie_switch_port == 0,
+        "{fail}: VFIO cold-plug/PCIe ports"
+    );
+    ensure!(
         h.guest_extension_images.is_empty(),
         "{fail}: guest extension images"
     );
@@ -136,6 +142,27 @@ mod tests {
             |c| c.runtime.sandbox_bind_mounts.push("/host".into()),
             |c| c.runtime.use_passfd_io = true,
             |c| c.runtime.enable_pprof = true,
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .device_info
+                    .cold_plug_vfio = "root-port".into()
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .device_info
+                    .pcie_root_port = 1
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .device_info
+                    .pcie_switch_port = 1
+            },
             |c| {
                 c.hypervisor
                     .get_mut("firecracker")

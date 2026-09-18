@@ -55,7 +55,6 @@ mod namespace;
 mod netlink;
 mod network;
 mod passfd_io;
-mod pci;
 pub mod random;
 mod sandbox;
 mod signal;
@@ -63,7 +62,6 @@ mod storage;
 mod uevent;
 mod util;
 mod version;
-mod watcher;
 
 use config::GuestComponentsProcs;
 use mount::{cgroups_mount, general_mount};
@@ -441,23 +439,8 @@ async fn start_sandbox(
         }
     }
 
-    let mut oma = None;
-    let mut _ort = None;
-    if let Some(c) = &config.mem_agent {
-        let (ma, rt) =
-            mem_agent::agent::MemAgent::new(c.memcg_config.clone(), c.compact_config.clone())
-                .map_err(|e| {
-                    error!(logger, "MemAgent::new fail: {}", e);
-                    e
-                })
-                .context("start mem-agent")?;
-        oma = Some(ma);
-        _ort = Some(rt);
-    }
-
     // vsock:///dev/vsock, port
-    let mut server =
-        rpc::start(sandbox.clone(), config.server_addr.as_str(), init_mode, oma).await?;
+    let mut server = rpc::start(sandbox.clone(), config.server_addr.as_str(), init_mode).await?;
 
     server.start().await?;
 

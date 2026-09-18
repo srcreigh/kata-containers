@@ -40,3 +40,97 @@ pub const DRIVER_WATCHABLE_BIND_TYPE: &str = "watchable-bind";
 
 /// Manager to manage registered device handlers.
 pub type DeviceHandlerManager<H> = HandlerManager<H>;
+
+/// Reject device integrations excluded from the Firecracker contract. This is
+/// shared by the shim (before VM/resource creation) and the guest (before edits).
+pub fn validate_spec_device_features(spec: &oci_spec::runtime::Spec) -> anyhow::Result<()> {
+    if let Some(annotations) = spec.annotations() {
+        anyhow::ensure!(
+            !annotations.keys().any(|key| key.starts_with("cdi.k8s.io/")),
+            "kata-fc: CDI device annotations are unsupported"
+        );
+    }
+    if let Some(process) = spec.process() {
+        for entry in process.env().iter().flatten() {
+            if let Some(value) = entry.strip_prefix("VISIBLE_CDI_DEVICES=") {
+                anyhow::ensure!(
+                    matches!(value.trim(), "" | "none" | "void"),
+                    "kata-fc: VISIBLE_CDI_DEVICES requests are unsupported"
+                );
+            }
+        }
+    }
+    if let Some(linux) = spec.linux() {
+        validate_linux_device_features(linux)?;
+    }
+    Ok(())
+}
+
+/// Reject excluded passthrough nodes before attaching any requested device.
+pub fn validate_linux_device_features(linux: &oci_spec::runtime::Linux) -> anyhow::Result<()> {
+    for device in linux.devices().iter().flatten() {
+        validate_device_path(device.path())?;
+    }
+    Ok(())
+}
+
+/// Check both OCI paths and resolved host device paths for excluded integrations.
+pub fn validate_device_path(path: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !["/dev/vfio", "/dev/dri", "/dev/infiniband", "/dev/iommu"]
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+            && !path.to_string_lossy().starts_with("/dev/nvidia"),
+        "kata-fc: GPU/VFIO/RDMA device passthrough is unsupported: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod minimal_device_tests {
+    use super::*;
+    use oci_spec::runtime::{Linux, LinuxDevice, Process, Spec};
+
+    #[test]
+    fn minimal_device_contract() {
+        let mut spec = Spec::default();
+        validate_spec_device_features(&spec).unwrap();
+        spec.set_annotations(Some(
+            [("cdi.k8s.io/gpu".into(), "nvidia.com/gpu=all".into())].into(),
+        ));
+        assert!(validate_spec_device_features(&spec).is_err());
+        spec.set_annotations(Some(
+            [("io.kubernetes.cri.container-name".into(), "worker".into())].into(),
+        ));
+        let mut process = Process::default();
+        for value in ["nvidia.com/gpu=all", "intel.com/gpu=0", "malformed"] {
+            process.set_env(Some(vec![format!("VISIBLE_CDI_DEVICES={value}")]));
+            spec.set_process(Some(process.clone()));
+            assert!(validate_spec_device_features(&spec).is_err());
+        }
+        for value in ["", "none", "void"] {
+            process.set_env(Some(vec![format!("VISIBLE_CDI_DEVICES={value}")]));
+            spec.set_process(Some(process.clone()));
+            validate_spec_device_features(&spec).unwrap();
+        }
+        for path in [
+            "/dev/vfio/1",
+            "/dev/vfio/devices/vfio0",
+            "/dev/nvidia0",
+            "/dev/dri/renderD128",
+            "/dev/infiniband/uverbs0",
+            "/dev/iommu",
+        ] {
+            let mut linux = Linux::default();
+            let mut device = LinuxDevice::default();
+            device.set_path(path.into());
+            linux.set_devices(Some(vec![device]));
+            spec.set_linux(Some(linux));
+            assert!(validate_spec_device_features(&spec).is_err(), "{path}");
+        }
+        for path in ["/dev/null", "/dev/random", "/dev/fuse", "/dev/vdb"] {
+            validate_device_path(std::path::Path::new(path)).unwrap();
+        }
+    }
+}

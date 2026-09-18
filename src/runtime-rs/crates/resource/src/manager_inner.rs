@@ -11,31 +11,25 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use hypervisor::{
     device::{
-        device_manager::{
-            do_handle_device, find_cold_plugged_vfio_ap, get_block_device_info, DeviceManager,
-        },
+        device_manager::{do_handle_device, get_block_device_info, DeviceManager},
         util::{get_host_path, DEVICE_TYPE_BLOCK, DEVICE_TYPE_CHAR},
         DeviceConfig, DeviceType,
     },
-    utils::uses_native_ccw_bus,
-    vfio_device::is_vfio_ap_device,
-    BlockConfigModern, BlockDeviceAio, Hypervisor, VfioConfig,
+    BlockConfigModern, BlockDeviceAio, Hypervisor,
 };
 use kata_types::mount::{kata_guest_sandbox_dir, Mount, KATA_EPHEMERAL_VOLUME_TYPE, SHM_DIR};
 use kata_types::{
     config::{hypervisor::TopologyConfigInfo, TomlConfig},
-    device::DRIVER_VFIO_AP_COLD_TYPE,
     mount::{adjust_rootfs_mounts, KATA_IMAGE_FORCE_GUEST_PULL},
 };
 use libc::NUD_PERMANENT;
 use oci::{Linux, LinuxResources};
 use oci_spec::runtime::{self as oci, LinuxDeviceType};
 use persist::sandbox_persist::Persist;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::{runtime, sync::RwLock};
 
 use crate::{
-    cdi_devices::{sort_options_by_pcipath, ContainerDevice, DeviceInfo},
     cgroups::{CgroupArgs, CgroupsResource},
     cpu_mem::{
         cpu::CpuResource, initial_size::InitialSizeManager, mem::MemResource, swap::SwapResource,
@@ -510,433 +504,65 @@ impl ResourceManagerInner {
         self.volume_resource.handler_volumes(&ctx, cid, spec).await
     }
 
-    pub async fn handler_devices(&self, _cid: &str, linux: &Linux) -> Result<Vec<ContainerDevice>> {
-        let mut devices = vec![];
-
-        // Build a map of host_bdf -> Option<guest_pci_path> for cold-plugged
-        // physical (VFIO) network endpoints.  When a VFIO char device in the
-        // OCI spec belongs to one of these endpoints we bypass the
-        // do_handle_device hot-plug path (the device is already in QEMU) and
-        // build the ContainerDevice directly, mirroring Go's appendVfioDevice.
-        // This also triggers the agent's container_has_vfio_device() gate,
-        // which drives the guest-kernel VFIO network device setup (Ethernet,
-        // RoCE and InfiniBand) — including, for IB/RoCE VFs,
-        // expose_guest_infiniband_devices() injecting /dev/infiniband/* into
-        // the container.
-        //
-        // IMPORTANT: every physical-endpoint BDF is recorded here regardless of
-        // whether its guest PCI path has been resolved yet (the QMP resolution
-        // in setup_after_start_vm can fail or be racy).  The decision to skip
-        // do_handle_device must depend only on the device being a cold-plugged
-        // endpoint — never on the guest PCI path being known — otherwise an
-        // unresolved path would send the already-cold-plugged VF down the
-        // hot-plug path and fail with ENOENT.
-        let mut cold_plug_bdfs: std::collections::HashMap<String, Option<String>> =
-            std::collections::HashMap::new();
-        if let Some(network) = &self.network {
-            for endpoint in network.endpoints().await {
-                if let Some(bdf) = endpoint.host_bdf().await {
-                    let path = endpoint.guest_pci_path().await;
-                    cold_plug_bdfs.insert(bdf, path);
-                }
-            }
-        }
-
-        let linux_devices = linux.devices().clone().unwrap_or_default();
-        for d in linux_devices.iter() {
-            match d.typ() {
-                LinuxDeviceType::B => {
-                    let blkdev_info = get_block_device_info(&self.device_manager).await;
-                    // Read-only intent comes from the cgroup device access rule.
-                    // Also honor the host device's own read-only flag (BLKROGET):
-                    // block-mode volumes frequently carry no read-only signal in
-                    // the OCI spec, so the device flag is the only reliable
-                    // source. Either signal being positive marks it read-only.
-                    let is_readonly = device_cgroup_access_is_readonly(
-                        linux,
-                        LinuxDeviceType::B,
-                        d.major(),
-                        d.minor(),
-                    ) || block_device_node_is_readonly(d.major(), d.minor());
-                    let dev_info = DeviceConfig::BlockCfgModern(BlockConfigModern {
-                        major: d.major(),
-                        minor: d.minor(),
-                        is_readonly,
-                        driver_option: blkdev_info.block_device_driver,
-                        blkdev_aio: BlockDeviceAio::new(&blkdev_info.block_device_aio),
-                        num_queues: blkdev_info.num_queues,
-                        queue_size: blkdev_info.queue_size,
-                        logical_sector_size: blkdev_info.block_device_logical_sector_size,
-                        physical_sector_size: blkdev_info.block_device_physical_sector_size,
-                        ..Default::default()
-                    });
-
-                    let device_info = do_handle_device(&self.device_manager, &dev_info)
-                        .await
-                        .context("do handle device")?;
-
-                    // create block device for kata agent.
-                    // The device ID is derived from the available address: PCI, SCSI,
-                    // CCW, or virtual path, depending on the driver and configuration.
-                    if let DeviceType::BlockModern(device_mod) = device_info {
-                        let device = device_mod.lock().await.clone();
-                        let id = if let Some(pci_path) = device.config.pci_path {
-                            pci_path.to_string()
-                        } else if let Some(scsi_address) = device.config.scsi_addr {
-                            scsi_address
-                        } else if let Some(ccw_addr) = device.config.ccw_addr {
-                            ccw_addr
-                        } else {
-                            device.config.virt_path.clone()
-                        };
-
-                        let agent_device = Device {
-                            id,
-                            container_path: d.path().display().to_string().clone(),
-                            field_type: device.config.driver_option,
-                            vm_path: device.config.virt_path,
-                            ..Default::default()
-                        };
-                        devices.push(ContainerDevice {
-                            device_info: None,
-                            device: agent_device,
-                        });
-                    }
-                }
-                LinuxDeviceType::C => {
-                    let host_path = get_host_path(DEVICE_TYPE_CHAR, d.major(), d.minor())
-                        .context("get host path failed")?;
-                    // First of all, filter vfio devices.
-                    if !host_path.starts_with("/dev/vfio") {
-                        continue;
-                    }
-
-                    // `/dev/vfio/vfio` is the legacy VFIO container control
-                    // node, not a passthrough device — it has no IOMMU group
-                    // and no BDF.  The SR-IOV device plugin lists it alongside
-                    // the VF group node; running do_handle_device on it fails
-                    // with ENOENT.  Skip it unconditionally.
-                    if host_path == "/dev/vfio/vfio" {
-                        continue;
-                    }
-
-                    let vfio_mode = match self.toml_config.runtime.vfio_mode.as_str() {
-                        "vfio" => "vfio-pci",
-                        _ => "vfio-pci-gk",
-                    };
-
-                    // If this VFIO char device belongs to a cold-plugged
-                    // physical endpoint, it is already present in QEMU.  We
-                    // MUST NOT call do_handle_device on it — that would try to
-                    // hot-plug an already-present device and fail with ENOENT.
-                    //
-                    // Match on the host BDF(s) the device exposes (resolved via
-                    // its IOMMU group / iommufd cdev) against the physical
-                    // endpoint set.  vfio_path_to_bdfs returns *every* BDF in
-                    // the group so a legacy multi-device group is matched
-                    // deterministically.  The skip depends only on BDF
-                    // membership, never on the guest PCI path being resolved.
-                    let matched_bdf = vfio_path_to_bdfs(&host_path)
-                        .into_iter()
-                        .find(|bdf| cold_plug_bdfs.contains_key(bdf));
-                    if let Some(host_bdf) = matched_bdf {
-                        // unwrap: contains_key above guarantees presence
-                        let maybe_guest_path = cold_plug_bdfs.get(&host_bdf).unwrap();
-                        if let Some(guest_pci_path) = maybe_guest_path {
-                            let container_path = d.path().display().to_string();
-                            let group_num = d
-                                .path()
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or_default()
-                                .to_string();
-                            let agent_device = Device {
-                                id: group_num,
-                                container_path,
-                                field_type: vfio_mode.to_string(),
-                                options: vec![format!("{}={}", host_bdf, guest_pci_path)],
-                                ..Default::default()
-                            };
-                            devices.push(ContainerDevice {
-                                device_info: None,
-                                device: agent_device,
-                            });
-                        } else {
-                            warn!(
-                                sl!(),
-                                "handler_devices: cold-plug VFIO device has no \
-                                 resolved guest PCI path, skipping agent device entry";
-                                "host_bdf" => &host_bdf,
-                            );
-                        }
-                        // Always skip do_handle_device for cold-plugged devices.
-                        continue;
-                    }
-
-                    // VFIO-AP devices have no PCIe BDF, so cold_plug_bdfs above
-                    // cannot catch them.  If this device was registered in the
-                    // device manager during cold-plug (prepare_coldplug_raw_vfio_devices
-                    // or CDI), retrieve its APQN list and build the agent device
-                    // directly — calling do_handle_device on an already-present
-                    // device would attempt a QMP device_add and fail.
-                    if is_vfio_ap_device(Path::new(&host_path)) {
-                        if let Some(ap_devs) =
-                            find_cold_plugged_vfio_ap(&self.device_manager, &host_path).await
-                        {
-                            let container_path = d.path().display().to_string();
-                            let group_num = d
-                                .path()
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or_default()
-                                .to_string();
-                            let agent_device = Device {
-                                id: group_num,
-                                container_path,
-                                field_type: DRIVER_VFIO_AP_COLD_TYPE.to_string(),
-                                options: ap_devs,
-                                ..Default::default()
-                            };
-                            info!(
-                                sl!(),
-                                "vfio-ap cold-plugged agent device: {:?}", agent_device
-                            );
-                            devices.push(ContainerDevice {
-                                device_info: None,
-                                device: agent_device,
-                            });
-                            continue;
-                        }
-                        // Not registered as cold-plugged — fall through to do_handle_device.
-                    }
-
-                    let bus_type = if uses_native_ccw_bus() {
-                        "ccw".to_string()
-                    } else {
-                        "pci".to_string()
-                    };
-                    let dev_info = DeviceConfig::VfioCfg(VfioConfig {
-                        host_path,
-                        dev_type: "c".to_string(),
-                        bus_type: bus_type.clone(),
-                        hostdev_prefix: "vfio_device".to_owned(),
-                        ..Default::default()
-                    });
-
-                    let device_info = do_handle_device(&self.device_manager.clone(), &dev_info)
-                        .await
-                        .context("do handle device")?;
-
-                    if let DeviceType::VfioModern(vfio_dev) = device_info.clone() {
-                        info!(sl!(), "device info: {:?}", vfio_dev.lock().await);
-                        let vfio_device = vfio_dev.lock().await;
-
-                        let group_num = d
-                            .path()
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or_default()
-                            .to_string();
-
-                        let guest_pci_path = vfio_device
-                            .config
-                            .guest_pci_path
-                            .clone()
-                            .context("VFIO device has no guest PCI path assigned")?;
-                        let host_bdf = vfio_device.device.primary.addr.to_string();
-                        info!(
-                            sl!(),
-                            "vfio device guest pci path: {:?}, host bdf: {:?}",
-                            guest_pci_path,
-                            &host_bdf
-                        );
-
-                        // vfio mode: vfio-pci and vfio-pci-gk for x86_64
-                        // - vfio-pci, devices appear as VFIO character devices under /dev/vfio in container.
-                        // - vfio-pci-gk, devices are managed by whatever driver in Guest kernel.
-                        let vfio_mode = match self.toml_config.runtime.vfio_mode.as_str() {
-                            "vfio" => "vfio-pci".to_string(),
-                            _ => "vfio-pci-gk".to_string(),
-                        };
-                        let device_options = vec![format!("{}={}", host_bdf, guest_pci_path)];
-                        // The Go runtime sets the device Id to
-                        // filepath.Base(dev.ContainerPath), e.g. "vfio0".
-                        // The agent policy validates this with:
-                        //   i_vfio_device.id == concat("", ["vfio", suffix])
-                        let agent_device = Device {
-                            id: group_num,
-                            container_path: d.path().display().to_string().clone(),
-                            field_type: vfio_mode,
-                            options: device_options,
-                            ..Default::default()
-                        };
-
-                        let device_info = Some(DeviceInfo {
-                            vendor_id: vfio_device
-                                .device
-                                .primary
-                                .vendor_id
-                                .clone()
-                                .unwrap_or_default(),
-                            class_id: format!(
-                                "{:#08x}",
-                                vfio_device.device.primary.class_code.unwrap_or_default()
-                            ),
-                            host_path: d.path().clone(),
-                        });
-                        info!(
-                            sl!(),
-                            "vfio device info for agent: {:?}",
-                            device_info.clone()
-                        );
-                        info!(
-                            sl!(),
-                            "agent device info for agent: {:?}",
-                            agent_device.clone()
-                        );
-                        devices.push(ContainerDevice {
-                            device_info,
-                            device: agent_device,
-                        });
-                    } else {
-                        // vfio mode: vfio-pci and vfio-pci-gk for x86_64
-                        // - vfio-pci, devices appear as VFIO character devices under /dev/vfio in container.
-                        // - vfio-pci-gk, devices are managed by whatever driver in Guest kernel.
-                        // - vfio-ap, devices appear as VFIO character devices under /dev/vfio in container for ccw devices.
-                        let vfio_mode = match self.toml_config.runtime.vfio_mode.as_str() {
-                            "vfio" => {
-                                if bus_type == "ccw" {
-                                    "vfio-ap".to_string()
-                                } else {
-                                    "vfio-pci".to_string()
-                                }
-                            }
-                            _ => "vfio-pci-gk".to_string(),
-                        };
-
-                        // create agent device
-                        if let DeviceType::Vfio(device) = device_info {
-                            let device_options = sort_options_by_pcipath(device.device_options);
-                            let group_num = d
-                                .path()
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or_default()
-                                .to_string();
-                            let agent_device = Device {
-                                id: group_num,
-                                container_path: d.path().display().to_string().clone(),
-                                field_type: vfio_mode,
-                                options: device_options,
-                                ..Default::default()
-                            };
-
-                            let device_info = if let Some(device_vendor_class) =
-                                &device.devices.first().unwrap().device_vendor_class
-                            {
-                                let vendor_class = device_vendor_class
-                                    .get_vendor_class_id()
-                                    .context("get vendor class failed")?;
-                                Some(DeviceInfo {
-                                    vendor_id: vendor_class.0.to_owned(),
-                                    class_id: vendor_class.1.to_owned(),
-                                    host_path: d.path().clone(),
-                                })
-                            } else {
-                                None
-                            };
-                            devices.push(ContainerDevice {
-                                device_info,
-                                device: agent_device,
-                            });
-                        }
-                    }
-                }
-                _ => {
-                    // TODO enable other devices type
-                    continue;
-                }
-            }
-        }
-
-        // The SR-IOV device plugin for physical network VFs injects the BDF
-        // as a PCIDEVICE_* env var only — it does not add the VFIO char device
-        // to linux.devices.  That means the LinuxDeviceType::C loop above
-        // never fires for these endpoints, the cold_plug_bdfs map was built
-        // but never consumed, and the agent's container_has_vfio_device() gate
-        // stays closed (so no guest-kernel VFIO network device setup runs).
-        //
-        // For every cold-plug endpoint still unmatched (guest PCI path in the
-        // map but no corresponding device pushed above), derive the VFIO group
-        // char path from sysfs and synthesise a vfio-pci-gk ContainerDevice,
-        // mirroring what the Go runtime does in appendPhysicalEndpointDevices.
-        let seen_bdfs: std::collections::HashSet<String> = devices
+    pub async fn handler_devices(&self, _cid: &str, linux: &Linux) -> Result<Vec<Device>> {
+        // Check the entire request before attaching the first block device.
+        kata_types::device::validate_linux_device_features(linux)?;
+        for d in linux
+            .devices()
             .iter()
-            .filter_map(|cd| {
-                cd.device.options.first().and_then(|opt| {
-                    let bdf_part = opt.split('=').next()?;
-                    // strip leading "0000:" to get "BB:DD.F"
-                    let stripped = bdf_part.trim_start_matches("0000:");
-                    Some(format!("0000:{}", stripped))
-                })
-            })
-            .collect();
+            .flatten()
+            .filter(|d| d.typ() == LinuxDeviceType::C)
+        {
+            let host_path = get_host_path(DEVICE_TYPE_CHAR, d.major(), d.minor())
+                .context("resolve character device")?;
+            kata_types::device::validate_device_path(std::path::Path::new(&host_path))?;
+        }
+        let mut devices = Vec::new();
+        for d in linux
+            .devices()
+            .iter()
+            .flatten()
+            .filter(|d| d.typ() == LinuxDeviceType::B)
+        {
+            let blkdev_info = get_block_device_info(&self.device_manager).await;
+            // Read-only intent comes from the cgroup device access rule.
+            // Also honor the host device's own read-only flag (BLKROGET):
+            // block-mode volumes frequently carry no read-only signal in
+            // the OCI spec, so the device flag is the only reliable
+            // source. Either signal being positive marks it read-only.
+            let is_readonly =
+                device_cgroup_access_is_readonly(linux, LinuxDeviceType::B, d.major(), d.minor())
+                    || block_device_node_is_readonly(d.major(), d.minor());
+            let dev_info = DeviceConfig::BlockCfgModern(BlockConfigModern {
+                major: d.major(),
+                minor: d.minor(),
+                is_readonly,
+                driver_option: blkdev_info.block_device_driver,
+                blkdev_aio: BlockDeviceAio::new(&blkdev_info.block_device_aio),
+                num_queues: blkdev_info.num_queues,
+                queue_size: blkdev_info.queue_size,
+                logical_sector_size: blkdev_info.block_device_logical_sector_size,
+                physical_sector_size: blkdev_info.block_device_physical_sector_size,
+                ..Default::default()
+            });
 
-        let vfio_mode = match self.toml_config.runtime.vfio_mode.as_str() {
-            "vfio" => "vfio-pci",
-            _ => "vfio-pci-gk",
-        };
+            let device_info = do_handle_device(&self.device_manager, &dev_info)
+                .await
+                .context("do handle device")?;
 
-        for (host_bdf, maybe_guest_path) in &cold_plug_bdfs {
-            if seen_bdfs.contains(host_bdf) {
-                continue;
-            }
-            let guest_pci_path = match maybe_guest_path {
-                Some(p) => p,
-                None => {
-                    warn!(
-                        sl!(),
-                        "handler_devices: cold-plug physical endpoint has no resolved \
-                         guest PCI path, skipping VFIO device exposure";
-                        "host_bdf" => host_bdf,
-                    );
-                    continue;
-                }
-            };
-            if let Some(vfio_group_path) = bdf_to_vfio_group_path(host_bdf) {
-                let group_num = std::path::Path::new(&vfio_group_path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                info!(
-                    sl!(),
-                    "handler_devices: injecting vfio-pci-gk entry for cold-plug \
-                     physical endpoint";
-                    "host_bdf" => host_bdf,
-                    "guest_pci_path" => guest_pci_path,
-                    "vfio_group" => &vfio_group_path,
-                );
+            // Firecracker block devices use the guest MMIO device path.
+            if let DeviceType::BlockModern(device_mod) = device_info {
+                let device = device_mod.lock().await.clone();
                 let agent_device = Device {
-                    id: group_num,
-                    container_path: vfio_group_path,
-                    field_type: vfio_mode.to_string(),
-                    options: vec![format!("{}={}", host_bdf, guest_pci_path)],
+                    id: device.config.virt_path.clone(),
+                    container_path: d.path().display().to_string().clone(),
+                    field_type: device.config.driver_option,
+                    vm_path: device.config.virt_path,
                     ..Default::default()
                 };
-                devices.push(ContainerDevice {
-                    device_info: None,
-                    device: agent_device,
-                });
-            } else {
-                warn!(
-                    sl!(),
-                    "handler_devices: cannot resolve VFIO group for {}, skipping VFIO device exposure",
-                    host_bdf
-                );
+                devices.push(agent_device);
             }
         }
-
         Ok(devices)
     }
 
@@ -1144,72 +770,6 @@ impl Persist for ResourceManagerInner {
 /// only QMP can reveal the actual assignment).
 /// Map a PCI BDF (e.g. `"0000:06:02.2"`) to the VFIO group char device path
 /// (e.g. `"/dev/vfio/343"`).  Returns `None` if sysfs cannot be read.
-fn bdf_to_vfio_group_path(bdf: &str) -> Option<String> {
-    // /sys/bus/pci/devices/<bdf>/iommu_group is a symlink like
-    // ../../kernel/iommu_groups/343  — the basename is the group number.
-    let iommu_link = format!("/sys/bus/pci/devices/{}/iommu_group", bdf);
-    let target = std::fs::read_link(&iommu_link).ok()?;
-    let group = target.file_name()?.to_str()?.to_string();
-    // Verify the char device exists before returning.
-    let vfio_path = format!("/dev/vfio/{}", group);
-    if std::path::Path::new(&vfio_path).exists() {
-        Some(vfio_path)
-    } else {
-        None
-    }
-}
-
-/// Resolve a VFIO char device path to *all* host PCI BDFs it exposes.
-///
-/// Handles two formats:
-/// - Legacy group interface: `/dev/vfio/343`
-///   Reads `/sys/kernel/iommu_groups/343/devices/` and returns every BDF in
-///   the group (a group may contain more than one device).
-/// - iommufd cdev interface: `/dev/vfio/devices/vfio1`
-///   Reads `/sys/class/vfio_device/vfio1/device` symlink to find the BDF.
-///
-/// Returns an empty vector if the path cannot be resolved.  Returning all
-/// BDFs (rather than just the first) makes cold-plug endpoint matching
-/// deterministic regardless of `read_dir` ordering.
-fn vfio_path_to_bdfs(vfio_path: &str) -> Vec<String> {
-    let file_name = match std::path::Path::new(vfio_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-    {
-        Some(n) => n.to_string(),
-        None => return vec![],
-    };
-
-    // iommufd cdev path: /dev/vfio/devices/vfioN — file name starts with "vfio"
-    // and cannot be parsed as a plain integer.
-    if file_name.parse::<u32>().is_err() {
-        // /sys/class/vfio_device/<name>/device -> ../../../../bus/pci/devices/<bdf>
-        let dev_link = format!("/sys/class/vfio_device/{}/device", file_name);
-        match std::fs::read_link(&dev_link)
-            .ok()
-            .and_then(|t| t.file_name().and_then(|n| n.to_str()).map(String::from))
-        {
-            Some(bdf) => return vec![bdf],
-            None => return vec![],
-        }
-    }
-
-    // Legacy group path: /dev/vfio/N — return every device BDF in the group.
-    let group = match file_name.parse::<u32>() {
-        Ok(g) => g,
-        Err(_) => return vec![],
-    };
-    let sysfs = format!("/sys/kernel/iommu_groups/{}/devices", group);
-    let entries = match std::fs::read_dir(&sysfs) {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
-    entries
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect()
-}
-
 async fn resolve_physical_endpoint_pci_paths(
     network: &dyn crate::network::Network,
     hypervisor: &dyn hypervisor::Hypervisor,
