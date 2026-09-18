@@ -18,45 +18,6 @@ use super::default::{
 /// agent name of Kata agent.
 pub const AGENT_NAME_KATA: &str = "kata";
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct MemAgent {
-    #[serde(default, alias = "mem_agent_enable")]
-    pub enable: bool,
-
-    #[serde(default)]
-    pub memcg_disable: Option<bool>,
-    #[serde(default)]
-    pub memcg_swap: Option<bool>,
-    #[serde(default)]
-    pub memcg_swappiness_max: Option<u8>,
-    #[serde(default)]
-    pub memcg_period_secs: Option<u64>,
-    #[serde(default)]
-    pub memcg_period_psi_percent_limit: Option<u8>,
-    #[serde(default)]
-    pub memcg_eviction_psi_percent_limit: Option<u8>,
-    #[serde(default)]
-    pub memcg_eviction_run_aging_count_min: Option<u64>,
-
-    #[serde(default)]
-    pub compact_disable: Option<bool>,
-    #[serde(default)]
-    pub compact_period_secs: Option<u64>,
-    #[serde(default)]
-    pub compact_period_psi_percent_limit: Option<u8>,
-    #[serde(default)]
-    pub compact_psi_percent_limit: Option<u8>,
-    #[serde(default)]
-    pub compact_sec_max: Option<i64>,
-    #[serde(default)]
-    pub compact_order: Option<u8>,
-    #[serde(default)]
-    pub compact_threshold: Option<u64>,
-    #[serde(default)]
-    pub compact_force_times: Option<u64>,
-}
-
 /// Kata agent configuration information.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -119,10 +80,6 @@ pub struct Agent {
     #[serde(default = "default_reconnect_timeout")]
     pub reconnect_timeout_ms: u32,
 
-    /// Confidential Data Hub API timeout value in milliseconds
-    #[serde(default = "default_cdh_api_timeout_ms")]
-    pub cdh_api_timeout_ms: u32,
-
     /// Agent request timeout value in millisecond
     /// This timeout value is used to set the maximum duration for the agent to process a CreateContainerRequest.
     /// It's also used to ensure that workloads, especially those involving large image pulls within the guest,
@@ -156,15 +113,6 @@ pub struct Agent {
     #[serde(default)]
     pub container_pipe_size: u32,
 
-    /// Timeout in seconds for guest components (attestation-agent, confidential-data-hub)
-    /// to create their Unix sockets after being spawned by the agent.
-    #[serde(default)]
-    pub launch_process_timeout: u32,
-
-    /// Memory agent configuration
-    #[serde(default)]
-    pub mem_agent: MemAgent,
-
     /// Agent policy
     #[serde(default)]
     pub policy: String,
@@ -192,13 +140,10 @@ impl std::default::Default for Agent {
             passfd_listener_port: DEFAULT_PASSFD_LISTENER_PORT,
             dial_timeout_ms: DEFAULT_AGENT_DIAL_TIMEOUT_MS,
             reconnect_timeout_ms: default_reconnect_timeout(),
-            cdh_api_timeout_ms: default_cdh_api_timeout_ms(),
             request_timeout_ms: default_request_timeout(),
             health_check_request_timeout_ms: default_health_check_timeout(),
             kernel_modules: Default::default(),
             container_pipe_size: 0,
-            launch_process_timeout: 0,
-            mem_agent: MemAgent::default(),
             policy: Default::default(),
         }
     }
@@ -228,11 +173,6 @@ fn default_dial_timeout() -> u32 {
 fn default_reconnect_timeout() -> u32 {
     // ms
     3_000
-}
-
-fn default_cdh_api_timeout_ms() -> u32 {
-    // ms
-    50_000
 }
 
 fn default_request_timeout() -> u32 {

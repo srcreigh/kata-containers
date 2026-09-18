@@ -303,10 +303,6 @@ debug_console_enabled = false
 # (default: 45000)
 dial_timeout_ms = 45000
 
-# Confidential Data Hub API timeout value in milliseconds
-# (default: 50000)
-cdh_api_timeout_ms = 50000
-
 # Create Container Request Timeout
 # This timeout value is used to set the maximum duration for the agent to process a CreateContainerRequest.
 # It's also used to ensure that workloads, especially those involving large image pulls within the guest,

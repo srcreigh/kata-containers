@@ -22,7 +22,6 @@ mod drop_in;
 pub mod hypervisor;
 
 pub use self::agent::Agent;
-use self::default::DEFAULT_AGENT_DBG_CONSOLE_PORT;
 pub use self::hypervisor::{
     BootInfo, CloudHypervisorConfig, DragonballConfig, Factory, FirecrackerConfig, Hypervisor,
     OpenVmmConfig, QemuConfig, RemoteConfig, HYPERVISOR_NAME_DRAGONBALL,
@@ -122,14 +121,6 @@ pub struct TomlConfig {
     pub runtime: Runtime,
 }
 
-macro_rules! mem_agent_kv_insert {
-    ($ma_cfg:expr, $key:expr, $map:expr) => {
-        if let Some(n) = $ma_cfg {
-            $map.insert($key.to_string(), n.to_string());
-        }
-    };
-}
-
 impl TomlConfig {
     /// Load Kata configuration information from configuration files.
     ///
@@ -216,116 +207,18 @@ impl TomlConfig {
     pub fn get_agent_kernel_params(&self) -> Result<BTreeMap<String, String>> {
         let mut kv = BTreeMap::new();
         if let Some(cfg) = self.agent.get(&self.runtime.agent_name) {
+            if cfg.enable_tracing || cfg.debug_console_enabled || cfg.visible_cdi_devices {
+                return Err(io::Error::other(
+                    "kata-fc: guest tracing/debug console/CDI is unsupported",
+                ));
+            }
             if cfg.debug {
                 kv.insert(LOG_LEVEL_OPTION.to_string(), LOG_LEVEL_DEBUG.to_string());
             }
-            if cfg.enable_tracing {
-                kv.insert(TRACE_MODE_OPTION.to_string(), TRACE_MODE_ENABLE.to_string());
-            }
             if cfg.container_pipe_size > 0 {
-                let container_pipe_size = cfg.container_pipe_size.to_string();
-                kv.insert(CONTAINER_PIPE_SIZE_OPTION.to_string(), container_pipe_size);
-            }
-            if cfg.launch_process_timeout > 0 {
-                let launch_process_timeout = cfg.launch_process_timeout.to_string();
                 kv.insert(
-                    LAUNCH_PROCESS_TIMEOUT_OPTION.to_string(),
-                    launch_process_timeout,
-                );
-            }
-            if cfg.cdh_api_timeout_ms > 0 {
-                // Convert milliseconds to seconds for agent kernel parameter
-                let cdh_api_timeout_secs = cfg.cdh_api_timeout_ms / 1000;
-                kv.insert(
-                    "agent.cdh_api_timeout".to_string(),
-                    cdh_api_timeout_secs.to_string(),
-                );
-            }
-            if cfg.debug_console_enabled {
-                kv.insert(DEBUG_CONSOLE_FLAG.to_string(), "".to_string());
-                kv.insert(
-                    DEBUG_CONSOLE_VPORT_OPTION.to_string(),
-                    DEFAULT_AGENT_DBG_CONSOLE_PORT.to_string(),
-                );
-            }
-            if cfg.visible_cdi_devices {
-                kv.insert(VISIBLE_CDI_DEVICES_OPTION.to_string(), "true".to_string());
-            }
-            if cfg.mem_agent.enable {
-                kv.insert("psi".to_string(), "1".to_string());
-                kv.insert("agent.mem_agent_enable".to_string(), "1".to_string());
-
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.memcg_disable,
-                    "agent.mem_agent_memcg_disable",
-                    kv
-                );
-                mem_agent_kv_insert!(cfg.mem_agent.memcg_swap, "agent.mem_agent_memcg_swap", kv);
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.memcg_swappiness_max,
-                    "agent.mem_agent_memcg_swappiness_max",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.memcg_period_secs,
-                    "agent.mem_agent_memcg_period_secs",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.memcg_period_psi_percent_limit,
-                    "agent.mem_agent_memcg_period_psi_percent_limit",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.memcg_eviction_psi_percent_limit,
-                    "agent.mem_agent_memcg_eviction_psi_percent_limit",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.memcg_eviction_run_aging_count_min,
-                    "agent.mem_agent_memcg_eviction_run_aging_count_min",
-                    kv
-                );
-
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.compact_disable,
-                    "agent.mem_agent_compact_disable",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.compact_period_secs,
-                    "agent.mem_agent_compact_period_secs",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.compact_period_psi_percent_limit,
-                    "agent.mem_agent_compact_period_psi_percent_limit",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.compact_psi_percent_limit,
-                    "agent.mem_agent_compact_psi_percent_limit",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.compact_sec_max,
-                    "agent.mem_agent_compact_sec_max",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.compact_order,
-                    "agent.mem_agent_compact_order",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.compact_threshold,
-                    "agent.mem_agent_compact_threshold",
-                    kv
-                );
-                mem_agent_kv_insert!(
-                    cfg.mem_agent.compact_force_times,
-                    "agent.mem_agent_compact_force_times",
-                    kv
+                    CONTAINER_PIPE_SIZE_OPTION.to_string(),
+                    cfg.container_pipe_size.to_string(),
                 );
             }
         }
@@ -496,29 +389,31 @@ mod tests {
 
     #[test]
     fn test_get_agent_kernel_params() {
-        let mut config = TomlConfig {
-            ..Default::default()
-        };
-        let agent_config = Agent {
-            debug: true,
-            enable_tracing: true,
-            container_pipe_size: 20,
-            debug_console_enabled: true,
-            launch_process_timeout: 60,
-            visible_cdi_devices: true,
-            ..Default::default()
-        };
-        let agent_name = "test_agent";
-        config.runtime.agent_name = agent_name.to_string();
-        config.agent.insert(agent_name.to_owned(), agent_config);
-
+        let mut config = TomlConfig::default();
+        config.runtime.agent_name = "kata".into();
+        // Check both programmatic and deserialized defaults: their debug defaults differ.
+        for agent in [Agent::default(), toml::from_str::<Agent>("").unwrap()] {
+            config.agent.insert("kata".into(), agent);
+            let params = config.get_agent_kernel_params().unwrap();
+            assert!(params
+                .keys()
+                .all(|key| matches!(key.as_str(), "agent.log" | "agent.container_pipe_size")));
+        }
+        let agent = config.agent.get_mut("kata").unwrap();
+        agent.debug = true;
+        agent.container_pipe_size = 20;
         let kv = config.get_agent_kernel_params().unwrap();
+        assert_eq!(kv.len(), 2);
         assert_eq!(kv.get("agent.log").unwrap(), "debug");
-        assert_eq!(kv.get("agent.trace").unwrap(), "true");
         assert_eq!(kv.get("agent.container_pipe_size").unwrap(), "20");
-        kv.get("agent.debug_console").unwrap();
-        assert_eq!(kv.get("agent.debug_console_vport").unwrap(), "1026"); // 1026 is the default port
-        assert_eq!(kv.get("agent.launch_process_timeout").unwrap(), "60");
-        assert_eq!(kv.get("agent.visible_cdi_devices").unwrap(), "true");
+        config.agent.get_mut("kata").unwrap().enable_tracing = true;
+        assert!(config.get_agent_kernel_params().is_err());
+        for config in [
+            "cdh_api_timeout_ms = 0",
+            "launch_process_timeout = 0",
+            "[mem_agent]\nenable = false",
+        ] {
+            assert!(toml::from_str::<Agent>(config).is_err(), "{}", config);
+        }
     }
 }

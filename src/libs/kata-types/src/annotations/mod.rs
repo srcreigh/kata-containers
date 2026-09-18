@@ -76,10 +76,6 @@ pub const KATA_ANNO_CFG_AGENT_CONTAINER_PIPE_SIZE: &str =
     "io.katacontainers.config.agent.container_pipe_size";
 /// An annotation key to specify the size of the pipes created for containers.
 pub const CONTAINER_PIPE_SIZE_KERNEL_PARAM: &str = "agent.container_pipe_size";
-/// An annotation to specify the Confidential Data Hub API timeout in milliseconds.
-pub const KATA_ANNO_CFG_AGENT_CDH_API_TIMEOUT: &str =
-    "io.katacontainers.config.agent.cdh_api_timeout_ms";
-
 // Hypervisor related annotations
 /// Prefix for Hypervisor configurations.
 pub const KATA_ANNO_CFG_HYPERVISOR_PREFIX: &str = "io.katacontainers.config.hypervisor.";
@@ -1062,14 +1058,6 @@ impl Annotation {
                     KATA_ANNO_CFG_AGENT_CONTAINER_PIPE_SIZE => match self.get_value::<u32>(key) {
                         Ok(v) => {
                             ag.container_pipe_size = v.unwrap_or_default();
-                        }
-                        Err(_e) => {
-                            return Err(u32_err);
-                        }
-                    },
-                    KATA_ANNO_CFG_AGENT_CDH_API_TIMEOUT => match self.get_value::<u32>(key) {
-                        Ok(v) => {
-                            ag.cdh_api_timeout_ms = v.unwrap_or_default();
                         }
                         Err(_e) => {
                             return Err(u32_err);
