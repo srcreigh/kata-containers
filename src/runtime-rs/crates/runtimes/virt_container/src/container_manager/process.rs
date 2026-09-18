@@ -377,8 +377,8 @@ impl Process {
         // the end signal could be received in the read side
         self.stdin_w.take();
 
-        // The stdin will be closed when EOF is got in rpc `read_stdout` of agent
-        // so we will not call agent.close_stdin anymore.
+        // The IO pump sends an empty WriteStdin request on EOF; the agent
+        // closes process stdin through that retained path.
     }
 
     pub async fn get_status(&self) -> ProcessStatus {

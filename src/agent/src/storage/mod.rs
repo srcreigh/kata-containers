@@ -28,6 +28,7 @@ use crate::sandbox::Sandbox;
 mod block_handler;
 mod ephemeral_handler;
 mod local_handler;
+mod mmio;
 
 const RW_MASK: u32 = 0o660;
 const RO_MASK: u32 = 0o440;

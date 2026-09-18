@@ -16,7 +16,6 @@ use nix::mount::MsFlags;
 use regex::Regex;
 use slog::Logger;
 
-use crate::device::online_device;
 use crate::linux_abi::*;
 
 pub const TYPE_ROOTFS: &str = "rootfs";
@@ -296,7 +295,7 @@ pub fn cgroups_mount(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result<
     // cgroupsV2 will automatically enable memory.use_hierarchy.
     // additinoally this directory layout is not present in cgroupsV2.
     if !unified_cgroup_hierarchy {
-        return online_device("/sys/fs/cgroup/memory/memory.use_hierarchy");
+        fs::write("/sys/fs/cgroup/memory/memory.use_hierarchy", "1")?;
     }
 
     Ok(())

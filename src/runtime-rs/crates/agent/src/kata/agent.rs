@@ -110,7 +110,6 @@ impl_agent!(
     write_stdin | crate::WriteStreamRequest | crate::WriteStreamResponse | Some(0),
     read_stdout | crate::ReadStreamRequest | crate::ReadStreamResponse | Some(0),
     read_stderr | crate::ReadStreamRequest | crate::ReadStreamResponse | Some(0),
-    close_stdin | crate::CloseStdinRequest | crate::Empty | None,
     tty_win_resize | crate::TtyWinResizeRequest | crate::Empty | None,
     update_interface | crate::UpdateInterfaceRequest | crate::Interface | None,
     update_routes | crate::UpdateRoutesRequest | crate::Routes | None,

@@ -12,7 +12,7 @@ use kata_types::device::DRIVER_BLK_MMIO_TYPE;
 use kata_types::mount::{StorageDevice, KATA_BLOCK_VOLUME_CREATE_FS};
 use protocols::agent::Storage;
 
-use crate::device::block_device_handler::get_virtio_blk_mmio_device_name;
+use crate::storage::mmio::get_virtio_blk_mmio_device_name;
 use crate::storage::{common_storage_handler, new_device, StorageContext, StorageHandler};
 use slog::Logger;
 

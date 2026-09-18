@@ -3,8 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::handler::HandlerManager;
-
 /// DRIVER_BLK_PCI_TYPE is the device driver for virtio-blk
 pub const DRIVER_BLK_PCI_TYPE: &str = "blk";
 /// DRIVER_BLK_CCW_TYPE is the device driver for virtio-blk-ccw
@@ -37,9 +35,6 @@ pub const DRIVER_OVERLAYFS_TYPE: &str = "overlayfs";
 pub const DRIVER_VIRTIOFS_TYPE: &str = "virtio-fs";
 /// DRIVER_VIRTIOFS_TYPE is the driver for Bind watch volume.
 pub const DRIVER_WATCHABLE_BIND_TYPE: &str = "watchable-bind";
-
-/// Manager to manage registered device handlers.
-pub type DeviceHandlerManager<H> = HandlerManager<H>;
 
 /// Reject device integrations excluded from the Firecracker contract. This is
 /// shared by the shim (before VM/resource creation) and the guest (before edits).
@@ -75,6 +70,10 @@ pub fn validate_spec_device_features(spec: &oci_spec::runtime::Spec) -> anyhow::
 /// Reject excluded passthrough nodes before attaching any requested device.
 pub fn validate_linux_device_features(linux: &oci_spec::runtime::Linux) -> anyhow::Result<()> {
     for device in linux.devices().iter().flatten() {
+        anyhow::ensure!(
+            device.typ() != oci_spec::runtime::LinuxDeviceType::B,
+            "kata-fc: raw block device nodes are unsupported; use a filesystem volume"
+        );
         validate_device_path(device.path())?;
     }
     Ok(())
@@ -103,6 +102,25 @@ pub fn validate_device_path(path: &std::path::Path) -> anyhow::Result<()> {
 mod minimal_device_tests {
     use super::*;
     use oci_spec::runtime::{Linux, LinuxDevice, Process, Spec};
+
+    #[test]
+    fn raw_block_nodes_rejected_but_character_devices_retained() {
+        use oci_spec::runtime::LinuxDeviceType;
+        let mut device = LinuxDevice::default();
+        device.set_path("/dev/arbitrary-name".into());
+        device.set_typ(LinuxDeviceType::B);
+        device.set_major(8);
+        device.set_minor(0);
+        let mut linux = Linux::default();
+        linux.set_devices(Some(vec![device.clone()]));
+        assert!(validate_linux_device_features(&linux).is_err());
+        device.set_path("/dev/null".into());
+        device.set_typ(LinuxDeviceType::C);
+        device.set_major(1);
+        device.set_minor(3);
+        linux.set_devices(Some(vec![device]));
+        validate_linux_device_features(&linux).unwrap();
+    }
 
     #[test]
     fn minimal_device_contract() {

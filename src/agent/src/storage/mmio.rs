@@ -4,40 +4,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::device::{DeviceContext, DeviceHandler, DeviceInfo, SpecUpdate, BLOCK};
 use crate::sandbox::Sandbox;
 use crate::uevent::{wait_for_uevent, Uevent, UeventMatcher};
 use anyhow::{anyhow, Context, Result};
-use kata_types::device::DRIVER_BLK_MMIO_TYPE;
-use protocols::agent::Device;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-#[derive(Debug)]
-pub struct VirtioBlkMmioDeviceHandler {}
-
-#[async_trait::async_trait]
-impl DeviceHandler for VirtioBlkMmioDeviceHandler {
-    fn driver_types(&self) -> &[&str] {
-        &[DRIVER_BLK_MMIO_TYPE]
-    }
-
-    async fn device_handler(&self, device: &Device, ctx: &mut DeviceContext) -> Result<SpecUpdate> {
-        if device.vm_path.is_empty() {
-            return Err(anyhow!("Invalid path for virtio mmio blk device"));
-        }
-        if !Path::new(&device.vm_path).exists() {
-            get_virtio_blk_mmio_device_name(ctx.sandbox, &device.vm_path.to_string())
-                .await
-                .context("failed to get mmio device name")?;
-        }
-
-        Ok(DeviceInfo::new(device.vm_path(), true)
-            .context("New device info")?
-            .into())
-    }
-}
 
 pub async fn get_virtio_blk_mmio_device_name(
     sandbox: &Arc<Mutex<Sandbox>>,
@@ -76,7 +47,7 @@ impl VirtioBlkMmioMatcher {
 
 impl UeventMatcher for VirtioBlkMmioMatcher {
     fn is_match(&self, uev: &Uevent) -> bool {
-        uev.subsystem == BLOCK && uev.devpath.ends_with(&self.suffix) && !uev.devname.is_empty()
+        uev.subsystem == "block" && uev.devpath.ends_with(&self.suffix) && !uev.devname.is_empty()
     }
 }
 

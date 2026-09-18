@@ -35,7 +35,6 @@ use hypervisor::{
 };
 use kata_sys_util::hooks::HookStates;
 use kata_sys_util::spec::load_oci_spec;
-use kata_types::capabilities::CapabilityBits;
 
 use kata_types::config::{hypervisor::Factory, TomlConfig};
 use oci_spec::runtime as oci;
@@ -290,38 +289,16 @@ impl VirtSandbox {
         Ok(())
     }
 
-    // store_guest_details will get the information from the guest OS, like memory block size, agent details and is memory hotplug probe support
+    // Query retained agent metadata only; Firecracker has static VM memory.
     async fn store_guest_details(&self) -> Result<()> {
-        // get the information from agent
-        let guest_details = self
+        let details = self
             .agent
-            .get_guest_details(GetGuestDetailsRequest {
-                mem_block_size: true,
-                mem_hotplug_probe: true,
-            })
+            .get_guest_details(GetGuestDetailsRequest::default())
             .await
-            .context("failed to store guest details")?;
-
-        // set memory block size
-        self.hypervisor
-            .set_guest_memory_block_size(guest_details.mem_block_size_bytes as u32)
-            .await;
-
-        // set memory hotplug probe
-        if guest_details.support_mem_hotplug_probe {
-            self.hypervisor
-                .set_capabilities(CapabilityBits::GuestMemoryProbe)
-                .await;
+            .context("failed to get guest details")?;
+        if let Some(agent) = details.agent_details {
+            info!(sl!(), "guest agent version {}", agent.version);
         }
-        info!(
-            sl!(),
-            "memory block size is {}, memory probe support {}",
-            self.hypervisor.guest_memory_block_size().await,
-            self.hypervisor
-                .capabilities()
-                .await?
-                .is_mem_hotplug_probe_supported()
-        );
         Ok(())
     }
 

@@ -42,15 +42,6 @@ pub struct StringUser {
     pub additional_gids: Vec<String>,
 }
 
-#[derive(PartialEq, Clone, Debug, Default)]
-pub struct Device {
-    pub id: String,
-    pub field_type: String,
-    pub vm_path: String,
-    pub container_path: String,
-    pub options: Vec<String>,
-}
-
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct Storage {
     pub driver: String,
@@ -61,15 +52,6 @@ pub struct Storage {
     pub options: Vec<String>,
     pub mount_point: String,
     pub shared: bool,
-}
-
-#[derive(PartialEq, Clone, Default)]
-pub struct SharedMount {
-    pub name: String,
-    pub src_ctr: String,
-    pub src_path: String,
-    pub dst_ctr: String,
-    pub dst_path: String,
 }
 
 #[derive(Deserialize, Default, Clone, PartialEq, Eq, Debug, Hash)]
@@ -127,12 +109,10 @@ pub struct Routes {
 pub struct CreateContainerRequest {
     pub process_id: ContainerProcessID,
     pub string_user: Option<StringUser>,
-    pub devices: Vec<Device>,
     pub storages: Vec<Storage>,
     pub oci: Option<oci::Spec>,
     pub sandbox_pidns: bool,
     pub rootfs_mounts: Vec<oci::Mount>,
-    pub shared_mounts: Vec<SharedMount>,
     pub stdin_port: Option<u32>,
     pub stdout_port: Option<u32>,
     pub stderr_port: Option<u32>,
@@ -389,11 +369,6 @@ pub struct ReadStreamResponse {
 }
 
 #[derive(PartialEq, Clone, Default)]
-pub struct CloseStdinRequest {
-    pub process_id: ContainerProcessID,
-}
-
-#[derive(PartialEq, Clone, Default)]
 pub struct TtyWinResizeRequest {
     pub process_id: ContainerProcessID,
     pub row: u32,
@@ -501,11 +476,6 @@ pub struct OnlineCPUMemRequest {
     pub wait: bool,
     pub nb_cpus: u32,
     pub cpu_only: bool,
-}
-
-#[derive(PartialEq, Clone, Default)]
-pub struct ReseedRandomDevRequest {
-    pub data: ::std::vec::Vec<u8>,
 }
 
 #[derive(PartialEq, Clone, Default)]

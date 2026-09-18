@@ -21,7 +21,7 @@ use kata_types::{
     annotations::{BUNDLE_PATH_KEY, CONTAINER_TYPE_KEY, KATA_ANNO_CFG_HYPERVISOR_INIT_DATA},
     config::TomlConfig,
     container::update_ocispec_annotations,
-    k8s::{self, container_type},
+    k8s::container_type,
 };
 use oci_spec::runtime as oci;
 
@@ -180,10 +180,7 @@ impl Container {
             .as_ref()
             .context("OCI spec missing linux field")?;
 
-        let devices_agent = self
-            .resource_manager
-            .handler_devices(&config.container_id, linux)
-            .await?;
+        self.resource_manager.validate_devices(linux).await?;
         // update vcpus, mems and host cgroups
         let resources = self
             .resource_manager
@@ -207,21 +204,6 @@ impl Container {
             }
         }
 
-        let container_name = k8s::container_name(&spec);
-        let mut shared_mounts = Vec::new();
-        for shared_mount in &toml_config.runtime.shared_mounts {
-            if shared_mount.dst_ctr == container_name {
-                let m = agent::types::SharedMount {
-                    name: shared_mount.name.clone(),
-                    src_ctr: shared_mount.src_ctr.clone(),
-                    src_path: shared_mount.src_path.clone(),
-                    dst_ctr: shared_mount.dst_ctr.clone(),
-                    dst_path: shared_mount.dst_path.clone(),
-                };
-                shared_mounts.push(m);
-            }
-        }
-
         info!(
             sl!(),
             "OCI Spec {:?} within CreateContainerRequest.",
@@ -234,8 +216,6 @@ impl Container {
             storages,
             oci: Some(spec),
             sandbox_pidns,
-            devices: devices_agent,
-            shared_mounts,
             ..Default::default()
         };
 

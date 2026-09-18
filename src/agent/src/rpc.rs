@@ -15,8 +15,6 @@ use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-#[cfg(target_arch = "s390x")]
-use std::str::FromStr;
 use std::sync::Arc;
 use ttrpc::{
     self,
@@ -31,8 +29,7 @@ use oci_spec::runtime as oci;
 use protobuf::MessageField;
 use protocols::agent::{
     AgentDetails, CopyFileRequest, GuestDetailsResponse, Metrics, OOMEvent, ReadStreamResponse,
-    ResizeVolumeRequest, Routes, StatsContainerResponse, VolumeStatsRequest, WaitProcessResponse,
-    WriteStreamResponse,
+    Routes, StatsContainerResponse, VolumeStatsRequest, WaitProcessResponse, WriteStreamResponse,
 };
 use protocols::csi::{
     volume_usage::Unit as VolumeUsage_Unit, VolumeCondition, VolumeStatsResponse, VolumeUsage,
@@ -45,7 +42,7 @@ use protocols::health::{
 use protocols::types::Interface;
 use protocols::{agent_ttrpc_async as agent_ttrpc, health_ttrpc_async as health_ttrpc};
 use rustjail::cgroups::notifier;
-use rustjail::container::{BaseContainer, Container, LinuxContainer, SYSTEMD_CGROUP_PATH_FORMAT};
+use rustjail::container::{BaseContainer, Container, LinuxContainer};
 use rustjail::process::Process;
 use rustjail::specconv::CreateOpts;
 
@@ -54,17 +51,14 @@ use nix::mount::MsFlags;
 use nix::sys::{stat, statfs};
 use nix::unistd::{self, Pid};
 use rustjail::process::ProcessOperations;
-#[cfg(all(test, not(target_arch = "powerpc64")))]
+#[cfg(test)]
 use std::os::fd::AsRawFd;
 
-use crate::device::add_devices;
 use crate::features::get_build_features;
-use crate::linux_abi::*;
 use crate::metrics::get_metrics;
 use crate::mount::baremount;
 use crate::namespace::{NSTYPEIPC, NSTYPEPID, NSTYPEUTS};
 use crate::network::setup_guest_dns;
-use crate::random;
 use crate::sandbox::{Sandbox, SandboxError};
 use crate::storage::{add_storages, STORAGE_HANDLERS};
 use crate::version::{AGENT_VERSION, API_VERSION};
@@ -86,7 +80,6 @@ pub const CONTAINER_BASE: &str = "/run/kata-containers";
 const KATA_GUEST_SHARE_DIR: &str = "/run/kata-containers/shared/containers/";
 
 const ERR_CANNOT_GET_WRITER: &str = "Cannot get writer";
-const ERR_INVALID_BLOCK_SIZE: &str = "Invalid block size";
 const ERR_NO_LINUX_FIELD: &str = "Spec does not contain linux field";
 const ERR_NO_SANDBOX_PIDNS: &str = "Sandbox does not have sandbox_pidns";
 
@@ -202,13 +195,11 @@ impl<T> OptionToTtrpcResult<T> for Option<T> {
 fn validate_container_device_features(
     req: &protocols::agent::CreateContainerRequest,
 ) -> ttrpc::Result<()> {
-    for device in &req.devices {
-        if device.type_ != kata_types::device::DRIVER_BLK_MMIO_TYPE || !device.options.is_empty() {
-            return Err(ttrpc_error(
-                ttrpc::Code::INVALID_ARGUMENT,
-                "kata-fc: only MMIO block devices without driver options are supported",
-            ));
-        }
+    if !req.devices.is_empty() || !req.shared_mounts.is_empty() {
+        return Err(ttrpc_error(
+            ttrpc::Code::INVALID_ARGUMENT,
+            "kata-fc: raw device passthrough and cross-container shared mounts are unsupported",
+        ));
     }
     if let Some(spec) = req.OCI.as_ref() {
         let spec: Spec = spec.clone().into();
@@ -221,7 +212,6 @@ fn validate_container_device_features(
 #[derive(Clone, Debug)]
 pub struct AgentService {
     sandbox: Arc<Mutex<Sandbox>>,
-    init_mode: bool,
 }
 
 impl AgentService {
@@ -254,13 +244,6 @@ impl AgentService {
             "receive createcontainer, storages: {:?}", &req.storages
         );
 
-        // Some devices need some extra processing (the ones invoked with
-        // --device for instance), and that's what this call is doing. It
-        // updates the devices listed in the OCI spec, so that they actually
-        // match real devices inside the VM. This step is necessary since we
-        // cannot predict everything from the caller.
-        add_devices(&sl(), &req.devices, &mut oci, &self.sandbox).await?;
-
         // Both rootfs and volumes (invoked with --volume for instance) will
         // be processed the same way. The idea is to always mount any provided
         // storage to the specified MountPoint, so that it will match what's
@@ -281,34 +264,15 @@ impl AgentService {
 
         update_container_namespaces(&s, &mut oci, use_sandbox_pidns)?;
 
-        // Append guest hooks
-
-        // write spec to bundle path, hooks might
-        // read ocispec
+        // Write the OCI spec to the container bundle.
         let olddir = setup_bundle(&cid, &mut oci)?;
         // restore the cwd for kata-agent process.
         defer!(unistd::chdir(&olddir).unwrap());
 
-        // determine which cgroup driver to take and then assign to use_systemd_cgroup
-        // systemd: "[slice]:[prefix]:[name]"
-        // fs: "/path_a/path_b"
-        // If agent is init we can't use systemd cgroup mode, no matter what the host tells us
-        let cgroups_path = &oci
-            .linux()
-            .as_ref()
-            .and_then(|linux| linux.cgroups_path().as_ref())
-            .map(|cgrps_path| cgrps_path.display().to_string())
-            .unwrap_or_default();
-
-        let use_systemd_cgroup = if self.init_mode {
-            false
-        } else {
-            SYSTEMD_CGROUP_PATH_FORMAT.is_match(cgroups_path)
-        };
-
         let opts = CreateOpts {
             cgroup_name: "".to_string(),
-            use_systemd_cgroup,
+            // The supported guest runs the agent as PID 1 without systemd.
+            use_systemd_cgroup: false,
             no_pivot_root: s.no_pivot_root,
             no_new_keyring: false,
             spec: Some(oci.clone()),
@@ -348,7 +312,6 @@ impl AgentService {
         }
 
         s.update_shared_pidns(&ctr)?;
-        s.setup_shared_mounts(&ctr, &req.shared_mounts)?;
         s.add_container(ctr);
         info!(sl(), "created container!");
 
@@ -428,8 +391,6 @@ impl AgentService {
             .process
             .into_option()
             .ok_or_else(|| anyhow!("Unable to parse process from ExecProcessRequest"))?;
-
-        // Apply any necessary corrections for PCI addresses
 
         let pipe_size = AGENT_CONFIG.container_pipe_size;
         let ocip = process.into();
@@ -999,29 +960,6 @@ impl agent_ttrpc::AgentService for AgentService {
         self.do_read_stream(&req, false).await.map_ttrpc_err(same)
     }
 
-    async fn close_stdin(
-        &self,
-        _ctx: &TtrpcContext,
-        req: protocols::agent::CloseStdinRequest,
-    ) -> ttrpc::Result<Empty> {
-        // The stdin will be closed when EOF is got in rpc `write_stdin`[runtime-rs]
-        // so this rpc will not be called anymore by runtime-rs.
-
-        info!(sl(), "rpc call from shim to agent: {}", "close_stdin");
-
-        let cid = req.container_id;
-        let eid = req.exec_id;
-        let mut sandbox = self.sandbox.lock().await;
-
-        let p = sandbox
-            .find_container_process(cid.as_str(), eid.as_str())
-            .map_err(sandbox_err_to_ttrpc)?;
-
-        p.close_stdin().await;
-
-        Ok(Empty::new())
-    }
-
     async fn tty_win_resize(
         &self,
         _ctx: &TtrpcContext,
@@ -1208,18 +1146,6 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
-    async fn reseed_random_dev(
-        &self,
-        _ctx: &TtrpcContext,
-        req: protocols::agent::ReseedRandomDevRequest,
-    ) -> ttrpc::Result<Empty> {
-        info!(sl(), "rpc call from shim to agent: {}", "reseed_random_dev");
-
-        random::reseed_rng(req.data.as_slice()).map_ttrpc_err(same)?;
-
-        Ok(Empty::new())
-    }
-
     async fn get_guest_details(
         &self,
         _ctx: &TtrpcContext,
@@ -1229,17 +1155,12 @@ impl agent_ttrpc::AgentService for AgentService {
 
         info!(sl(), "get guest details!");
         let mut resp = GuestDetailsResponse::new();
-        // to get memory block size
-        let (u, v) = get_memory_info(
-            req.mem_block_size,
-            req.mem_hotplug_probe,
-            SYSFS_MEMORY_BLOCK_SIZE_PATH,
-            SYSFS_MEMORY_HOTPLUG_PROBE_PATH,
-        )
-        .map_ttrpc_err_do(|_| info!(sl(), "fail to get memory info!"))?;
-
-        resp.mem_block_size_bytes = u;
-        resp.support_mem_hotplug_probe = v;
+        if req.mem_block_size || req.mem_hotplug_probe {
+            return Err(ttrpc_error(
+                ttrpc::Code::INVALID_ARGUMENT,
+                "kata-fc: guest memory hotplug information is unsupported",
+            ));
+        }
 
         // to get agent details
         let detail = get_agent_details();
@@ -1331,19 +1252,6 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(resp)
     }
 
-    async fn resize_volume(
-        &self,
-        _ctx: &TtrpcContext,
-        _req: ResizeVolumeRequest,
-    ) -> ttrpc::Result<Empty> {
-        info!(sl(), "rpc call from shim to agent: {}", "resize_volume");
-
-        Err(ttrpc_error(
-            ttrpc::Code::UNIMPLEMENTED,
-            "resize_volume is not implemented in kata-agent",
-        ))
-    }
-
     async fn get_diagnostic_data(
         &self,
         _ctx: &TtrpcContext,
@@ -1395,52 +1303,6 @@ impl health_ttrpc::Health for HealthService {
 
         Ok(rep)
     }
-}
-
-fn get_memory_info(
-    block_size: bool,
-    hotplug: bool,
-    block_size_path: &str,
-    hotplug_probe_path: &str,
-) -> Result<(u64, bool)> {
-    let mut size: u64 = 0;
-    let mut plug: bool = false;
-    if block_size {
-        match fs::read_to_string(block_size_path) {
-            Ok(v) => {
-                if v.is_empty() {
-                    warn!(sl(), "file {} is empty", block_size_path);
-                    return Err(anyhow!(ERR_INVALID_BLOCK_SIZE));
-                }
-
-                size = u64::from_str_radix(v.trim(), 16).map_err(|_| {
-                    warn!(sl(), "failed to parse the str {} to hex", size);
-                    anyhow!(ERR_INVALID_BLOCK_SIZE)
-                })?;
-            }
-            Err(e) => {
-                warn!(sl(), "memory block size error: {:?}", e.kind());
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(anyhow!(e));
-                }
-            }
-        }
-    }
-
-    if hotplug {
-        match stat::stat(hotplug_probe_path) {
-            Ok(_) => plug = true,
-            Err(e) => {
-                warn!(sl(), "hotplug memory error: {:?}", e);
-                match e {
-                    nix::Error::ENOENT => plug = false,
-                    _ => return Err(anyhow!(e)),
-                }
-            }
-        }
-    }
-
-    Ok((size, plug))
 }
 
 fn get_volume_capacity_stats(path: &str) -> Result<VolumeUsage> {
@@ -1500,15 +1362,8 @@ async fn read_stream(reader: &Mutex<ReadHalf<PipeStream>>, l: usize) -> Result<V
     Ok(content)
 }
 
-pub async fn start(
-    s: Arc<Mutex<Sandbox>>,
-    server_address: &str,
-    init_mode: bool,
-) -> Result<TtrpcServer> {
-    let agent_service = Box::new(AgentService {
-        sandbox: s,
-        init_mode,
-    });
+pub async fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer> {
+    let agent_service = Box::new(AgentService { sandbox: s });
     let aservice = agent_ttrpc::create_agent_service(Arc::new(*agent_service));
 
     let health_service = Box::new(HealthService {});
@@ -1615,7 +1470,6 @@ async fn remove_container_resources(sandbox: &mut Sandbox, cid: &str) -> Result<
 
     sandbox.container_mounts.remove(cid);
     sandbox.containers.remove(cid);
-    // Remove any host -> guest mappings for this container
     Ok(())
 }
 
@@ -1913,11 +1767,11 @@ mod tests {
         let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
         let service = AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
         };
         let ctx = mk_ttrpc_context();
         let mut requests = Vec::new();
         for driver in [
+            "mmioblk",
             "blk",
             "blk-ccw",
             "scsi",
@@ -1927,8 +1781,7 @@ mod tests {
             "vfio-ap",
             "unknown",
         ] {
-            // A valid first entry must not start waiting for a device before
-            // we discover the excluded second entry.
+            // No request may start waiting for a raw device, including MMIO.
             requests.push(protocols::agent::CreateContainerRequest {
                 container_id: "device-rejection-test".into(),
                 devices: vec![
@@ -1952,6 +1805,25 @@ mod tests {
                 options: vec!["unsupported=true".into()],
                 ..Default::default()
             }],
+            ..Default::default()
+        });
+        requests.push(protocols::agent::CreateContainerRequest {
+            shared_mounts: vec![Default::default()],
+            ..Default::default()
+        });
+        let mut raw_spec = protocols::oci::Spec::default();
+        raw_spec.Linux = MessageField::some(protocols::oci::Linux {
+            Devices: vec![protocols::oci::LinuxDevice {
+                Type: "b".into(),
+                Path: "/dev/raw-disk".into(),
+                Major: 8,
+                Minor: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        requests.push(protocols::agent::CreateContainerRequest {
+            OCI: MessageField::some(raw_spec),
             ..Default::default()
         });
         let mut spec = protocols::oci::Spec::default();
@@ -2004,14 +1876,7 @@ mod tests {
         }
         assert!(state.containers.is_empty());
         assert!(state.uevent_map.is_empty());
-        validate_container_device_features(&protocols::agent::CreateContainerRequest {
-            devices: vec![protocols::agent::Device {
-                type_: "mmioblk".into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        })
-        .unwrap();
+        validate_container_device_features(&Default::default()).unwrap();
     }
 
     #[tokio::test]
@@ -2019,7 +1884,6 @@ mod tests {
         let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
         let service = AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
         };
         let ctx = mk_ttrpc_context();
         macro_rules! reject {
@@ -2047,6 +1911,8 @@ mod tests {
         reject!(add_swap_path);
         reject!(resize_volume);
         reject!(set_policy);
+        reject!(reseed_random_dev);
+        reject!(close_stdin);
     }
 
     #[tokio::test]
@@ -2054,7 +1920,6 @@ mod tests {
         let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
         let service = AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
         };
         let ctx = mk_ttrpc_context();
         for req in [
@@ -2083,7 +1948,6 @@ mod tests {
         let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
         let service = AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
         };
         let ctx = mk_ttrpc_context();
         let _guard = service.sandbox.lock().await;
@@ -2175,6 +2039,41 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn minimal_guest_details_reject_hotplug_and_keep_agent_metadata() {
+        let service = AgentService {
+            sandbox: Arc::new(Mutex::new(Sandbox::new(&sl()).unwrap())),
+        };
+        let ctx = mk_ttrpc_context();
+        let _guard = service.sandbox.lock().await;
+        for (block, probe) in [(true, false), (false, true), (true, true)] {
+            let request = protocols::agent::GuestDetailsRequest {
+                mem_block_size: block,
+                mem_hotplug_probe: probe,
+                ..Default::default()
+            };
+            match service.get_guest_details(&ctx, request).await.unwrap_err() {
+                ttrpc::Error::RpcStatus(status) => {
+                    assert_eq!(status.code(), ttrpc::Code::INVALID_ARGUMENT)
+                }
+                e => panic!("unexpected error: {:?}", e),
+            }
+        }
+        let response = service
+            .get_guest_details(&ctx, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(response.mem_block_size_bytes, 0);
+        assert!(!response.support_mem_hotplug_probe);
+        let details = response.agent_details.unwrap();
+        assert_eq!(details.version, AGENT_VERSION);
+        assert!(details.device_handlers.is_empty());
+        assert!(details
+            .storage_handlers
+            .iter()
+            .any(|driver| driver == "mmioblk"));
+    }
+
     fn create_dummy_opts() -> CreateOpts {
         let start = SystemTime::now();
         let since_the_epoch = start
@@ -2246,7 +2145,6 @@ mod tests {
 
         let agent_service = Box::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
         });
 
         let req = protocols::agent::UpdateInterfaceRequest::default();
@@ -2263,7 +2161,6 @@ mod tests {
         let sandbox = Sandbox::new(&logger).unwrap();
         let agent_service = Box::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
         });
 
         let req = protocols::agent::UpdateRoutesRequest::default();
@@ -2280,7 +2177,6 @@ mod tests {
         let sandbox = Sandbox::new(&logger).unwrap();
         let agent_service = Box::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
         });
 
         let req = protocols::agent::AddARPNeighborsRequest::default();
@@ -2292,7 +2188,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(target_arch = "powerpc64"))]
     #[serial]
     async fn test_do_write_stream() {
         skip_if_not_root!();
@@ -2417,7 +2312,6 @@ mod tests {
 
             let agent_service = Box::new(AgentService {
                 sandbox: Arc::new(Mutex::new(sandbox)),
-                init_mode: true,
             });
 
             let result = agent_service
@@ -2568,119 +2462,6 @@ mod tests {
                     "{msg}"
                 );
             }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_get_memory_info() {
-        #[derive(Debug)]
-        struct TestData<'a> {
-            // if None is provided, no file will be generated, else the data in the Option will populate the file
-            block_size_data: Option<&'a str>,
-
-            hotplug_probe_data: bool,
-            get_block_size: bool,
-            get_hotplug: bool,
-            result: Result<(u64, bool)>,
-        }
-
-        let tests = &[
-            TestData {
-                block_size_data: Some("10000000"),
-                hotplug_probe_data: true,
-                get_block_size: true,
-                get_hotplug: true,
-                result: Ok((268435456, true)),
-            },
-            TestData {
-                block_size_data: Some("100"),
-                hotplug_probe_data: false,
-                get_block_size: true,
-                get_hotplug: true,
-                result: Ok((256, false)),
-            },
-            TestData {
-                block_size_data: None,
-                hotplug_probe_data: false,
-                get_block_size: true,
-                get_hotplug: true,
-                result: Ok((0, false)),
-            },
-            TestData {
-                block_size_data: Some(""),
-                hotplug_probe_data: false,
-                get_block_size: true,
-                get_hotplug: false,
-                result: Err(anyhow!(ERR_INVALID_BLOCK_SIZE)),
-            },
-            TestData {
-                block_size_data: Some("-1"),
-                hotplug_probe_data: false,
-                get_block_size: true,
-                get_hotplug: false,
-                result: Err(anyhow!(ERR_INVALID_BLOCK_SIZE)),
-            },
-            TestData {
-                block_size_data: Some("    "),
-                hotplug_probe_data: false,
-                get_block_size: true,
-                get_hotplug: false,
-                result: Err(anyhow!(ERR_INVALID_BLOCK_SIZE)),
-            },
-            TestData {
-                block_size_data: Some("some data"),
-                hotplug_probe_data: false,
-                get_block_size: true,
-                get_hotplug: false,
-                result: Err(anyhow!(ERR_INVALID_BLOCK_SIZE)),
-            },
-            TestData {
-                block_size_data: Some("some data"),
-                hotplug_probe_data: true,
-                get_block_size: false,
-                get_hotplug: false,
-                result: Ok((0, false)),
-            },
-            TestData {
-                block_size_data: Some("100"),
-                hotplug_probe_data: true,
-                get_block_size: false,
-                get_hotplug: false,
-                result: Ok((0, false)),
-            },
-            TestData {
-                block_size_data: Some("100"),
-                hotplug_probe_data: true,
-                get_block_size: false,
-                get_hotplug: true,
-                result: Ok((0, true)),
-            },
-        ];
-
-        for (i, d) in tests.iter().enumerate() {
-            let msg = format!("test[{i}]: {d:?}");
-
-            let dir = tempdir().expect("failed to make tempdir");
-            let block_size_path = dir.path().join("block_size_bytes");
-            let hotplug_probe_path = dir.path().join("probe");
-
-            if let Some(block_size_data) = d.block_size_data {
-                fs::write(&block_size_path, block_size_data).unwrap();
-            }
-            if d.hotplug_probe_data {
-                fs::write(&hotplug_probe_path, []).unwrap();
-            }
-
-            let result = get_memory_info(
-                d.get_block_size,
-                d.get_hotplug,
-                block_size_path.to_str().unwrap(),
-                hotplug_probe_path.to_str().unwrap(),
-            );
-
-            let msg = format!("{msg}, result: {result:?}");
-
-            assert_result!(d.result, result, msg);
         }
     }
 
@@ -2882,7 +2663,6 @@ OtherField:other
 
         let agent_service = Arc::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
         });
 
         let svc1 = agent_service.clone();
@@ -3475,7 +3255,6 @@ OtherField:other
 
         let agent_service = Arc::new(AgentService {
             sandbox: Arc::new(Mutex::new(sandbox)),
-            init_mode: true,
         });
 
         // Fire stats_container; get_stats() will block on the blocking thread pool.

@@ -14,19 +14,18 @@ mod log_forwarder;
 mod sock;
 pub mod types;
 pub use types::{
-    ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, BlkioStatsEntry, CheckRequest,
-    CloseStdinRequest, ContainerID, ContainerProcessID, CopyFileRequest, CreateContainerRequest,
-    CreateSandboxRequest, Empty, ExecProcessRequest, FSGroup, FSGroupChangePolicy,
-    GetDiagnosticDataRequest, GetDiagnosticDataResponse, GetGuestDetailsRequest,
-    GetIPTablesRequest, GetIPTablesResponse, GuestDetailsResponse, HealthCheckResponse, IPAddress,
-    IPFamily, Interface, Interfaces, ListProcessesRequest, MemHotplugByProbeRequest,
-    MetricsResponse, OnlineCPUMemRequest, OomEventResponse, ReadStreamRequest, ReadStreamResponse,
-    RemoveContainerRequest, ReseedRandomDevRequest, ResizeVolumeRequest, Route, Routes,
-    SetGuestDateTimeRequest, SetIPTablesRequest, SetIPTablesResponse, SignalProcessRequest,
-    StatsContainerResponse, Storage, TtyWinResizeRequest, UpdateContainerRequest,
-    UpdateInterfaceRequest, UpdateRoutesRequest, VersionCheckResponse, VolumeStatsRequest,
-    VolumeStatsResponse, WaitProcessRequest, WaitProcessResponse, WriteStreamRequest,
-    WriteStreamResponse,
+    ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, BlkioStatsEntry, CheckRequest, ContainerID,
+    ContainerProcessID, CopyFileRequest, CreateContainerRequest, CreateSandboxRequest, Empty,
+    ExecProcessRequest, FSGroup, FSGroupChangePolicy, GetDiagnosticDataRequest,
+    GetDiagnosticDataResponse, GetGuestDetailsRequest, GetIPTablesRequest, GetIPTablesResponse,
+    GuestDetailsResponse, HealthCheckResponse, IPAddress, IPFamily, Interface, Interfaces,
+    ListProcessesRequest, MemHotplugByProbeRequest, MetricsResponse, OnlineCPUMemRequest,
+    OomEventResponse, ReadStreamRequest, ReadStreamResponse, RemoveContainerRequest,
+    ResizeVolumeRequest, Route, Routes, SetGuestDateTimeRequest, SetIPTablesRequest,
+    SetIPTablesResponse, SignalProcessRequest, StatsContainerResponse, Storage,
+    TtyWinResizeRequest, UpdateContainerRequest, UpdateInterfaceRequest, UpdateRoutesRequest,
+    VersionCheckResponse, VolumeStatsRequest, VolumeStatsResponse, WaitProcessRequest,
+    WaitProcessResponse, WriteStreamRequest, WriteStreamResponse,
 };
 
 use anyhow::Result;
@@ -80,7 +79,6 @@ pub trait Agent: AgentManager + HealthService + Send + Sync {
     async fn wait_process(&self, req: WaitProcessRequest) -> Result<WaitProcessResponse>;
 
     // io and tty
-    async fn close_stdin(&self, req: CloseStdinRequest) -> Result<Empty>;
     async fn read_stderr(&self, req: ReadStreamRequest) -> Result<ReadStreamResponse>;
     async fn read_stdout(&self, req: ReadStreamRequest) -> Result<ReadStreamResponse>;
     async fn tty_win_resize(&self, req: TtyWinResizeRequest) -> Result<Empty>;

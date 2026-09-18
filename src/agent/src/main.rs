@@ -37,7 +37,6 @@ use std::process::exit;
 use std::sync::Arc;
 
 mod config;
-mod device;
 mod features;
 mod linux_abi;
 mod metrics;
@@ -45,7 +44,6 @@ mod mount;
 mod namespace;
 mod netlink;
 mod network;
-pub mod random;
 mod sandbox;
 mod signal;
 mod storage;
@@ -318,7 +316,7 @@ async fn start_sandbox(
     sandbox.lock().await.sender = Some(tx);
 
     // vsock:///dev/vsock, port
-    let mut server = rpc::start(sandbox.clone(), config.server_addr.as_str(), init_mode).await?;
+    let mut server = rpc::start(sandbox.clone(), config.server_addr.as_str()).await?;
 
     server.start().await?;
 

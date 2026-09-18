@@ -14,16 +14,15 @@ use protocols::{
 use crate::{
     types::{
         ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, AgentDetails, BlkioStats,
-        BlkioStatsEntry, CgroupStats, CheckRequest, CloseStdinRequest, ContainerID,
-        CopyFileRequest, CpuStats, CpuUsage, CreateContainerRequest, CreateSandboxRequest, Device,
-        Empty, ExecProcessRequest, FSGroup, FSGroupChangePolicy, GetIPTablesRequest,
-        GetIPTablesResponse, GuestDetailsResponse, HealthCheckResponse, HugetlbStats, IPAddress,
-        IPFamily, Interface, Interfaces, KernelModule, MemHotplugByProbeRequest, MemoryData,
-        MemoryStats, MetricsResponse, NetworkStats, OnlineCPUMemRequest, PidsStats,
-        ReadStreamRequest, ReadStreamResponse, RemoveContainerRequest, ReseedRandomDevRequest,
-        ResizeVolumeRequest, Route, Routes, SetGuestDateTimeRequest, SetIPTablesRequest,
-        SetIPTablesResponse, SharedMount, SignalProcessRequest, StatsContainerResponse, Storage,
-        StringUser, ThrottlingData, TtyWinResizeRequest, UpdateContainerRequest,
+        BlkioStatsEntry, CgroupStats, CheckRequest, ContainerID, CopyFileRequest, CpuStats,
+        CpuUsage, CreateContainerRequest, CreateSandboxRequest, Empty, ExecProcessRequest, FSGroup,
+        FSGroupChangePolicy, GetIPTablesRequest, GetIPTablesResponse, GuestDetailsResponse,
+        HealthCheckResponse, HugetlbStats, IPAddress, IPFamily, Interface, Interfaces,
+        KernelModule, MemHotplugByProbeRequest, MemoryData, MemoryStats, MetricsResponse,
+        NetworkStats, OnlineCPUMemRequest, PidsStats, ReadStreamRequest, ReadStreamResponse,
+        RemoveContainerRequest, ResizeVolumeRequest, Route, Routes, SetGuestDateTimeRequest,
+        SetIPTablesRequest, SetIPTablesResponse, SignalProcessRequest, StatsContainerResponse,
+        Storage, StringUser, ThrottlingData, TtyWinResizeRequest, UpdateContainerRequest,
         UpdateInterfaceRequest, UpdateRoutesRequest, VersionCheckResponse, VolumeStatsRequest,
         VolumeStatsResponse, WaitProcessRequest, WriteStreamRequest,
     },
@@ -90,19 +89,6 @@ impl From<StringUser> for agent::StringUser {
     }
 }
 
-impl From<Device> for agent::Device {
-    fn from(from: Device) -> Self {
-        Self {
-            id: from.id,
-            type_: from.field_type,
-            vm_path: from.vm_path,
-            container_path: from.container_path,
-            options: trans_vec(from.options),
-            ..Default::default()
-        }
-    }
-}
-
 impl From<Storage> for agent::Storage {
     fn from(from: Storage) -> Self {
         Self {
@@ -114,19 +100,6 @@ impl From<Storage> for agent::Storage {
             options: trans_vec(from.options),
             mount_point: from.mount_point,
             shared: from.shared,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<SharedMount> for agent::SharedMount {
-    fn from(from: SharedMount) -> Self {
-        Self {
-            name: from.name,
-            src_ctr: from.src_ctr,
-            src_path: from.src_path,
-            dst_ctr: from.dst_ctr,
-            dst_path: from.dst_path,
             ..Default::default()
         }
     }
@@ -275,11 +248,9 @@ impl From<CreateContainerRequest> for agent::CreateContainerRequest {
             container_id: from.process_id.container_id(),
             exec_id: from.process_id.exec_id(),
             string_user: from_option(from.string_user),
-            devices: trans_vec(from.devices),
             storages: trans_vec(from.storages),
             OCI: from_option(from.oci),
             sandbox_pidns: from.sandbox_pidns,
-            shared_mounts: trans_vec(from.shared_mounts),
             stdin_port: from.stdin_port.unwrap_or_default(),
             stdout_port: from.stdout_port.unwrap_or_default(),
             stderr_port: from.stderr_port.unwrap_or_default(),
@@ -586,16 +557,6 @@ impl From<agent::ReadStreamResponse> for ReadStreamResponse {
     }
 }
 
-impl From<CloseStdinRequest> for agent::CloseStdinRequest {
-    fn from(from: CloseStdinRequest) -> Self {
-        Self {
-            container_id: from.process_id.container_id(),
-            exec_id: from.process_id.exec_id(),
-            ..Default::default()
-        }
-    }
-}
-
 impl From<TtyWinResizeRequest> for agent::TtyWinResizeRequest {
     fn from(from: TtyWinResizeRequest) -> Self {
         Self {
@@ -702,15 +663,6 @@ impl From<OnlineCPUMemRequest> for agent::OnlineCPUMemRequest {
             wait: from.wait,
             nb_cpus: from.nb_cpus,
             cpu_only: from.cpu_only,
-            ..Default::default()
-        }
-    }
-}
-
-impl From<ReseedRandomDevRequest> for agent::ReseedRandomDevRequest {
-    fn from(from: ReseedRandomDevRequest) -> Self {
-        Self {
-            data: from.data,
             ..Default::default()
         }
     }

@@ -25,7 +25,6 @@ use crate::network::{NetworkConfig, NetworkWithNetNsConfig};
 use crate::resource_persist::ResourceState;
 use crate::ResourceUpdateOp;
 use crate::{manager_inner::ResourceManagerInner, rootfs::Rootfs, volume::Volume, ResourceConfig};
-use agent::types::Device;
 
 pub struct ManagerArgs {
     pub sid: String,
@@ -199,9 +198,9 @@ impl ResourceManager {
         inner.handler_volumes(cid, spec).await
     }
 
-    pub async fn handler_devices(&self, cid: &str, linux: &Linux) -> Result<Vec<Device>> {
+    pub async fn validate_devices(&self, linux: &Linux) -> Result<()> {
         let inner = self.inner.read().await;
-        inner.handler_devices(cid, linux).await
+        inner.validate_devices(linux)
     }
 
     pub async fn dump(&self) {

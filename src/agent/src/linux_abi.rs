@@ -13,8 +13,6 @@ pub const ACPI_DEV_PATH: &str = "/devices/LNXSYSTM";
 pub const SYSFS_CPU_PATH: &str = "/sys/devices/system/cpu";
 pub const SYSFS_CPU_ONLINE_PATH: &str = "/sys/devices/system/cpu/online";
 
-pub const SYSFS_MEMORY_BLOCK_SIZE_PATH: &str = "/sys/devices/system/memory/block_size_bytes";
-pub const SYSFS_MEMORY_HOTPLUG_PROBE_PATH: &str = "/sys/devices/system/memory/probe";
 pub const SYSFS_MEMORY_ONLINE_PATH: &str = "/sys/devices/system/memory";
 
 pub const SYSFS_SCSI_HOST_PATH: &str = "/sys/class/scsi_host";
