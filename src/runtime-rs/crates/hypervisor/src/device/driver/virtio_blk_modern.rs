@@ -259,11 +259,6 @@ impl Device for BlockDeviceModernHandle {
         Ok(Some(self.snapshot_config().await.index))
     }
 
-    async fn update(&mut self, _h: &dyn hypervisor) -> Result<()> {
-        // There's no need to do update for virtio-blk
-        Ok(())
-    }
-
     async fn get_device_info(&self) -> DeviceType {
         DeviceType::BlockModern(self.inner.clone())
     }

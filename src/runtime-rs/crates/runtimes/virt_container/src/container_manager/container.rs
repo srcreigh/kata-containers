@@ -478,20 +478,6 @@ impl Container {
     }
 
     async fn copy_termination_log(&self) {
-        let toml_config = self.resource_manager.config().await;
-        let shared_fs = toml_config
-            .hypervisor
-            .get(&toml_config.runtime.hypervisor_name)
-            .and_then(|h| h.shared_fs.shared_fs.as_deref());
-
-        // When a shared filesystem is configured the host can read the
-        // termination log directly.  shared_fs == None means no shared
-        // filesystem (the "none" config value is normalised to None by
-        // SharedFsInfo::adjust_config).
-        if shared_fs.is_some() {
-            return;
-        }
-
         let annotations = self.spec.annotations().clone().unwrap_or_default();
         let policy = annotations.get("io.kubernetes.container.terminationMessagePolicy");
         if policy.map(|p| p.as_str()) != Some("File") {

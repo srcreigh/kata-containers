@@ -20,19 +20,16 @@ pub mod network;
 pub mod resource_persist;
 use hypervisor::{BlockConfigModern, HybridVsockConfig};
 use network::NetworkConfig;
+mod guest_paths;
 pub mod rootfs;
-pub mod share_fs;
 pub mod volume;
 pub use manager::ResourceManager;
 pub mod coco_data;
 pub mod cpu_mem;
 
-use kata_types::config::hypervisor::SharedFsInfo;
-
 #[derive(Debug)]
 pub enum ResourceConfig {
     Network(NetworkConfig),
-    ShareFs(SharedFsInfo),
     VmRootfs(BlockConfigModern),
     GuestExtensionImage(BlockConfigModern),
     HybridVsock(HybridVsockConfig),

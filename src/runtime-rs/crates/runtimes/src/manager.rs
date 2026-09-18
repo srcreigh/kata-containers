@@ -43,7 +43,7 @@ use persist::sandbox_persist::Persist;
 use protobuf::Message as ProtobufMessage;
 use resource::{
     cpu_mem::initial_size::InitialSizeManager,
-    network::{dan_config_path, generate_netns_name},
+    network::{generate_netns_name, reject_dan},
 };
 use runtime_spec as spec;
 use shim_interface::shim_mgmt::ERR_NO_SHIM_SERVER;
@@ -238,9 +238,9 @@ impl RuntimeHandlerManagerInner {
 
         update_component_log_level(&config);
 
-        let dan_path = dan_config_path(&config, &self.id);
+        reject_dan(&config, &self.id)?;
         // set netns to None if we want no network for the VM
-        if config.runtime.disable_new_netns || dan_path.exists() {
+        if config.runtime.disable_new_netns {
             sandbox_config.network_env.netns = None;
         }
 

@@ -5,16 +5,14 @@
 //
 
 use std::{
-    fs,
     fs::OpenOptions,
     os::unix::{fs::OpenOptionsExt, io::AsRawFd},
     path::{Path, PathBuf},
 };
 
 use crate::{
-    block_device::agent_storage_source_from_block_config,
-    share_fs::{do_get_guest_path, do_get_host_path},
-    volume::share_fs_volume::generate_mount_path,
+    block_device::agent_storage_source_from_block_config, guest_paths::do_get_guest_path,
+    volume::copy_volume::generate_mount_path,
 };
 use anyhow::{anyhow, Context, Result};
 use kata_sys_util::mount::{get_mount_options, get_mount_path};
@@ -101,22 +99,11 @@ pub fn get_file_name<P: AsRef<Path>>(src: P) -> Result<String> {
 pub(crate) async fn generate_shared_path(
     dest: PathBuf,
     device_id: &str,
-    sid: &str,
+    _sid: &str,
 ) -> Result<String> {
     let file_name = get_file_name(&dest).context("failed to get file name.")?;
     let mount_name = generate_mount_path(device_id, file_name.as_str());
-    let guest_path = do_get_guest_path(&mount_name, device_id, true, false);
-    // Note: directories should always be created under the rw/ path. The ro/ directory is a
-    // read-only bind mount of rw/, so creating directories directly under ro/ would fail with a read-only FS.
-    let host_path = do_get_host_path(&mount_name, sid, device_id, true, false);
-
-    if get_mount_path(&Some(dest)).starts_with("/dev") {
-        fs::File::create(&host_path).context(format!("failed to create file {:?}", &host_path))?;
-    } else {
-        std::fs::create_dir_all(&host_path)
-            .map_err(|e| anyhow!("failed to create dir {}: {:?}", host_path, e))?;
-    }
-
+    let guest_path = do_get_guest_path(&mount_name, device_id, true);
     Ok(guest_path)
 }
 
@@ -202,8 +189,6 @@ pub async fn handle_block_volume(
 mod tests {
     use super::*;
 
-    const GENERATE_SHARED_PATH_TEST_ENV: &str = "KATA_TEST_GENERATE_SHARED_PATH";
-
     #[test]
     fn test_build_bind_mount_options_merges_volume_options() {
         let volume_options = vec!["ro".to_string(), "nosuid".to_string()];
@@ -241,46 +226,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_generate_shared_path_read_only() {
-        if std::env::var_os(GENERATE_SHARED_PATH_TEST_ENV).is_some() {
-            kata_types::rootless::set_rootless(true);
-
-            let sid = "test-sandbox";
-            let device_id = "test-device";
-            let host_rw_path = crate::share_fs::get_host_rw_shared_path(sid);
-            let host_shared_path = host_rw_path.parent().unwrap();
-            let host_ro_path = host_shared_path.join("ro");
-            fs::create_dir_all(host_shared_path).unwrap();
-
-            // A file makes a write through ro fail even when running as root.
-            fs::write(&host_ro_path, b"must not be modified").unwrap();
-
-            let guest_path =
-                generate_shared_path(PathBuf::from("/mnt/test-volume"), device_id, sid)
-                    .await
-                    .unwrap();
-            let mount_name = Path::new(&guest_path).file_name().unwrap();
-
-            assert!(host_rw_path.join("passthrough").join(mount_name).is_dir());
-            assert!(host_ro_path.is_file());
-            return;
+    async fn block_mount_path_is_guest_local() {
+        for dest in ["/mnt/test-volume", "/dev/test-block"] {
+            let path = generate_shared_path(PathBuf::from(dest), "device", "sandbox")
+                .await
+                .unwrap();
+            assert!(path.starts_with("/run/kata-containers/shared/containers/passthrough/device-"));
+            assert!(path.ends_with(Path::new(dest).file_name().unwrap().to_str().unwrap()));
         }
-
-        // Rootless state is process-global, so isolate it from parallel tests.
-        let temp_dir = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("test_generate_shared_path_read_only")
-            .arg("--test-threads=1")
-            .env(GENERATE_SHARED_PATH_TEST_ENV, "1")
-            .env("XDG_RUNTIME_DIR", temp_dir.path())
-            .output()
-            .unwrap();
-
-        assert!(
-            output.status.success(),
-            "isolated shared-path test failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 }

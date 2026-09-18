@@ -6,9 +6,7 @@
 
 use std::sync::Arc;
 
-mod dan;
 mod endpoint;
-pub use dan::{dan_config_path, Dan, DanNetworkConfig};
 pub use endpoint::endpoint_persist::EndpointState;
 pub use endpoint::Endpoint;
 mod network_entity;
@@ -33,7 +31,6 @@ use hypervisor::{device::device_manager::DeviceManager, Hypervisor};
 #[derive(Debug)]
 pub enum NetworkConfig {
     NetNs(NetworkWithNetNsConfig),
-    Dan(DanNetworkConfig),
 }
 
 #[async_trait]
@@ -61,10 +58,32 @@ pub async fn new(
                 .await
                 .context("new network with netns")?,
         )),
-        NetworkConfig::Dan(c) => Ok(Arc::new(
-            Dan::new(c, d)
-                .await
-                .context("New directly attachable network")?,
-        )),
+    }
+}
+
+/// DAN bypasses the supported tcfilter namespace setup. Reject its configuration
+/// before parsing it, opening device sockets, or configuring a host interface.
+pub fn reject_dan(config: &kata_types::config::TomlConfig, sid: &str) -> Result<()> {
+    let path = std::path::Path::new(&config.runtime.dan_conf).join(format!("{sid}.json"));
+    anyhow::ensure!(
+        !path.try_exists()?,
+        "kata-fc: directly attachable networking is unsupported"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod minimal_tests {
+    #[test]
+    fn rejects_dan_before_parsing_or_network_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = kata_types::config::TomlConfig::default();
+        config.runtime.dan_conf = dir.path().display().to_string();
+        super::reject_dan(&config, "sandbox").unwrap();
+        std::fs::write(dir.path().join("sandbox.json"), "invalid json").unwrap();
+        assert!(super::reject_dan(&config, "sandbox")
+            .unwrap_err()
+            .to_string()
+            .contains("directly attachable networking is unsupported"));
     }
 }

@@ -11,7 +11,7 @@ use crate::firecracker::{
 };
 use crate::VmmState;
 use crate::{device::DeviceType, HybridVsockConfig};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::json;
 
 impl FcInner {
@@ -40,7 +40,6 @@ impl FcInner {
             DeviceType::HybridVsock(hvsock) => {
                 self.add_hvsock(&hvsock.config).await.context("add vsock")
             }
-            _ => Err(anyhow!("unhandled device: {:?}", device)),
         }
     }
 
@@ -55,11 +54,6 @@ impl FcInner {
 
     pub(crate) async fn remove_device(&mut self, device: DeviceType) -> Result<()> {
         info!(sl(), "Remove Device {} ", device);
-        Ok(())
-    }
-
-    pub(crate) async fn update_device(&mut self, device: DeviceType) -> Result<()> {
-        info!(sl(), "update device {:?}", &device);
         Ok(())
     }
 

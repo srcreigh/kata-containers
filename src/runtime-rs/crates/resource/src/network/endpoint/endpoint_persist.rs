@@ -36,18 +36,11 @@ pub struct TapEndpointState {
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
-pub struct VhostUserEndpointState {
-    pub if_name: String,
-    pub socket_path: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct EndpointState {
     pub veth_endpoint: Option<VethEndpointState>,
     pub ipvlan_endpoint: Option<IpVlanEndpointState>,
     pub macvlan_endpoint: Option<MacvlanEndpointState>,
     pub vlan_endpoint: Option<VlanEndpointState>,
     pub tap_endpoint: Option<TapEndpointState>,
-    pub vhost_user_endpoint: Option<VhostUserEndpointState>,
     // TODO : other endpoint
 }

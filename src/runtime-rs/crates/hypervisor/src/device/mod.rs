@@ -9,12 +9,10 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::device::driver::vhost_user_blk::VhostUserBlkDevice;
 use crate::device::driver::virtio_blk_modern::BlockDeviceModern;
 use crate::{
     BlockConfigModern, HybridVsockConfig, HybridVsockDevice, Hypervisor as hypervisor,
-    NetworkConfig, NetworkDevice, ShareFsConfig, ShareFsDevice, VhostUserConfig,
-    VhostUserNetDevice,
+    NetworkConfig, NetworkDevice,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -29,19 +27,13 @@ pub mod util;
 #[derive(Debug)]
 pub enum DeviceConfig {
     BlockCfgModern(BlockConfigModern),
-    VhostUserBlkCfg(VhostUserConfig),
     NetworkCfg(NetworkConfig),
-    VhostUserNetworkCfg(VhostUserConfig),
-    ShareFsCfg(ShareFsConfig),
     HybridVsockCfg(HybridVsockConfig),
 }
 
 #[derive(Debug, Clone)]
 pub enum DeviceType {
-    VhostUserBlk(VhostUserBlkDevice),
     Network(NetworkDevice),
-    VhostUserNetwork(VhostUserNetDevice),
-    ShareFs(ShareFsDevice),
     HybridVsock(HybridVsockDevice),
     BlockModern(Arc<Mutex<BlockDeviceModern>>),
 }
@@ -58,8 +50,6 @@ pub trait Device: std::fmt::Debug + Send + Sync {
     async fn attach(&mut self, h: &dyn hypervisor) -> Result<()>;
     // detach is to unplug device from VM
     async fn detach(&mut self, h: &dyn hypervisor) -> Result<Option<u64>>;
-    // update is to do update for some device
-    async fn update(&mut self, h: &dyn hypervisor) -> Result<()>;
     // get_device_info returns device config
     async fn get_device_info(&self) -> DeviceType;
     // increase_attach_count is used to increase the attach count for a device

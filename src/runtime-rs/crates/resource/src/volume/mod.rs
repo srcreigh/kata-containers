@@ -6,22 +6,22 @@
 
 pub(crate) mod block_emptydir_volume;
 mod block_volume;
+mod copy_volume;
 mod default_volume;
 mod ephemeral_volume;
 pub mod hugepage;
 mod local_volume;
-mod share_fs_volume;
 mod shm_volume;
 pub mod utils;
 
 pub mod direct_volume;
-use crate::volume::{direct_volume::is_direct_volume, share_fs_volume::VolumeManager};
+use crate::volume::{copy_volume::VolumeManager, direct_volume::is_direct_volume};
 pub mod direct_volumes;
 
 use std::{sync::Arc, vec::Vec};
 
 use self::hugepage::{get_huge_page_limits_map, get_huge_page_option};
-use crate::{share_fs::ShareFs, volume::block_volume::is_block_volume};
+use crate::volume::block_volume::is_block_volume;
 use agent::Agent;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -33,7 +33,6 @@ use tokio::sync::RwLock;
 const BIND: &str = "bind";
 
 pub struct VolumeContext<'a> {
-    pub share_fs: &'a Option<Arc<dyn ShareFs>>,
     pub d: &'a RwLock<DeviceManager>,
     pub sid: &'a str,
     pub agent: Arc<dyn Agent>,
@@ -61,7 +60,7 @@ pub struct VolumeResource {
     inner: Arc<RwLock<VolumeResourceInner>>,
     // The core purpose of introducing `volume_manager` to `VolumeResource` is to centralize the management of shared file system volumes.
     // By creating a single VolumeManager instance within VolumeResource, all shared file volumes are managed by one central entity.
-    // This single volume_manager can accurately track the references of all ShareFsVolume instances to the shared volumes,
+    // This single volume_manager can accurately track the references of all CopyVolume instances to the shared volumes,
     // ensuring correct reference counting, proper volume lifecycle management, and preventing issues like volumes being overwritten.
     volume_manager: Arc<VolumeManager>,
 }
@@ -80,7 +79,6 @@ impl VolumeResource {
         cid: &str,
         spec: &oci::Spec,
     ) -> Result<Vec<Arc<dyn Volume>>> {
-        let share_fs = ctx.share_fs;
         let d = ctx.d;
         let sid = ctx.sid;
         let emptydir_mode = ctx.emptydir_mode;
@@ -155,18 +153,16 @@ impl VolumeResource {
                     hugepage::Hugepage::new(m, hugepage_limits, options)
                         .with_context(|| format!("handle hugepages {m:?}"))?,
                 )
-            } else if share_fs_volume::is_share_fs_volume(m) {
+            } else if copy_volume::is_copy_volume(m) {
                 Arc::new(
-                    share_fs_volume::ShareFsVolume::new(
-                        share_fs,
+                    copy_volume::CopyVolume::new(
                         m,
                         cid,
-                        read_only,
                         ctx.agent.clone(),
                         self.volume_manager.clone(),
                     )
                     .await
-                    .with_context(|| format!("new share fs volume {m:?}"))?,
+                    .with_context(|| format!("new copied volume {m:?}"))?,
                 )
             } else if is_skip_volume(m) {
                 info!(sl!(), "skip volume {:?}", m);

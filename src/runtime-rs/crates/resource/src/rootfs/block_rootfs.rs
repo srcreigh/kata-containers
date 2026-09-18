@@ -5,10 +5,7 @@
 //
 
 use super::{Rootfs, ROOTFS};
-use crate::{
-    block_device::agent_storage_source_from_block_config,
-    share_fs::{do_get_guest_path, do_get_host_path},
-};
+use crate::{block_device::agent_storage_source_from_block_config, guest_paths::do_get_guest_path};
 use agent::Storage;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -24,7 +21,6 @@ use kata_types::fs::VM_ROOTFS_FILESYSTEM_XFS;
 use kata_types::mount::Mount;
 use nix::sys::stat::{self, SFlag};
 use oci_spec::runtime as oci;
-use std::fs;
 use tokio::sync::RwLock;
 
 const BLOCKFILE_ROOTFS_FLAG: &str = "loop";
@@ -39,18 +35,12 @@ pub(crate) struct BlockRootfs {
 impl BlockRootfs {
     pub async fn new(
         d: &RwLock<DeviceManager>,
-        sid: &str,
+        _sid: &str,
         cid: &str,
         dev_id: u64,
         rootfs: &Mount,
     ) -> Result<Self> {
-        let container_path = do_get_guest_path(ROOTFS, cid, false, false);
-        let host_path = do_get_host_path(ROOTFS, sid, cid, false, false);
-        // Create rootfs dir on host to make sure mount point in guest exists, as readonly dir is
-        // shared to guest via virtiofs, and guest is unable to create rootfs dir.
-        fs::create_dir_all(&host_path)
-            .map_err(|e| anyhow!("failed to create rootfs dir {}: {:?}", host_path, e))?;
-
+        let container_path = do_get_guest_path(ROOTFS, cid, false);
         let blkdev_info = get_block_device_info(d).await;
         let block_driver = blkdev_info.block_device_driver.clone();
         let block_device_config = &mut BlockConfigModern {

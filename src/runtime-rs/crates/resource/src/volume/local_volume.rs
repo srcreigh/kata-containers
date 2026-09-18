@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::share_fs::{kata_guest_share_dir, PASSTHROUGH_FS_DIR};
+use crate::guest_paths::{kata_guest_share_dir, PASSTHROUGH_FS_DIR};
 
 use super::Volume;
 use anyhow::{anyhow, Context, Result};

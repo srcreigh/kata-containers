@@ -8,14 +8,13 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Context, Result};
 use kata_sys_util::rand::RandomBytes;
-use kata_types::config::hypervisor::{BlockDeviceInfo, SharedFsInfo, VIRTIO_SCSI};
+use kata_types::config::hypervisor::{BlockDeviceInfo, VIRTIO_SCSI};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    vhost_user_blk::VhostUserBlkDevice, BlockConfigModern, BlockDeviceModernHandle,
-    HybridVsockDevice, Hypervisor, NetworkDevice, VhostUserConfig, KATA_BLK_DEV_TYPE,
-    KATA_CCW_DEV_TYPE, KATA_MMIO_BLK_DEV_TYPE, KATA_NVDIMM_DEV_TYPE, KATA_SCSI_DEV_TYPE,
-    VIRTIO_BLOCK_CCW, VIRTIO_BLOCK_MMIO, VIRTIO_BLOCK_PCI, VIRTIO_PMEM,
+    BlockConfigModern, BlockDeviceModernHandle, HybridVsockDevice, Hypervisor, NetworkDevice,
+    KATA_BLK_DEV_TYPE, KATA_CCW_DEV_TYPE, KATA_MMIO_BLK_DEV_TYPE, KATA_NVDIMM_DEV_TYPE,
+    KATA_SCSI_DEV_TYPE, VIRTIO_BLOCK_CCW, VIRTIO_BLOCK_MMIO, VIRTIO_BLOCK_PCI, VIRTIO_PMEM,
 };
 
 use super::{
@@ -110,10 +109,6 @@ impl DeviceManager {
         self.hypervisor.hypervisor_config().await.blockdev_info
     }
 
-    async fn get_shared_fs_info(&self) -> SharedFsInfo {
-        self.hypervisor.hypervisor_config().await.shared_fs
-    }
-
     async fn try_add_device(&mut self, device_id: &str) -> Result<()> {
         // find the device
         let device = self
@@ -127,10 +122,6 @@ impl DeviceManager {
         // handle attach error
         if let Err(e) = result {
             match device_guard.get_device_info().await {
-                DeviceType::VhostUserBlk(device) => {
-                    self.shared_info
-                        .release_device_index(device.config.index, false);
-                }
                 DeviceType::BlockModern(device) => {
                     let (index, is_pmem) = {
                         let cfg = &device.lock().await.config;
@@ -201,26 +192,12 @@ impl DeviceManager {
     async fn find_device(&self, host_path: String) -> Option<String> {
         for (device_id, dev) in &self.devices {
             match dev.lock().await.get_device_info().await {
-                DeviceType::VhostUserBlk(device) => {
-                    if device.config.socket_path == host_path {
-                        return Some(device_id.to_string());
-                    }
-                }
                 DeviceType::Network(device) => {
                     if device.config.host_dev_name == host_path {
                         return Some(device_id.to_string());
                     }
                 }
-                DeviceType::ShareFs(device) => {
-                    if device.config.host_shared_path == host_path {
-                        return Some(device_id.to_string());
-                    }
-                }
-                DeviceType::VhostUserNetwork(device) => {
-                    if device.config.socket_path == host_path {
-                        return Some(device_id.to_string());
-                    }
-                }
+
                 DeviceType::BlockModern(device) => {
                     if device.lock().await.config.path_on_host == host_path {
                         return Some(device_id.to_string());
@@ -263,6 +240,12 @@ impl DeviceManager {
         let device_id = self.new_device_id()?;
         let dev: ArcMutexDevice = match device_config {
             DeviceConfig::BlockCfgModern(config) => {
+                anyhow::ensure!(
+                    config.driver_option == VIRTIO_BLOCK_MMIO,
+                    "kata-fc-minimal: unsupported block transport {}",
+                    config.driver_option
+                );
+
                 if let Some(device_matched_id) = self.find_device(config.path_on_host.clone()).await
                 {
                     return Ok(device_matched_id);
@@ -294,51 +277,12 @@ impl DeviceManager {
                 // No need to do find device for hybrid vsock device.
                 Arc::new(Mutex::new(HybridVsockDevice::new(&device_id, hvconfig)))
             }
-
-            _ => anyhow::bail!("kata-fc-minimal: unsupported device configuration"),
         };
 
         // register device to devices
         self.devices.insert(device_id.clone(), dev.clone());
 
         Ok(device_id)
-    }
-
-    async fn create_vhost_blk_device(
-        &mut self,
-        config: &VhostUserConfig,
-        device_id: String,
-    ) -> Result<ArcMutexDevice> {
-        // TODO virtio-scsi
-        let mut vhu_blk_config = config.clone();
-
-        match vhu_blk_config.driver_option.as_str() {
-            // convert the block driver to kata type
-            VIRTIO_BLOCK_MMIO => {
-                vhu_blk_config.driver_option = KATA_MMIO_BLK_DEV_TYPE.to_string();
-            }
-            VIRTIO_BLOCK_PCI => {
-                vhu_blk_config.driver_option = KATA_BLK_DEV_TYPE.to_string();
-            }
-            _ => {
-                return Err(anyhow!(
-                    "unsupported driver type {}",
-                    vhu_blk_config.driver_option
-                ));
-            }
-        };
-
-        // generate block device index and virt path
-        // safe here, Block device always has virt_path.
-        if let Some(virt_path) = self.get_dev_virt_path(DEVICE_TYPE_BLOCK, false)? {
-            vhu_blk_config.index = virt_path.0;
-            vhu_blk_config.virt_path = virt_path.1;
-        }
-
-        Ok(Arc::new(Mutex::new(VhostUserBlkDevice::new(
-            device_id,
-            vhu_blk_config,
-        ))))
     }
 
     async fn create_block_device_modern(
@@ -406,62 +350,6 @@ impl DeviceManager {
 
         Err(anyhow!("ID are exhausted"))
     }
-
-    async fn try_update_device(&mut self, updated_config: &DeviceConfig) -> Result<()> {
-        let device_id = match updated_config {
-            DeviceConfig::ShareFsCfg(config) => {
-                // Try to find the sharefs device.
-                // If found, just return the matched device id, otherwise return an error.
-                if let Some(device_id_matched) =
-                    self.find_device(config.host_shared_path.clone()).await
-                {
-                    device_id_matched
-                } else {
-                    return Err(anyhow!(
-                        "no matching device was found to do the update operation"
-                    ));
-                }
-            }
-            // TODO for other Device Type
-            _ => {
-                return Err(anyhow!("update device with unsupported device type"));
-            }
-        };
-
-        // get the original device
-        let target_device = self
-            .get_device_info(&device_id)
-            .await
-            .context("get device failed")?;
-
-        // update device with the updated configuration.
-        let updated_device: ArcMutexDevice = match target_device {
-            DeviceType::ShareFs(mut device) => {
-                if let DeviceConfig::ShareFsCfg(config) = updated_config {
-                    // update the mount_config.
-                    device.config.mount_config = config.mount_config.clone();
-                }
-                Arc::new(Mutex::new(device))
-            }
-            _ => return Err(anyhow!("update unsupported device type")),
-        };
-
-        // do handle update
-        if let Err(e) = updated_device
-            .lock()
-            .await
-            .update(self.hypervisor.as_ref())
-            .await
-        {
-            debug!(sl!(), "update device with device id: {:?}", &device_id);
-            return Err(e);
-        }
-
-        // Finally, we update the Map in Device Manager
-        self.devices.insert(device_id, updated_device);
-
-        Ok(())
-    }
 }
 
 // Many scenarios have similar steps when adding devices. so to reduce duplicated code,
@@ -497,25 +385,8 @@ pub async fn do_handle_device(
     Ok(device_info)
 }
 
-pub async fn do_update_device(
-    d: &RwLock<DeviceManager>,
-    updated_config: &DeviceConfig,
-) -> Result<()> {
-    d.write()
-        .await
-        .try_update_device(updated_config)
-        .await
-        .context("failed to update device")?;
-
-    Ok(())
-}
-
 pub async fn get_block_device_info(d: &RwLock<DeviceManager>) -> BlockDeviceInfo {
     d.read().await.get_block_device_info().await
-}
-
-pub async fn get_shared_fs_info(d: &RwLock<DeviceManager>) -> SharedFsInfo {
-    d.read().await.get_shared_fs_info().await
 }
 
 #[cfg(test)]
@@ -574,20 +445,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_devices_do_not_enter_manager() {
+    async fn unsupported_transports_do_not_enter_manager() {
         let dm = new_device_manager().await.unwrap();
         let mut dm = dm.write().await;
-        for config in [
-            DeviceConfig::ShareFsCfg(Default::default()),
-            DeviceConfig::VhostUserBlkCfg(Default::default()),
-            DeviceConfig::VhostUserNetworkCfg(Default::default()),
+        for driver in [
+            "virtio-blk-pci",
+            "virtio-blk-ccw",
+            "virtio-scsi",
+            "virtio-pmem",
         ] {
+            let config = DeviceConfig::BlockCfgModern(BlockConfigModern {
+                driver_option: driver.into(),
+                path_on_host: "/dev/unsupported".into(),
+                ..Default::default()
+            });
             assert!(dm
                 .new_device(&config)
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("unsupported device configuration"));
+                .contains("unsupported block transport"));
             assert!(dm.devices.is_empty());
             assert_eq!(dm.shared_info.block_index, 0);
         }

@@ -16,7 +16,6 @@ use std::{collections::HashMap, sync::Arc, vec::Vec};
 use tokio::sync::RwLock;
 
 use self::block_rootfs::is_block_rootfs;
-use crate::share_fs::{NydusShareFs, ShareFs};
 use oci_spec::runtime as oci;
 
 const ROOTFS: &str = "rootfs";
@@ -55,8 +54,6 @@ impl RootFsResource {
     #[allow(clippy::too_many_arguments)]
     pub async fn handler_rootfs(
         &self,
-        _share_fs: &Option<Arc<dyn ShareFs>>,
-        _nydus_share_fs: &Option<Arc<dyn NydusShareFs>>,
         device_manager: &RwLock<DeviceManager>,
         _h: &dyn Hypervisor,
         sid: &str,

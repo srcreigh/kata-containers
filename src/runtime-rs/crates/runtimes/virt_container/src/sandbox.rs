@@ -42,7 +42,7 @@ use oci_spec::runtime as oci;
 use persist::{self, sandbox_persist::Persist};
 use protobuf::SpecialFields;
 use resource::manager::ManagerArgs;
-use resource::network::{dan_config_path, DanNetworkConfig, NetworkConfig, NetworkWithNetNsConfig};
+use resource::network::{NetworkConfig, NetworkWithNetNsConfig};
 use resource::{ResourceConfig, ResourceManager};
 use runtime_spec as spec;
 use std::sync::Arc;
@@ -202,6 +202,8 @@ impl VirtSandbox {
         id: &str,
         sandbox_config: &SandboxConfig,
     ) -> Result<Vec<ResourceConfig>> {
+        let config = self.resource_manager.config().await;
+        resource::network::reject_dan(&config, &self.sid)?;
         let mut resource_configs = vec![];
 
         info!(sl!(), "prepare vm socket config for sandbox.");
@@ -217,12 +219,6 @@ impl VirtSandbox {
             if let Some(network_resource) = self.prepare_network_resource(&network_env).await {
                 resource_configs.push(network_resource);
             }
-        }
-
-        // prepare sharefs device config
-        let shared_fs = self.hypervisor.hypervisor_config().await.shared_fs;
-        if shared_fs.shared_fs.is_some() {
-            resource_configs.push(ResourceConfig::ShareFs(shared_fs));
         }
 
         // prepare VM rootfs device config
@@ -243,22 +239,7 @@ impl VirtSandbox {
         network_env: &SandboxNetworkEnv,
     ) -> Option<ResourceConfig> {
         let config = self.resource_manager.config().await;
-        let dan_path = dan_config_path(&config, &self.sid);
-
-        // Network priority: DAN > NetNS
-        if dan_path.exists() {
-            Some(ResourceConfig::Network(NetworkConfig::Dan(
-                DanNetworkConfig {
-                    dan_conf_path: dan_path,
-                    network_queues: self
-                        .hypervisor
-                        .hypervisor_config()
-                        .await
-                        .network_info
-                        .network_queues as usize,
-                },
-            )))
-        } else if let Some(netns_path) = network_env.netns.as_ref() {
+        if let Some(netns_path) = network_env.netns.as_ref() {
             Some(ResourceConfig::Network(NetworkConfig::NetNs(
                 NetworkWithNetNsConfig {
                     network_model: config.runtime.internetworking_model.clone(),
@@ -427,9 +408,7 @@ impl VirtSandbox {
         if toml.runtime.disable_new_netns {
             return None;
         }
-        if dan_config_path(&toml, &self.sid).exists() {
-            return None;
-        }
+
         self.sandbox_config.as_ref()?;
 
         let vmm_pid = match self.hypervisor.get_vmm_master_tid().await {
@@ -550,7 +529,6 @@ impl Sandbox for VirtSandbox {
         if self.has_prestart_hooks(&prestart_hooks, &create_runtime_hooks)
             && !defer_network
             && !config.runtime.disable_new_netns
-            && !dan_config_path(&config, &self.sid).exists()
         {
             if let Some(netns_path) = &sandbox_config.network_env.netns {
                 let network_resource = NetworkConfig::NetNs(NetworkWithNetNsConfig {

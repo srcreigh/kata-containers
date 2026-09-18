@@ -11,7 +11,7 @@ use std::{
 };
 
 use super::{Volume, BIND};
-use crate::share_fs::ephemeral_path;
+use crate::guest_paths::ephemeral_path;
 use agent::Storage;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;

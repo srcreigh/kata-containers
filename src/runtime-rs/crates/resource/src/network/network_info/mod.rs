@@ -4,7 +4,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-pub(crate) mod network_info_from_dan;
 pub(crate) mod network_info_from_link;
 
 use agent::{ARPNeighbor, Interface, Route};
