@@ -7,15 +7,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Default)]
-pub struct PhysicalEndpointState {
-    pub bdf: String,
-    pub driver: String,
-    pub vendor_id: String,
-    pub device_id: String,
-    pub hard_addr: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct MacvlanEndpointState {
     pub if_name: String,
     pub network_qos: bool,
@@ -52,7 +43,6 @@ pub struct VhostUserEndpointState {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct EndpointState {
-    pub physical_endpoint: Option<PhysicalEndpointState>,
     pub veth_endpoint: Option<VethEndpointState>,
     pub ipvlan_endpoint: Option<IpVlanEndpointState>,
     pub macvlan_endpoint: Option<MacvlanEndpointState>,

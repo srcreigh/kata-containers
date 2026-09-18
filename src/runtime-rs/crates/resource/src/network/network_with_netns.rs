@@ -23,9 +23,7 @@ use scopeguard::defer;
 use tokio::sync::RwLock;
 
 use super::{
-    endpoint::{
-        Endpoint, IPVlanEndpoint, MacVlanEndpoint, PhysicalEndpoint, VethEndpoint, VlanEndpoint,
-    },
+    endpoint::{Endpoint, IPVlanEndpoint, MacVlanEndpoint, VethEndpoint, VlanEndpoint},
     network_entity::NetworkEntity,
     network_info::network_info_from_link::{handle_addresses, NetworkInfoFromLink},
     utils::link,
@@ -107,17 +105,7 @@ impl Network for NetworkWithNetns {
         let inner = self.inner.read().await;
         let mut interfaces = vec![];
         for e in &inner.entity_list {
-            let mut iface = e.network_info.interface().await.context("interface")?;
-            // For cold-plugged physical (VFIO) endpoints, fill device_path
-            // with the guest PCI path so the agent can do PCI-path-based MAC
-            // reconciliation for IB/RoCE VFs. device_path is empty by default
-            // because network_info_from_link builds the Interface before
-            // attach() runs.
-            if iface.device_path.is_empty() {
-                if let Some(pci_path) = e.endpoint.guest_pci_path().await {
-                    iface.device_path = pci_path;
-                }
-            }
+            let iface = e.network_info.interface().await.context("interface")?;
             interfaces.push(iface);
         }
         Ok(interfaces)
@@ -296,15 +284,10 @@ async fn create_endpoint(
     let attrs = link.attrs();
     let link_type = link.r#type();
     let endpoint: Arc<dyn Endpoint> = if is_physical_iface(&attrs.name)? {
-        info!(
-            sl!(),
-            "physical network interface found: {} {:?}",
-            &attrs.name,
-            nix::unistd::gettid()
-        );
-        let t = PhysicalEndpoint::new(&attrs.name, &attrs.hardware_addr, d)
-            .context("new physical endpoint")?;
-        Arc::new(t)
+        return Err(anyhow!(
+            "kata-fc: physical/VFIO network passthrough is unsupported: {}",
+            attrs.name
+        ));
     } else {
         info!(
             sl!(),
