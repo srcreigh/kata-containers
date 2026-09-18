@@ -4,31 +4,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Context, Result};
 use kata_sys_util::rand::RandomBytes;
-use kata_types::config::hypervisor::{
-    BlockDeviceInfo, SharedFsInfo, TopologyConfigInfo, VIRTIO_SCSI,
-};
+use kata_types::config::hypervisor::{BlockDeviceInfo, SharedFsInfo, VIRTIO_SCSI};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    vfio_device::{VfioDeviceModernHandle, VfioDeviceType},
-    vhost_user_blk::VhostUserBlkDevice,
-    BlockConfigModern, BlockDeviceModernHandle, HybridVsockDevice, Hypervisor, NetworkDevice,
-    PCIePortDevice, ProtectionDevice, ShareFsDevice, VfioDevice, VhostUserConfig,
-    VhostUserNetDevice, VsockDevice, KATA_BLK_DEV_TYPE, KATA_CCW_DEV_TYPE, KATA_MMIO_BLK_DEV_TYPE,
-    KATA_NVDIMM_DEV_TYPE, KATA_SCSI_DEV_TYPE, VIRTIO_BLOCK_CCW, VIRTIO_BLOCK_MMIO,
-    VIRTIO_BLOCK_PCI, VIRTIO_PMEM,
+    vhost_user_blk::VhostUserBlkDevice, BlockConfigModern, BlockDeviceModernHandle,
+    HybridVsockDevice, Hypervisor, NetworkDevice, VhostUserConfig, KATA_BLK_DEV_TYPE,
+    KATA_CCW_DEV_TYPE, KATA_MMIO_BLK_DEV_TYPE, KATA_NVDIMM_DEV_TYPE, KATA_SCSI_DEV_TYPE,
+    VIRTIO_BLOCK_CCW, VIRTIO_BLOCK_MMIO, VIRTIO_BLOCK_PCI, VIRTIO_PMEM,
 };
 
 use super::{
-    topology::PCIeTopology,
     util::{get_host_path, get_virt_drive_name, DEVICE_TYPE_BLOCK},
     Device, DeviceConfig, DeviceType,
 };
@@ -104,25 +94,16 @@ pub struct DeviceManager {
     devices: HashMap<String, ArcMutexDevice>,
     hypervisor: Arc<dyn Hypervisor>,
     shared_info: SharedInfo,
-    pcie_topology: Option<PCIeTopology>,
 }
 
 impl DeviceManager {
-    pub async fn new(
-        hypervisor: Arc<dyn Hypervisor>,
-        topo_config: Option<&TopologyConfigInfo>,
-    ) -> Result<Self> {
+    pub async fn new(hypervisor: Arc<dyn Hypervisor>) -> Result<Self> {
         let devices = HashMap::<String, ArcMutexDevice>::new();
         Ok(DeviceManager {
             devices,
             hypervisor,
             shared_info: SharedInfo::new().await,
-            pcie_topology: PCIeTopology::new(topo_config),
         })
-    }
-
-    pub fn get_pcie_topology(&self) -> Option<PCIeTopology> {
-        self.pcie_topology.clone()
     }
 
     async fn get_block_device_info(&self) -> BlockDeviceInfo {
@@ -142,21 +123,10 @@ impl DeviceManager {
 
         let mut device_guard = device.lock().await;
         // attach device
-        let result = device_guard
-            .attach(&mut self.pcie_topology.as_mut(), self.hypervisor.as_ref())
-            .await;
+        let result = device_guard.attach(self.hypervisor.as_ref()).await;
         // handle attach error
         if let Err(e) = result {
             match device_guard.get_device_info().await {
-                DeviceType::Vfio(device) => {
-                    // safe here:
-                    // Only when vfio dev_type is `b`, virt_path MUST be Some(X),
-                    // and needs do release_device_index. otherwise, let it go.
-                    if device.config.dev_type == DEVICE_TYPE_BLOCK {
-                        self.shared_info
-                            .release_device_index(device.config.virt_path.unwrap().0, false);
-                    }
-                }
                 DeviceType::VhostUserBlk(device) => {
                     self.shared_info
                         .release_device_index(device.config.index, false);
@@ -185,10 +155,7 @@ impl DeviceManager {
     pub async fn try_remove_device(&mut self, device_id: &str) -> Result<()> {
         if let Some(dev) = self.devices.get(device_id) {
             let mut device_guard = dev.lock().await;
-            let result = match device_guard
-                .detach(&mut self.pcie_topology.as_mut(), self.hypervisor.as_ref())
-                .await
-            {
+            let result = match device_guard.detach(self.hypervisor.as_ref()).await {
                 Ok(index) => {
                     if let Some(i) = index {
                         // release the declared device index
@@ -234,11 +201,6 @@ impl DeviceManager {
     async fn find_device(&self, host_path: String) -> Option<String> {
         for (device_id, dev) in &self.devices {
             match dev.lock().await.get_device_info().await {
-                DeviceType::Vfio(device) => {
-                    if device.config.host_path == host_path {
-                        return Some(device_id.to_string());
-                    }
-                }
                 DeviceType::VhostUserBlk(device) => {
                     if device.config.socket_path == host_path {
                         return Some(device_id.to_string());
@@ -259,20 +221,12 @@ impl DeviceManager {
                         return Some(device_id.to_string());
                     }
                 }
-                DeviceType::VfioModern(device) => {
-                    if device.lock().await.config.iommu_group_devnode == Path::new(&host_path) {
-                        return Some(device_id.to_string());
-                    }
-                }
                 DeviceType::BlockModern(device) => {
                     if device.lock().await.config.path_on_host == host_path {
                         return Some(device_id.to_string());
                     }
                 }
-                DeviceType::HybridVsock(_)
-                | DeviceType::Vsock(_)
-                | DeviceType::Protection(_)
-                | DeviceType::PortDevice(_) => {
+                DeviceType::HybridVsock(_) => {
                     continue;
                 }
             }
@@ -564,66 +518,26 @@ pub async fn get_shared_fs_info(d: &RwLock<DeviceManager>) -> SharedFsInfo {
     d.read().await.get_shared_fs_info().await
 }
 
-/// Returns the APQN list for a cold-plugged VFIO-AP device whose
-/// `iommu_group_devnode` matches `host_path`, or `None` if no such device is
-/// registered in the device manager.
-///
-/// Used by `handler_devices` to bypass `do_handle_device` for VFIO-AP devices
-/// that were cold-plugged before VM boot.  VFIO-AP devices have no PCIe BDF so
-/// the BDF-keyed `cold_plug_bdfs` map cannot catch them; this lookup fills that
-/// gap without touching reference counts or the QMP hot-plug path.
-pub async fn find_cold_plugged_vfio_ap(
-    d: &RwLock<DeviceManager>,
-    host_path: &str,
-) -> Option<Vec<String>> {
-    // Avoid holding the DeviceManager read-lock across .await points.
-    let devices: Vec<ArcMutexDevice> = {
-        let dm = d.read().await;
-        dm.devices.values().cloned().collect()
-    };
-    for dev in devices {
-        if let DeviceType::VfioModern(inner) = dev.lock().await.get_device_info().await {
-            let guard = inner.lock().await;
-            if guard.device.device_type == VfioDeviceType::MediatedAp
-                && guard.config.iommu_group_devnode == Path::new(host_path)
-            {
-                return Some(guard.config.ap_devices.clone());
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::DeviceManager;
     use crate::{
         device::{device_manager::get_block_device_info, DeviceConfig, DeviceType},
         firecracker::Firecracker,
-        BlockConfigModern, KATA_BLK_DEV_TYPE,
+        BlockConfigModern, KATA_MMIO_BLK_DEV_TYPE,
     };
-    use anyhow::{anyhow, Context, Result};
-    use kata_types::config::hypervisor::TopologyConfigInfo;
+    use anyhow::{Context, Result};
     use std::sync::Arc;
-    use tests_utils::load_test_config;
     use tokio::sync::RwLock;
 
     async fn new_device_manager() -> Result<Arc<RwLock<DeviceManager>>> {
-        let hypervisor_name: &str = "firecracker";
-        let toml_config = load_test_config(hypervisor_name.to_owned())?;
-        let topo_config = TopologyConfigInfo::new(&toml_config);
-        let hypervisor_config = toml_config
-            .hypervisor
-            .get(hypervisor_name)
-            .ok_or_else(|| anyhow!("failed to get hypervisor for {}", &hypervisor_name))?;
-
+        let mut config = kata_types::config::Hypervisor::default();
+        config.blockdev_info.block_device_driver = "virtio-blk-mmio".into();
         let hypervisor = Firecracker::new();
-        hypervisor
-            .set_hypervisor_config(hypervisor_config.clone())
-            .await;
+        hypervisor.set_hypervisor_config(config).await;
 
         let dm = Arc::new(RwLock::new(
-            DeviceManager::new(Arc::new(hypervisor), topo_config.as_ref())
+            DeviceManager::new(Arc::new(hypervisor))
                 .await
                 .context("device manager")?,
         ));
@@ -653,9 +567,29 @@ mod tests {
         let device_info = devices_info_result.unwrap();
         if let DeviceType::BlockModern(device_lock) = device_info {
             let device = device_lock.lock().await;
-            assert_eq!(device.config.driver_option, KATA_BLK_DEV_TYPE);
+            assert_eq!(device.config.driver_option, KATA_MMIO_BLK_DEV_TYPE);
         } else {
-            assert_eq!(1, 0)
+            panic!("expected an MMIO block device")
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_devices_do_not_enter_manager() {
+        let dm = new_device_manager().await.unwrap();
+        let mut dm = dm.write().await;
+        for config in [
+            DeviceConfig::ShareFsCfg(Default::default()),
+            DeviceConfig::VhostUserBlkCfg(Default::default()),
+            DeviceConfig::VhostUserNetworkCfg(Default::default()),
+        ] {
+            assert!(dm
+                .new_device(&config)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported device configuration"));
+            assert!(dm.devices.is_empty());
+            assert_eq!(dm.shared_info.block_index, 0);
         }
     }
 }

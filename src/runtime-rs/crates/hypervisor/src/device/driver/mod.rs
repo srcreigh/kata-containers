@@ -4,10 +4,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-mod port_device;
-mod protection_device;
-mod vfio;
-pub mod vfio_device;
 mod vhost_user;
 pub mod vhost_user_blk;
 mod vhost_user_net;
@@ -21,15 +17,6 @@ pub use kata_types::device::{
     DRIVER_BLK_PCI_TYPE as KATA_BLK_DEV_TYPE, DRIVER_NVDIMM_TYPE as KATA_NVDIMM_DEV_TYPE,
     DRIVER_SCSI_TYPE as KATA_SCSI_DEV_TYPE,
 };
-pub use port_device::{PCIePortDevice, PortDeviceConfig};
-pub use protection_device::{ProtectionDevice, ProtectionDeviceConfig, SevSnpConfig, TdxConfig};
-pub use vfio::{
-    bind_device_to_host, bind_device_to_vfio, get_vfio_device, HostDevice, VfioBusMode, VfioConfig,
-    VfioDevice, VfioDeviceType,
-};
-pub use vfio_device::{
-    is_vfio_ap_device, VfioDeviceBase, VfioDeviceModern, VfioDeviceModernHandle,
-};
 pub use vhost_user::{VhostUserConfig, VhostUserDevice, VhostUserType};
 pub use vhost_user_net::VhostUserNetDevice;
 pub use virtio_blk_modern::{
@@ -40,6 +27,4 @@ pub use virtio_fs::{
     ShareFsConfig, ShareFsDevice, ShareFsMountConfig, ShareFsMountOperation, ShareFsMountType,
 };
 pub use virtio_net::{Address, NetworkConfig, NetworkDevice};
-pub use virtio_vsock::{
-    HybridVsockConfig, HybridVsockDevice, VsockConfig, VsockDevice, DEFAULT_GUEST_VSOCK_CID,
-};
+pub use virtio_vsock::{HybridVsockConfig, HybridVsockDevice, DEFAULT_GUEST_VSOCK_CID};

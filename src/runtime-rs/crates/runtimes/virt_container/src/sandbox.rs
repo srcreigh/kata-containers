@@ -29,7 +29,6 @@ use containerd_shim_protos::events::task::{TaskExit, TaskOOM};
 use hypervisor::{firecracker::Firecracker, HYPERVISOR_FIRECRACKER};
 use hypervisor::{BlockConfigModern, Hypervisor};
 
-use hypervisor::PortDeviceConfig;
 use hypervisor::{
     utils::{get_hvsock_path, remove_vmm_user_runtime_dir, vmm_user_runtime_dir},
     HybridVsockConfig, DEFAULT_GUEST_VSOCK_CID,
@@ -236,40 +235,7 @@ impl VirtSandbox {
             resource_configs.push(vm_rootfs);
         }
 
-        // prepare pcie port device config
-        if let Some(port_dev_config) = self.prepare_pcie_port_devices().await {
-            resource_configs.push(ResourceConfig::PortDevice(port_dev_config));
-        }
-
         Ok(resource_configs)
-    }
-
-    async fn prepare_pcie_port_devices(&self) -> Option<PortDeviceConfig> {
-        // Fetch the device manager and read the PCIe topology
-        let device_manager = self.resource_manager.get_device_manager().await;
-        let dm = device_manager.read().await;
-
-        // Get the PCIe topology and port information
-        match dm.get_pcie_topology().and_then(|t| t.get_pcie_port()) {
-            Some((port_type, total_ports)) if total_ports > 0 => {
-                info!(
-                    sl!(),
-                    "Preparing PCIe {:?} with {} devices for VM.", port_type, total_ports
-                );
-                Some(PortDeviceConfig::new(port_type, total_ports))
-            }
-            Some((_, 0)) => {
-                info!(sl!(), "No PCIe ports available for VM.");
-                None
-            }
-            _ => {
-                info!(
-                    sl!(),
-                    "Invalid PCIe configuration or no topology available."
-                );
-                None
-            }
-        }
     }
 
     async fn prepare_network_resource(

@@ -9,7 +9,6 @@ mod tests {
     use std::sync::Arc;
 
     use anyhow::{anyhow, Context, Result};
-    use kata_types::config::hypervisor::TopologyConfigInfo;
     use netlink_packet_route::link::MacVlanMode;
     use rtnetlink::{LinkDummy, LinkMacVlan, LinkVeth, LinkVlan};
     use scopeguard::defer;
@@ -32,7 +31,6 @@ mod tests {
     async fn get_device_manager() -> Result<Arc<RwLock<DeviceManager>>> {
         let hypervisor_name: &str = "firecracker";
         let toml_config = load_test_config(hypervisor_name.to_owned())?;
-        let topo_config = TopologyConfigInfo::new(&toml_config);
         let hypervisor_config = toml_config
             .hypervisor
             .get(hypervisor_name)
@@ -44,7 +42,7 @@ mod tests {
             .await;
 
         let dm = Arc::new(RwLock::new(
-            DeviceManager::new(Arc::new(hypervisor), topo_config.as_ref())
+            DeviceManager::new(Arc::new(hypervisor))
                 .await
                 .context("device manager")?,
         ));

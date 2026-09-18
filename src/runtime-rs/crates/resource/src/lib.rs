@@ -18,10 +18,7 @@ pub mod manager;
 mod manager_inner;
 pub mod network;
 pub mod resource_persist;
-use hypervisor::{
-    vfio_device::VfioDeviceBase, BlockConfigModern, HybridVsockConfig, PortDeviceConfig,
-    ProtectionDeviceConfig, VsockConfig,
-};
+use hypervisor::{BlockConfigModern, HybridVsockConfig};
 use network::NetworkConfig;
 pub mod rootfs;
 pub mod share_fs;
@@ -39,10 +36,6 @@ pub enum ResourceConfig {
     VmRootfs(BlockConfigModern),
     GuestExtensionImage(BlockConfigModern),
     HybridVsock(HybridVsockConfig),
-    Vsock(VsockConfig),
-    Protection(ProtectionDeviceConfig),
-    VfioDeviceModern(VfioDeviceBase),
-    PortDevice(PortDeviceConfig),
     InitData(BlockConfigModern),
 }
 

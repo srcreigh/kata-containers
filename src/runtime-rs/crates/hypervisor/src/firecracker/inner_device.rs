@@ -10,7 +10,7 @@ use crate::firecracker::{
     sl,
 };
 use crate::VmmState;
-use crate::{device::DeviceType, HybridVsockConfig, VsockConfig};
+use crate::{device::DeviceType, HybridVsockConfig};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 
@@ -40,7 +40,6 @@ impl FcInner {
             DeviceType::HybridVsock(hvsock) => {
                 self.add_hvsock(&hvsock.config).await.context("add vsock")
             }
-            DeviceType::Vsock(vsock) => self.add_vsock(&vsock.config).await.context("add vsock"),
             _ => Err(anyhow!("unhandled device: {:?}", device)),
         }
     }
@@ -65,25 +64,6 @@ impl FcInner {
     }
 
     pub(crate) async fn add_hvsock(&mut self, config: &HybridVsockConfig) -> Result<()> {
-        let rel_uds_path = match self.jailed {
-            false => [self.vm_path.as_str(), FC_AGENT_SOCKET_NAME].join("/"),
-            true => FC_AGENT_SOCKET_NAME.to_string(),
-        };
-        let body_vsock: String = json!({
-            "vsock_id": String::from(ROOT),
-            "guest_cid": config.guest_cid,
-            "uds_path": rel_uds_path,
-        })
-        .to_string();
-
-        info!(sl(), "HybridVsock configure: {:?}", &body_vsock);
-
-        self.request_with_retry(hyper::Method::PUT, "/vsock", body_vsock)
-            .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn add_vsock(&mut self, config: &VsockConfig) -> Result<()> {
         let rel_uds_path = match self.jailed {
             false => [self.vm_path.as_str(), FC_AGENT_SOCKET_NAME].join("/"),
             true => FC_AGENT_SOCKET_NAME.to_string(),

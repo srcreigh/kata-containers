@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::device::pci_path::PciPath;
-use crate::device::topology::PCIeTopology;
 use crate::device::util::do_decrease_count;
 use crate::device::util::do_increase_count;
 use crate::device::Device;
@@ -224,11 +223,7 @@ impl BlockDeviceModernHandle {
 
 #[async_trait]
 impl Device for BlockDeviceModernHandle {
-    async fn attach(
-        &mut self,
-        _pcie_topo: &mut Option<&mut PCIeTopology>,
-        h: &dyn hypervisor,
-    ) -> Result<()> {
+    async fn attach(&mut self, h: &dyn hypervisor) -> Result<()> {
         // increase attach count, skip attach the device if the device is already attached
         if self
             .increase_attach_count()
@@ -248,11 +243,7 @@ impl Device for BlockDeviceModernHandle {
         Ok(())
     }
 
-    async fn detach(
-        &mut self,
-        _pcie_topo: &mut Option<&mut PCIeTopology>,
-        h: &dyn hypervisor,
-    ) -> Result<Option<u64>> {
+    async fn detach(&mut self, h: &dyn hypervisor) -> Result<Option<u64>> {
         // get the count of device detached, skip detach once it reaches the 0
         if self
             .decrease_attach_count()

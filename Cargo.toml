@@ -87,7 +87,6 @@ virt_container = { path = "src/runtime-rs/crates/runtimes/virt_container" }
 
 # Local dependencies from `src/lib`
 kata-sys-util = { path = "src/libs/kata-sys-util" }
-pcilibs-rs = { git = "https://github.com/kata-containers/pcilibs-rs", rev = "28308229" }
 kata-types = { path = "src/libs/kata-types", features = ["safe-path"] }
 logging = { path = "src/libs/logging" }
 protocols = { path = "src/libs/protocols", features = ["async"] }

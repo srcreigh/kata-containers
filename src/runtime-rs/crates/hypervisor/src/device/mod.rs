@@ -9,27 +9,21 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::device::driver::vfio_device::VfioDeviceModern;
 use crate::device::driver::vhost_user_blk::VhostUserBlkDevice;
 use crate::device::driver::virtio_blk_modern::BlockDeviceModern;
-use crate::vfio_device::VfioDeviceBase;
 use crate::{
     BlockConfigModern, HybridVsockConfig, HybridVsockDevice, Hypervisor as hypervisor,
-    NetworkConfig, NetworkDevice, PCIePortDevice, PortDeviceConfig, ProtectionDevice,
-    ProtectionDeviceConfig, ShareFsConfig, ShareFsDevice, VfioConfig, VfioDevice, VhostUserConfig,
-    VhostUserNetDevice, VsockConfig, VsockDevice,
+    NetworkConfig, NetworkDevice, ShareFsConfig, ShareFsDevice, VhostUserConfig,
+    VhostUserNetDevice,
 };
 use anyhow::Result;
 use async_trait::async_trait;
-
-use self::topology::PCIeTopology;
 
 pub mod device_manager;
 pub mod driver;
 pub mod pci_path;
 mod tap;
 pub use self::tap::{Error as TapError, Tap};
-pub mod topology;
 pub mod util;
 
 #[derive(Debug)]
@@ -39,26 +33,16 @@ pub enum DeviceConfig {
     NetworkCfg(NetworkConfig),
     VhostUserNetworkCfg(VhostUserConfig),
     ShareFsCfg(ShareFsConfig),
-    VfioCfg(VfioConfig),
-    VfioModernCfg(VfioDeviceBase),
-    VsockCfg(VsockConfig),
     HybridVsockCfg(HybridVsockConfig),
-    ProtectionDevCfg(ProtectionDeviceConfig),
-    PortDeviceCfg(PortDeviceConfig),
 }
 
 #[derive(Debug, Clone)]
 pub enum DeviceType {
     VhostUserBlk(VhostUserBlkDevice),
-    Vfio(VfioDevice),
     Network(NetworkDevice),
     VhostUserNetwork(VhostUserNetDevice),
     ShareFs(ShareFsDevice),
     HybridVsock(HybridVsockDevice),
-    Vsock(VsockDevice),
-    Protection(ProtectionDevice),
-    PortDevice(PCIePortDevice),
-    VfioModern(Arc<Mutex<VfioDeviceModern>>),
     BlockModern(Arc<Mutex<BlockDeviceModern>>),
 }
 
@@ -71,17 +55,9 @@ impl fmt::Display for DeviceType {
 #[async_trait]
 pub trait Device: std::fmt::Debug + Send + Sync {
     // attach is to plug device into VM
-    async fn attach(
-        &mut self,
-        pcie_topo: &mut Option<&mut PCIeTopology>,
-        h: &dyn hypervisor,
-    ) -> Result<()>;
+    async fn attach(&mut self, h: &dyn hypervisor) -> Result<()>;
     // detach is to unplug device from VM
-    async fn detach(
-        &mut self,
-        pcie_topo: &mut Option<&mut PCIeTopology>,
-        h: &dyn hypervisor,
-    ) -> Result<Option<u64>>;
+    async fn detach(&mut self, h: &dyn hypervisor) -> Result<Option<u64>>;
     // update is to do update for some device
     async fn update(&mut self, h: &dyn hypervisor) -> Result<()>;
     // get_device_info returns device config
@@ -96,12 +72,4 @@ pub trait Device: std::fmt::Debug + Send + Sync {
     // * false: no need to do real dettach when current attach count is not zero, skip following actions.
     // * err error: error while do decrease attach count
     async fn decrease_attach_count(&mut self) -> Result<bool>;
-}
-
-#[async_trait]
-pub trait PCIeDevice: std::fmt::Debug + Send + Sync {
-    // register pcie device into PCIe Topology for virtio-pci device or PCI/PCIe device.
-    async fn register(&mut self, topology: &mut PCIeTopology) -> Result<()>;
-    // unregister pcie device from PCIe Topology
-    async fn unregister(&mut self, topology: &mut PCIeTopology) -> Result<()>;
 }

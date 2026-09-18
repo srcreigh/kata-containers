@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use crate::device::pci_path::PciPath;
-use crate::device::topology::PCIeTopology;
 use crate::device::{Device, DeviceType};
 use crate::Hypervisor as hypervisor;
 
@@ -74,11 +73,7 @@ impl NetworkDevice {
 
 #[async_trait]
 impl Device for NetworkDevice {
-    async fn attach(
-        &mut self,
-        _pcie_topo: &mut Option<&mut PCIeTopology>,
-        h: &dyn hypervisor,
-    ) -> Result<()> {
+    async fn attach(&mut self, h: &dyn hypervisor) -> Result<()> {
         let updated = h
             .add_device(DeviceType::Network(self.clone()))
             .await
@@ -91,11 +86,7 @@ impl Device for NetworkDevice {
         Ok(())
     }
 
-    async fn detach(
-        &mut self,
-        _pcie_topo: &mut Option<&mut PCIeTopology>,
-        h: &dyn hypervisor,
-    ) -> Result<Option<u64>> {
+    async fn detach(&mut self, h: &dyn hypervisor) -> Result<Option<u64>> {
         h.remove_device(DeviceType::Network(self.clone()))
             .await
             .context("remove network device.")?;

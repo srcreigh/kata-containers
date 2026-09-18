@@ -19,7 +19,7 @@ use hypervisor::{
 };
 use kata_types::mount::{kata_guest_sandbox_dir, Mount, KATA_EPHEMERAL_VOLUME_TYPE, SHM_DIR};
 use kata_types::{
-    config::{hypervisor::TopologyConfigInfo, TomlConfig},
+    config::TomlConfig,
     mount::{adjust_rootfs_mounts, KATA_IMAGE_FORCE_GUEST_PULL},
 };
 use libc::NUD_PERMANENT;
@@ -69,9 +69,8 @@ impl ResourceManagerInner {
         toml_config: Arc<TomlConfig>,
         init_size_manager: InitialSizeManager,
     ) -> Result<Self> {
-        let topo_config = TopologyConfigInfo::new(&toml_config);
         // create device manager
-        let dev_manager = DeviceManager::new(hypervisor.clone(), topo_config.as_ref())
+        let dev_manager = DeviceManager::new(hypervisor.clone())
             .await
             .context("failed to create device manager")?;
         let device_manager = Arc::new(RwLock::new(dev_manager));
@@ -193,33 +192,10 @@ impl ResourceManagerInner {
                         .await
                         .context("do handle hybrid-vsock device failed.")?;
                 }
-                ResourceConfig::Vsock(v) => {
-                    do_handle_device(&self.device_manager, &DeviceConfig::VsockCfg(v))
-                        .await
-                        .context("do handle vsock device failed.")?;
-                }
-                ResourceConfig::Protection(p) => {
-                    do_handle_device(&self.device_manager, &DeviceConfig::ProtectionDevCfg(p))
-                        .await
-                        .context("do handle protection device failed.")?;
-                }
-                ResourceConfig::PortDevice(pd) => {
-                    do_handle_device(
-                        &self.device_manager,
-                        &DeviceConfig::PortDeviceCfg(pd.clone()),
-                    )
-                    .await
-                    .context("do handle port device failed.")?;
-                }
                 ResourceConfig::InitData(id) => {
                     do_handle_device(&self.device_manager, &DeviceConfig::BlockCfgModern(id))
                         .await
                         .context("do handle initdata block device failed.")?;
-                }
-                ResourceConfig::VfioDeviceModern(vfiobase) => {
-                    do_handle_device(&self.device_manager, &DeviceConfig::VfioModernCfg(vfiobase))
-                        .await
-                        .context("do handle vfio device failed.")?;
                 }
             };
         }
@@ -703,11 +679,10 @@ impl Persist for ResourceManagerInner {
             sid: resource_args.sid.clone(),
             config: resource_args.config,
         };
-        let topo_config = TopologyConfigInfo::new(&args.config);
 
         let mem_resource = MemResource::default();
         let device_manager = Arc::new(RwLock::new(
-            DeviceManager::new(resource_args.hypervisor.clone(), topo_config.as_ref()).await?,
+            DeviceManager::new(resource_args.hypervisor.clone()).await?,
         ));
 
         let swap_resource = if resource_args

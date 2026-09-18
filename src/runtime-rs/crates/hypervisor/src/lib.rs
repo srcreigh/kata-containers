@@ -138,15 +138,4 @@ pub trait Hypervisor: std::fmt::Debug + Send + Sync {
     async fn set_capabilities(&self, flag: CapabilityBits);
     async fn set_guest_memory_block_size(&self, size: u32);
     async fn guest_memory_block_size(&self) -> u32;
-
-    /// Resolve the in-guest PCIe path for a cold-plugged physical-endpoint VF
-    /// by querying QMP (query-pci + device search by QEMU device ID).
-    /// Only meaningful after the VM has started and QMP is initialised.
-    /// Default: Err (non-QEMU hypervisors do not support this).
-    async fn resolve_vfio_device_pci_path(&self, hostdev_id: &str) -> Result<PciPath> {
-        Err(anyhow::anyhow!(
-            "resolve_vfio_device_pci_path not supported for this hypervisor (device: {})",
-            hostdev_id
-        ))
-    }
 }
