@@ -40,6 +40,7 @@ impl RawblockVolume {
         read_only: bool,
         sid: &str,
     ) -> Result<Self> {
+        let fs_group = supported_metadata(&mount_info.metadata)?;
         let blkdev_info = get_block_device_info(d).await;
 
         // check volume type
@@ -95,7 +96,7 @@ impl RawblockVolume {
             .await
             .context("do handle device failed.")?;
 
-        let block_volume = handle_block_volume(
+        let mut block_volume = handle_block_volume(
             device_info,
             m,
             read_only,
@@ -105,6 +106,8 @@ impl RawblockVolume {
         )
         .await
         .context("do handle block volume failed")?;
+
+        block_volume.0.fs_group = fs_group;
 
         Ok(Self {
             storage: Some(block_volume.0),
@@ -159,5 +162,65 @@ mod minimal_tests {
         for value in ["", "spdkvol", "spoolvol", "vfiovol", "anything"] {
             assert!(!supported_volume_type(value));
         }
+    }
+}
+
+fn supported_metadata(
+    metadata: &std::collections::HashMap<String, String>,
+) -> Result<Option<agent::FSGroup>> {
+    for (key, value) in metadata {
+        match key.as_str() {
+            "createFilesystem" if value == "false" => (),
+            "fsGroup" | "fsGroupChangePolicy" => (),
+            _ => anyhow::bail!("kata-fc-minimal: unsupported direct-volume metadata {key}={value}"),
+        }
+    }
+    let policy = match metadata.get("fsGroupChangePolicy").map(String::as_str) {
+        None | Some("Always") => agent::FSGroupChangePolicy::Always,
+        Some("OnRootMismatch") => agent::FSGroupChangePolicy::OnRootMismatch,
+        Some(other) => anyhow::bail!("kata-fc-minimal: unsupported fsGroupChangePolicy {other}"),
+    };
+    metadata
+        .get("fsGroup")
+        .map(|value| {
+            Ok(agent::FSGroup {
+                group_id: value
+                    .parse::<u32>()
+                    .context("invalid direct-volume fsGroup")?,
+                group_change_policy: policy,
+            })
+        })
+        .transpose()
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    #[test]
+    fn direct_volume_preserves_workspace_group() {
+        let group = supported_metadata(
+            &[
+                ("createFilesystem".into(), "false".into()),
+                ("fsGroup".into(), "1000".into()),
+                ("fsGroupChangePolicy".into(), "OnRootMismatch".into()),
+            ]
+            .into(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(group.group_id, 1000);
+        assert_eq!(
+            group.group_change_policy,
+            agent::FSGroupChangePolicy::OnRootMismatch
+        );
+        for pair in [
+            ("createFilesystem", "true"),
+            ("fsGroup", "-1"),
+            ("fsGroupChangePolicy", "unknown"),
+            ("unknown", "true"),
+        ] {
+            assert!(supported_metadata(&[(pair.0.into(), pair.1.into())].into()).is_err());
+        }
+        assert!(supported_metadata(&Default::default()).unwrap().is_none());
     }
 }
