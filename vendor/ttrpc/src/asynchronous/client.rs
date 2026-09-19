@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::convert::TryInto;
-#[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,7 +57,6 @@ impl Client {
         Ok(Self::new(socket))
     }
 
-    #[cfg(unix)]
     /// # Safety
     /// The file descriptor must represent a unix socket.
     pub unsafe fn from_raw_unix_socket_fd(fd: RawFd) -> Client {

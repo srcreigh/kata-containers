@@ -11,17 +11,10 @@ option go_package = "github.com/kata-containers/kata-containers/src/runtime/virt
 
 package grpc;
 
+import "google/protobuf/empty.proto";
+
 message CheckRequest {
 	string service = 1;
-}
-
-message HealthCheckResponse {
-	enum ServingStatus {
-		UNKNOWN = 0;
-		SERVING = 1;
-		NOT_SERVING = 2;
-	}
-	ServingStatus status = 1;
 }
 
 message VersionCheckResponse {
@@ -30,6 +23,6 @@ message VersionCheckResponse {
 }
 
 service Health {
-	rpc Check(CheckRequest) returns (HealthCheckResponse);
+	rpc Check(CheckRequest) returns (google.protobuf.Empty);
 	rpc Version(CheckRequest) returns (VersionCheckResponse);
 }

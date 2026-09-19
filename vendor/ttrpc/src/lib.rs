@@ -31,21 +31,21 @@
 //!
 //! - `unix:///run/some.sock`: Normal Unix domain socket.
 //! - `unix://@/run/some.sock`: Abstract Unix domain socket.
-//! - `vsock://vsock://8:1024`: [vsock](https://man7.org/linux/man-pages/man7/vsock.7.html).
+//! - `vsock://8:1024`: [vsock](https://man7.org/linux/man-pages/man7/vsock.7.html).
 //!
-//! For mscOS, ttrpc-rust **only** supports normal Unix domain socket:
-//!
-//! - `unix:///run/some.sock`: Normal Unix domain socket.
-//!
+//! This kata-fc transport supports only x86_64 Linux.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+compile_error!("kata-fc ttrpc supports only x86_64 Linux");
 
 #[macro_use]
 extern crate log;
 
 #[macro_use]
 pub mod error;
-#[macro_use]
+#[cfg(feature = "sync")]
 mod common;
 
 #[macro_use]

@@ -178,16 +178,6 @@ impl FcInner {
             Err(anyhow!("could not get vmm master tid"))
         }
     }
-    pub(crate) async fn get_ns_path(&self) -> Result<String> {
-        debug!(sl(), "Get NS path");
-        if let Some(pid) = self.pid {
-            let ns_path = format!("/proc/{pid}/ns");
-            Ok(ns_path)
-        } else {
-            Err(anyhow!("could not get ns path"))
-        }
-    }
-
     pub(crate) async fn cleanup(&self) -> Result<()> {
         debug!(sl(), "Cleanup");
         self.cleanup_resource();

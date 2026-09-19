@@ -231,76 +231,6 @@ fn sysctl(oci: &Spec) -> Result<()> {
     Ok(())
 }
 
-fn rootless_euid_mapping(oci: &Spec) -> Result<()> {
-    let linux = get_linux(oci)?;
-
-    let default_ns = vec![];
-    if !contain_namespace(linux.namespaces().as_ref().unwrap_or(&default_ns), "user") {
-        return Err(anyhow!("Linux namespace is missing user"));
-    }
-
-    if linux.uid_mappings().is_none() || linux.gid_mappings().is_none() {
-        return Err(anyhow!(
-            "Rootless containers require at least one UID/GID mapping"
-        ));
-    }
-
-    Ok(())
-}
-
-fn has_idmapping(maps: &[LinuxIdMapping], id: u32) -> bool {
-    for map in maps {
-        if id >= map.container_id() && id < map.container_id() + map.size() {
-            return true;
-        }
-    }
-    false
-}
-
-fn rootless_euid_mount(oci: &Spec) -> Result<()> {
-    let linux = get_linux(oci)?;
-
-    let default_mounts = vec![];
-    let oci_mounts = oci.mounts().as_ref().unwrap_or(&default_mounts);
-    for mnt in oci_mounts.iter() {
-        let default_options = vec![];
-        let mnt_options = mnt.options().as_ref().unwrap_or(&default_options);
-        for opt in mnt_options.iter() {
-            if opt.starts_with("uid=") || opt.starts_with("gid=") {
-                let fields: Vec<&str> = opt.split('=').collect();
-
-                if fields.len() != 2 {
-                    return Err(anyhow!("Options has invalid field: {:?}", fields));
-                }
-
-                let id = fields[1]
-                    .trim()
-                    .parse::<u32>()
-                    .context(format!("parse field {}", &fields[1]))?;
-
-                if opt.starts_with("uid=")
-                    && !has_idmapping(linux.uid_mappings().as_ref().unwrap_or(&vec![]), id)
-                {
-                    return Err(anyhow!("uid of {} does not have a valid mapping", id));
-                }
-
-                if opt.starts_with("gid=")
-                    && !has_idmapping(linux.gid_mappings().as_ref().unwrap_or(&vec![]), id)
-                {
-                    return Err(anyhow!("gid of {} does not have a valid mapping", id));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn rootless_euid(oci: &Spec) -> Result<()> {
-    rootless_euid_mapping(oci).context("rootless euid mapping")?;
-    rootless_euid_mount(oci).context("rotless euid mount")?;
-    Ok(())
-}
-
 pub fn validate(conf: &Config) -> Result<()> {
     lazy_static::initialize(&SYSCTLS);
     let oci = conf
@@ -323,10 +253,6 @@ pub fn validate(conf: &Config) -> Result<()> {
     usernamespace(oci).context("usernamespace")?;
     cgroupnamespace(oci).context("cgroupnamespace")?;
     sysctl(oci).context("sysctl")?;
-
-    if conf.rootless_euid {
-        rootless_euid(oci).context("rootless euid")?;
-    }
 
     Ok(())
 }
@@ -498,86 +424,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rootless_euid() {
-        let mut spec = Spec::default();
-
-        // Test case: without linux
-        rootless_euid_mapping(&spec).unwrap_err();
-        rootless_euid_mount(&spec).unwrap_err();
-
-        // Test case: without user namespace
-        let linux = Linux::default();
-        spec.set_linux(Some(linux));
-        rootless_euid_mapping(&spec).unwrap_err();
-
-        // Test case: without user namespace
-        let linux = spec.linux_mut().as_mut().unwrap();
-        let namespaces = vec![
-            LinuxNamespaceBuilder::default()
-                .typ(LinuxNamespaceType::Network)
-                .path("/sys/cgroups/net")
-                .build()
-                .unwrap(),
-            LinuxNamespaceBuilder::default()
-                .typ(LinuxNamespaceType::Uts)
-                .path("/sys/cgroups/uts")
-                .build()
-                .unwrap(),
-        ];
-        linux.set_namespaces(Some(namespaces));
-        rootless_euid_mapping(&spec).unwrap_err();
-
-        let linux = spec.linux_mut().as_mut().unwrap();
-        let namespaces = vec![
-            LinuxNamespaceBuilder::default()
-                .typ(LinuxNamespaceType::Network)
-                .path("/sys/cgroups/net")
-                .build()
-                .unwrap(),
-            LinuxNamespaceBuilder::default()
-                .typ(LinuxNamespaceType::User)
-                .path("/sys/cgroups/user")
-                .build()
-                .unwrap(),
-        ];
-        linux.set_namespaces(Some(namespaces));
-
-        let uidmap = LinuxIdMappingBuilder::default()
-            .container_id(0u32)
-            .host_id(1000u32)
-            .size(1000u32)
-            .build()
-            .unwrap();
-        let gidmap = LinuxIdMappingBuilder::default()
-            .container_id(0u32)
-            .host_id(1000u32)
-            .size(1000u32)
-            .build()
-            .unwrap();
-
-        linux.set_uid_mappings(Some(vec![uidmap]));
-        linux.set_gid_mappings(Some(vec![gidmap]));
-        rootless_euid_mapping(&spec).unwrap();
-
-        let mut oci_mount = oci::Mount::default();
-        oci_mount.set_destination("/app".into());
-        oci_mount.set_typ(Some("tmpfs".to_owned()));
-        oci_mount.set_source(Some("".into()));
-        oci_mount.set_options(Some(vec!["uid=10000".to_owned()]));
-        spec.mounts_mut().as_mut().unwrap().push(oci_mount);
-        rootless_euid_mount(&spec).unwrap_err();
-
-        let mut oci_mount = oci::Mount::default();
-        oci_mount.set_destination("/app".into());
-        oci_mount.set_typ(Some("tmpfs".to_owned()));
-        oci_mount.set_source(Some("".into()));
-        oci_mount.set_options(Some(vec!["uid=500".to_owned(), "gid=500".to_owned()]));
-        spec.set_mounts(Some(vec![oci_mount]));
-
-        rootless_euid(&spec).unwrap();
-    }
-
-    #[test]
     fn test_sysctl() {
         let mut spec = Spec::default();
 
@@ -616,14 +462,8 @@ mod tests {
     fn test_validate() {
         let spec = Spec::default();
         let mut config = Config {
-            cgroup_name: "container1".to_owned(),
-            use_systemd_cgroup: false,
             no_pivot_root: true,
-            no_new_keyring: true,
-            rootless_euid: false,
-            rootless_cgroup: false,
             spec: Some(spec),
-            container_name: "container1".to_owned(),
         };
 
         validate(&config).unwrap_err();

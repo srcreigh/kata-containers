@@ -3,10 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::collections::HashMap;
 use std::fmt::Debug;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::fs;
 use std::ops::Deref;
 use std::path::Path;
 
@@ -26,27 +24,6 @@ pub struct InitMount<'a> {
     src: &'a str,
     dest: &'a str,
     options: Vec<&'a str>,
-}
-
-#[rustfmt::skip]
-lazy_static!{
-    static ref CGROUPS: HashMap<&'static str, &'static str> = {
-        let mut m = HashMap::new();
-        m.insert("cpu", "/sys/fs/cgroup/cpu");
-        m.insert("cpuacct", "/sys/fs/cgroup/cpuacct");
-        m.insert("blkio", "/sys/fs/cgroup/blkio");
-        m.insert("cpuset", "/sys/fs/cgroup/cpuset");
-        m.insert("memory", "/sys/fs/cgroup/memory");
-        m.insert("devices", "/sys/fs/cgroup/devices");
-        m.insert("freezer", "/sys/fs/cgroup/freezer");
-        m.insert("net_cls", "/sys/fs/cgroup/net_cls");
-        m.insert("perf_event", "/sys/fs/cgroup/perf_event");
-        m.insert("net_prio", "/sys/fs/cgroup/net_prio");
-        m.insert("hugetlb", "/sys/fs/cgroup/hugetlb");
-        m.insert("pids", "/sys/fs/cgroup/pids");
-        m.insert("rdma", "/sys/fs/cgroup/rdma");
-        m
-    };
 }
 
 #[rustfmt::skip]
@@ -196,116 +173,16 @@ pub fn get_mount_fs_type_from_file(mount_file: &str, mount_point: &str) -> Resul
 }
 
 #[tracing::instrument(skip_all)]
-pub fn get_cgroup_mounts(
-    logger: &Logger,
-    cg_path: &str,
-    unified_cgroup_hierarchy: bool,
-) -> Result<Vec<InitMount<'static>>> {
-    // cgroup v2
-    // https://github.com/kata-containers/agent/blob/8c9bbadcd448c9a67690fbe11a860aaacc69813c/agent.go#L1249
-    if unified_cgroup_hierarchy {
-        return Ok(vec![InitMount {
+pub fn cgroups_mount(logger: &Logger) -> Result<()> {
+    mount_to_rootfs(
+        logger,
+        &InitMount {
             fstype: "cgroup2",
             src: "cgroup2",
             dest: "/sys/fs/cgroup",
             options: vec!["nosuid", "nodev", "noexec", "relatime", "nsdelegate"],
-        }]);
-    }
-
-    let file = File::open(cg_path)?;
-    let reader = BufReader::new(file);
-
-    let mut has_device_cgroup = false;
-    let mut cg_mounts: Vec<InitMount> = vec![InitMount {
-        fstype: "tmpfs",
-        src: "tmpfs",
-        dest: SYSFS_CGROUPPATH,
-        options: vec!["nosuid", "nodev", "noexec", "mode=755"],
-    }];
-
-    // #subsys_name    hierarchy       num_cgroups     enabled
-    // fields[0]       fields[1]       fields[2]       fields[3]
-    'outer: for line in reader.lines() {
-        let line = line?;
-
-        let fields: Vec<&str> = line.split('\t').collect();
-
-        // Ignore comment header
-        if fields[0].starts_with('#') {
-            continue;
-        }
-
-        // Ignore truncated lines
-        if fields.len() < 4 {
-            continue;
-        }
-
-        // Ignore disabled cgroups
-        if fields[3] == "0" {
-            continue;
-        }
-
-        // Ignore fields containing invalid numerics
-        for f in [fields[1], fields[2], fields[3]].iter() {
-            if f.parse::<u64>().is_err() {
-                continue 'outer;
-            }
-        }
-
-        let subsystem_name = fields[0];
-
-        if subsystem_name.is_empty() {
-            continue;
-        }
-
-        if subsystem_name == "devices" {
-            has_device_cgroup = true;
-        }
-
-        if let Some((key, value)) = CGROUPS.get_key_value(subsystem_name) {
-            cg_mounts.push(InitMount {
-                fstype: "cgroup",
-                src: "cgroup",
-                dest: value,
-                options: vec!["nosuid", "nodev", "noexec", "relatime", key],
-            });
-        }
-    }
-
-    if !has_device_cgroup {
-        warn!(logger, "The system didn't support device cgroup, which is dangerous, thus agent initialized without cgroup support!\n");
-        return Ok(Vec::new());
-    }
-
-    cg_mounts.push(InitMount {
-        fstype: "tmpfs",
-        src: "tmpfs",
-        dest: SYSFS_CGROUPPATH,
-        options: vec!["remount", "ro", "nosuid", "nodev", "noexec", "mode=755"],
-    });
-
-    Ok(cg_mounts)
-}
-
-#[tracing::instrument(skip_all)]
-pub fn cgroups_mount(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result<()> {
-    let logger = logger.new(o!("subsystem" => "mount"));
-
-    let cgroups = get_cgroup_mounts(&logger, PROC_CGROUPS, unified_cgroup_hierarchy)?;
-
-    for cg in cgroups.iter() {
-        mount_to_rootfs(&logger, cg)?;
-    }
-
-    // Enable memory hierarchical account.
-    // For more information see https://www.kernel.org/doc/Documentation/cgroup-v1/memory.txt
-    // cgroupsV2 will automatically enable memory.use_hierarchy.
-    // additinoally this directory layout is not present in cgroupsV2.
-    if !unified_cgroup_hierarchy {
-        fs::write("/sys/fs/cgroup/memory/memory.use_hierarchy", "1")?;
-    }
-
-    Ok(())
+        },
+    )
 }
 
 #[tracing::instrument(skip_all)]
@@ -743,182 +620,6 @@ mod tests {
 
             let error_msg = format!("{}", result.unwrap_err());
             assert!(error_msg.contains(d.error_contains), "{}", msg);
-        }
-    }
-
-    #[test]
-    fn test_get_cgroup_v2_mounts() {
-        let _ = tempdir().expect("failed to create tmpdir");
-        let drain = slog::Discard;
-        let logger = slog::Logger::root(drain, o!());
-        let result = get_cgroup_mounts(&logger, "", true);
-
-        assert!(result.is_ok());
-        let result = result.unwrap();
-        assert_eq!(1, result.len());
-        assert_eq!(result[0].fstype, "cgroup2");
-        assert_eq!(result[0].src, "cgroup2");
-    }
-
-    #[test]
-    fn test_get_cgroup_mounts() {
-        #[derive(Debug)]
-        struct TestData<'a> {
-            // Create file with the specified contents
-            // (even if a nul string is specified).
-            contents: &'a str,
-
-            // If set, assume an error will be generated,
-            // else assume no error.
-            error_contains: &'a str,
-
-            // Set if the devices cgroup is expected to be found
-            devices_cgroup: bool,
-        }
-
-        let dir = tempdir().expect("failed to create tmpdir");
-        let drain = slog::Discard;
-        let logger = slog::Logger::root(drain, o!());
-
-        let first_mount = InitMount {
-            fstype: "tmpfs",
-            src: "tmpfs",
-            dest: SYSFS_CGROUPPATH,
-            options: vec!["nosuid", "nodev", "noexec", "mode=755"],
-        };
-
-        let last_mount = InitMount {
-            fstype: "tmpfs",
-            src: "tmpfs",
-            dest: SYSFS_CGROUPPATH,
-            options: vec!["remount", "ro", "nosuid", "nodev", "noexec", "mode=755"],
-        };
-
-        let cg_devices_mount = InitMount {
-            fstype: "cgroup",
-            src: "cgroup",
-            dest: "/sys/fs/cgroup/devices",
-            options: vec!["nosuid", "nodev", "noexec", "relatime", "devices"],
-        };
-
-        let enoent_file_path = dir.path().join("enoent");
-        let enoent_filename = enoent_file_path
-            .to_str()
-            .expect("failed to create enoent filename");
-
-        let tests = &[
-            TestData {
-                // Empty file
-                contents: "",
-                error_contains: "",
-                devices_cgroup: false,
-            },
-            TestData {
-                // Only a comment line
-                contents: "#subsys_name	hierarchy	num_cgroups	enabled",
-                error_contains: "",
-                devices_cgroup: false,
-            },
-            TestData {
-                // Single (invalid) field
-                contents: "foo",
-                error_contains: "",
-                devices_cgroup: false,
-            },
-            TestData {
-                // Multiple (invalid) fields
-                contents: "this\tis\tinvalid\tdata\n",
-                error_contains: "",
-                devices_cgroup: false,
-            },
-            TestData {
-                // Valid first field, but other fields missing
-                contents: "devices\n",
-                error_contains: "",
-                devices_cgroup: false,
-            },
-            TestData {
-                // Valid first field, but invalid others fields
-                contents: "devices\tinvalid\tinvalid\tinvalid\n",
-                error_contains: "",
-                devices_cgroup: false,
-            },
-            TestData {
-                // Valid first field, but lots of invalid others fields
-                contents: "devices\tinvalid\tinvalid\tinvalid\tinvalid\tinvalid\n",
-                error_contains: "",
-                devices_cgroup: false,
-            },
-            TestData {
-                // Valid, but disabled
-                contents: "devices\t1\t1\t0\n",
-                error_contains: "",
-                devices_cgroup: false,
-            },
-            TestData {
-                // Valid
-                contents: "devices\t1\t1\t1\n",
-                error_contains: "",
-                devices_cgroup: true,
-            },
-        ];
-
-        // First, test a missing file
-        let result = get_cgroup_mounts(&logger, enoent_filename, false);
-
-        assert!(result.is_err());
-        let error_msg = format!("{}", result.unwrap_err());
-        assert!(
-            error_msg.contains("No such file or directory"),
-            "enoent test"
-        );
-
-        for (i, d) in tests.iter().enumerate() {
-            let msg = format!("test[{i}]: {d:?}");
-
-            let file_path = dir.path().join("cgroups");
-            let filename = file_path
-                .to_str()
-                .expect("failed to create cgroup file filename");
-
-            let mut file =
-                File::create(filename).unwrap_or_else(|_| panic!("{}: failed to create file", msg));
-
-            file.write_all(d.contents.as_bytes())
-                .unwrap_or_else(|_| panic!("{}: failed to write file contents", msg));
-
-            let result = get_cgroup_mounts(&logger, filename, false);
-            let msg = format!("{msg}: result: {result:?}");
-
-            if !d.error_contains.is_empty() {
-                assert!(result.is_err(), "{}", msg);
-
-                let error_msg = format!("{}", result.unwrap_err());
-                assert!(error_msg.contains(d.error_contains), "{}", msg);
-                continue;
-            }
-
-            assert!(result.is_ok(), "{}", msg);
-
-            let mounts = result.unwrap();
-            let count = mounts.len();
-
-            if !d.devices_cgroup {
-                assert!(count == 0, "{}", msg);
-                continue;
-            }
-
-            // get_cgroup_mounts() adds the device cgroup plus two other mounts.
-            assert!(count == (1 + 2), "{}", msg);
-
-            // First mount
-            assert!(mounts[0].eq(&first_mount), "{}", msg);
-
-            // Last mount
-            assert!(mounts[2].eq(&last_mount), "{}", msg);
-
-            // Devices cgroup
-            assert!(mounts[1].eq(&cg_devices_mount), "{}", msg);
         }
     }
 

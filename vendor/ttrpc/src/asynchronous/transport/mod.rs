@@ -19,17 +19,8 @@ macro_rules! io_other {
     };
 }
 
-#[cfg(unix)]
 mod unix;
-
-#[cfg(unix)]
-mod tcp;
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
 mod vsock;
-
-#[cfg(windows)]
-mod windows;
 
 impl Listener {
     pub fn new<S: AsyncRead + AsyncWrite + Send + Sync + 'static>(
@@ -41,24 +32,12 @@ impl Listener {
     pub fn bind(addr: impl AsRef<str>) -> std::io::Result<Self> {
         let addr = addr.as_ref();
 
-        #[cfg(unix)]
         if let Some(addr) = addr.strip_prefix("unix://") {
             return Self::bind_unix(addr);
         }
 
-        #[cfg(unix)]
-        if let Some(addr) = addr.strip_prefix("tcp://") {
-            return Self::bind_tcp(addr);
-        }
-
-        #[cfg(any(target_os = "linux", target_os = "android"))]
         if let Some(addr) = addr.strip_prefix("vsock://") {
             return Self::bind_vsock(addr);
-        }
-
-        #[cfg(windows)]
-        if addr.starts_with(r"\\.\pipe\") {
-            return Self::bind_named_pipe(addr);
         }
 
         Err(io_other!("Scheme of {addr:?} is not supported"))
@@ -73,24 +52,12 @@ impl Socket {
     pub async fn connect(addr: impl AsRef<str>) -> IoResult<Self> {
         let addr = addr.as_ref();
 
-        #[cfg(unix)]
         if let Some(addr) = addr.strip_prefix("unix://") {
             return Self::connect_unix(addr).await;
         }
 
-        #[cfg(unix)]
-        if let Some(addr) = addr.strip_prefix("tcp://") {
-            return Self::connect_tcp(addr).await;
-        }
-
-        #[cfg(any(target_os = "linux", target_os = "android"))]
         if let Some(addr) = addr.strip_prefix("vsock://") {
             return Self::connect_vsock(addr).await;
-        }
-
-        #[cfg(windows)]
-        if addr.starts_with(r"\\.\pipe\") {
-            return Self::connect_named_pipe(addr).await;
         }
 
         Err(io_other!("Scheme of {addr:?} is not supported"))
@@ -155,5 +122,30 @@ impl AsyncWrite for Socket {
 
     fn is_write_vectored(&self) -> bool {
         self.0.is_write_vectored()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reject_removed_transports() {
+        for address in [
+            "tcp://127.0.0.1:1",
+            "tcp://[::1]:1",
+            r"\\.\pipe\ttrpc",
+            "http://localhost",
+        ] {
+            let bind_error = Listener::bind(address)
+                .err()
+                .expect("unsupported listener accepted");
+            assert!(bind_error.to_string().contains("not supported"));
+            let connect_error = Socket::connect(address)
+                .await
+                .err()
+                .expect("unsupported connection accepted");
+            assert!(connect_error.to_string().contains("not supported"));
+        }
     }
 }

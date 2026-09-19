@@ -9,7 +9,6 @@
 extern crate serial_test;
 extern crate caps;
 extern crate protocols;
-extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate scopeguard;

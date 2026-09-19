@@ -177,7 +177,7 @@ message ResumeContainerRequest {
 
 message CpuUsage {
 	uint64 total_usage = 1;
-	repeated uint64 percpu_usage = 2;
+	reserved 2; // cgroup v1 per-CPU accounting is not produced.
 	uint64 usage_in_kernelmode = 3;
 	uint64 usage_in_usermode = 4;
 }
@@ -209,8 +209,7 @@ message MemoryStats {
 	uint64 cache = 1;
 	MemoryData usage = 2;
 	MemoryData swap_usage = 3;
-	MemoryData kernel_usage = 4;
-	bool use_hierarchy = 5;
+	reserved 4, 5; // v1 kernel accounting and unused hierarchy metadata.
 	map<string, uint64> stats = 6;
 }
 
@@ -224,13 +223,7 @@ message BlkioStatsEntry {
 
 message BlkioStats {
 	repeated BlkioStatsEntry io_service_bytes_recursive = 1; // number of bytes transferred to and from the block device
-	repeated BlkioStatsEntry io_serviced_recursive = 2;
-	repeated BlkioStatsEntry io_queued_recursive = 3;
-	repeated BlkioStatsEntry io_service_time_recursive = 4;
-	repeated BlkioStatsEntry io_wait_time_recursive = 5;
-	repeated BlkioStatsEntry io_merged_recursive = 6;
-	repeated BlkioStatsEntry io_time_recursive = 7;
-	repeated BlkioStatsEntry sectors_recursive = 8;
+	reserved 2 to 8; // v1-only block statistics are not produced.
 }
 
 message HugetlbStats {
@@ -248,21 +241,9 @@ message CgroupStats {
 
 }
 
-message NetworkStats {
-	string name = 1;
-	uint64 rx_bytes = 2;
-	uint64 rx_packets = 3;
-	uint64 rx_errors  = 4;
-	uint64 rx_dropped = 5;
-	uint64 tx_bytes = 6;
-	uint64 tx_packets = 7;
-	uint64 tx_errors = 8;
-	uint64 tx_dropped = 9;
-}
-
 message StatsContainerResponse {
 	CgroupStats cgroup_stats = 1;
-	repeated NetworkStats network_stats = 2;
+	reserved 2; // The agent does not produce per-container network statistics.
 }
 
 message WriteStreamRequest {

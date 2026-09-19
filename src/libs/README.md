@@ -50,12 +50,10 @@ Generated ttrpc protocol bindings:
 
 - `agent`: Kata agent API
 - `health`: Health check service
-- `remote`: Remote hypervisor API
 - `csi`: Container storage interface
 - `oci`: OCI specifications
-- `confidential_data_hub`: Confidential computing support
 
-Features: `async` for async ttrpc, `with-serde` for serde support.
+Feature: `async` for async ttrpc.
 
 ### runtime-spec
 

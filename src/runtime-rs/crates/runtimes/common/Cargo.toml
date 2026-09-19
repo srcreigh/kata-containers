@@ -22,6 +22,5 @@ oci-spec = { workspace = true }
 agent = { workspace = true }
 kata-sys-util = { workspace = true }
 kata-types = { workspace = true }
-runtime-spec = { workspace = true }
 resource = { workspace = true }
 protocols = { workspace = true }

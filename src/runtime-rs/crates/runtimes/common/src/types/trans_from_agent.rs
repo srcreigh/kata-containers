@@ -29,7 +29,6 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
                 if let Some(usage) = cpu.cpu_usage.into_option() {
                     let mut p_usage = metrics::CPUUsage::new();
                     p_usage.set_total(usage.total_usage);
-                    p_usage.set_per_cpu(usage.percpu_usage);
                     p_usage.set_kernel(usage.usage_in_kernelmode);
                     p_usage.set_user(usage.usage_in_usermode);
 
@@ -73,47 +72,12 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
 
                     p_m.set_swap(p_m_entry);
                 }
-                // memory kernel_usage
-                if let Some(m_data) = m_stats.kernel_usage.into_option() {
-                    let mut p_m_entry = metrics::MemoryEntry::new();
-                    p_m_entry.set_usage(m_data.usage);
-                    p_m_entry.set_limit(m_data.limit);
-                    p_m_entry.set_failcnt(m_data.failcnt);
-                    p_m_entry.set_max(m_data.max_usage);
-
-                    p_m.set_kernel(p_m_entry);
-                }
-
                 for (k, v) in m_stats.stats {
                     match k.as_str() {
-                        "dirty" => p_m.set_dirty(v),
-                        "rss" => p_m.set_rss(v),
-                        "rss_huge" => p_m.set_rss_huge(v),
-                        "mapped_file" => p_m.set_mapped_file(v),
-                        "writeback" => p_m.set_writeback(v),
-                        "pg_pg_in" => p_m.set_pg_pg_in(v),
-                        "pg_pg_out" => p_m.set_pg_pg_out(v),
-                        "pg_fault" => p_m.set_pg_fault(v),
-                        "pg_maj_fault" => p_m.set_pg_maj_fault(v),
                         "inactive_file" => p_m.set_inactive_file(v),
                         "inactive_anon" => p_m.set_inactive_anon(v),
                         "active_file" => p_m.set_active_file(v),
                         "unevictable" => p_m.set_unevictable(v),
-                        "hierarchical_memory_limit" => p_m.set_hierarchical_memory_limit(v),
-                        "hierarchical_swap_limit" => p_m.set_hierarchical_swap_limit(v),
-                        "total_cache" => p_m.set_total_cache(v),
-                        "total_rss" => p_m.set_total_rss(v),
-                        "total_mapped_file" => p_m.set_total_mapped_file(v),
-                        "total_dirty" => p_m.set_total_dirty(v),
-
-                        "total_pg_pg_in" => p_m.set_total_pg_pg_in(v),
-                        "total_pg_pg_out" => p_m.set_total_pg_pg_out(v),
-                        "total_pg_fault" => p_m.set_total_pg_fault(v),
-                        "total_pg_maj_fault" => p_m.set_total_pg_maj_fault(v),
-                        "total_inactive_file" => p_m.set_total_inactive_file(v),
-                        "total_inactive_anon" => p_m.set_total_inactive_anon(v),
-                        "total_active_file" => p_m.set_total_active_file(v),
-                        "total_unevictable" => p_m.set_total_unevictable(v),
                         _ => (),
                     }
                 }
@@ -129,23 +93,9 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
 
             if let Some(blk_stats) = cg_stats.blkio_stats.into_option() {
                 let mut p_blk_stats = metrics::BlkIOStat::new();
-                p_blk_stats
-                    .set_io_serviced_recursive(copy_blkio_entry(&blk_stats.io_serviced_recursive));
                 p_blk_stats.set_io_service_bytes_recursive(copy_blkio_entry(
                     &blk_stats.io_service_bytes_recursive,
                 ));
-                p_blk_stats
-                    .set_io_queued_recursive(copy_blkio_entry(&blk_stats.io_queued_recursive));
-                p_blk_stats.set_io_service_time_recursive(copy_blkio_entry(
-                    &blk_stats.io_service_time_recursive,
-                ));
-                p_blk_stats.set_io_wait_time_recursive(copy_blkio_entry(
-                    &blk_stats.io_wait_time_recursive,
-                ));
-                p_blk_stats
-                    .set_io_merged_recursive(copy_blkio_entry(&blk_stats.io_merged_recursive));
-                p_blk_stats.set_io_time_recursive(copy_blkio_entry(&blk_stats.io_time_recursive));
-                p_blk_stats.set_sectors_recursive(copy_blkio_entry(&blk_stats.sectors_recursive));
 
                 metric.set_blkio(p_blk_stats);
             }
@@ -162,28 +112,6 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
                 }
                 metric.set_hugetlb(p_huge);
             }
-        }
-
-        let net_stats = stats.network_stats;
-        if !net_stats.is_empty() {
-            let mut p_net = Vec::new();
-            for v in net_stats.iter() {
-                let mut h = metrics::NetworkStat::new();
-                h.set_name(v.name.clone());
-
-                h.set_tx_bytes(v.tx_bytes);
-                h.set_tx_packets(v.tx_packets);
-                h.set_tx_errors(v.tx_errors);
-                h.set_tx_dropped(v.tx_dropped);
-
-                h.set_rx_bytes(v.rx_bytes);
-                h.set_rx_packets(v.rx_packets);
-                h.set_rx_errors(v.rx_errors);
-                h.set_rx_dropped(v.rx_dropped);
-
-                p_net.push(h);
-            }
-            metric.set_network(p_net);
         }
 
         StatsInfo {
@@ -224,7 +152,6 @@ mod tests {
                 cpu_stats: MessageField::some(wire::CpuStats {
                     cpu_usage: MessageField::some(wire::CpuUsage {
                         total_usage: 123,
-                        percpu_usage: vec![40, 83],
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -235,7 +162,7 @@ mod tests {
                         limit: 8192,
                         ..Default::default()
                     }),
-                    stats: [("rss".into(), 1024), ("unused-key".into(), 999)].into(),
+                    stats: [("inactive_file".into(), 1024), ("unused-key".into(), 999)].into(),
                     ..Default::default()
                 }),
                 pids_stats: MessageField::some(wire::PidsStats {
@@ -263,25 +190,19 @@ mod tests {
                 .into(),
                 ..Default::default()
             }),
-            network_stats: vec![wire::NetworkStats {
-                name: "eth0".into(),
-                rx_bytes: 42,
-                tx_bytes: 64,
-                ..Default::default()
-            }],
             ..Default::default()
         };
         let info = StatsInfo::from(Some(stats)).value.unwrap();
         assert_eq!(info.type_url, "io.containerd.cgroups.v1.Metrics");
         let result = metrics::Metrics::parse_from_bytes(&info.value).unwrap();
         assert_eq!(result.cpu().usage().total(), 123);
-        assert_eq!(result.cpu().usage().per_cpu(), [40, 83]);
+        assert!(result.cpu().usage().per_cpu().is_empty());
         assert_eq!(result.memory().usage().usage(), 4096);
-        assert_eq!(result.memory().rss(), 1024);
+        assert_eq!(result.memory().inactive_file(), 1024);
         assert_eq!(result.pids().current(), 3);
         assert_eq!(result.blkio().io_service_bytes_recursive()[0].value(), 512);
         assert_eq!(result.hugetlb()[0].pagesize(), "2MB");
-        assert_eq!(result.network()[0].rx_bytes(), 42);
+        assert!(result.network().is_empty());
         assert!(StatsInfo::from(None).value.is_none());
     }
 }

@@ -139,7 +139,7 @@ async fn create_logger_task(rfd: RawFd, vsock_port: u32, shutdown: Receiver<bool
     Ok(())
 }
 
-async fn real_main(init_mode: bool) -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn real_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     env::set_var("RUST_BACKTRACE", "full");
 
     // List of tasks that need to be stopped for a clean shutdown
@@ -150,7 +150,7 @@ async fn real_main(init_mode: bool) -> std::result::Result<(), Box<dyn std::erro
 
     let (shutdown_tx, shutdown_rx) = channel(true);
 
-    if init_mode {
+    {
         // dup a new file descriptor for this temporary logger writer,
         // since this logger would be dropped and it's writer would
         // be closed out of this code block.
@@ -170,12 +170,8 @@ async fn real_main(init_mode: bool) -> std::result::Result<(), Box<dyn std::erro
         })?;
 
         lazy_static::initialize(&AGENT_CONFIG);
-        let cgroup_v2 = AGENT_CONFIG.unified_cgroup_hierarchy || AGENT_CONFIG.cgroup_no_v1 == "all";
-
-        init_agent_as_init(&logger, cgroup_v2)?;
+        init_agent_as_init(&logger)?;
         drop(logger_async_guard);
-    } else {
-        lazy_static::initialize(&AGENT_CONFIG);
     }
 
     let config = &AGENT_CONFIG;
@@ -216,7 +212,7 @@ async fn real_main(init_mode: bool) -> std::result::Result<(), Box<dyn std::erro
     }
 
     // Start the sandbox and wait for its ttRPC server to end
-    start_sandbox(&logger, config, init_mode, &mut tasks, shutdown_rx.clone()).await?;
+    start_sandbox(&logger, config, &mut tasks, shutdown_rx.clone()).await?;
 
     if config.tracing {
         tracer::end_tracing();
@@ -280,17 +276,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         exit(0);
     }
 
+    if unistd::getpid() != Pid::from_raw(1) {
+        return Err(anyhow!("kata-fc: agent service must run as guest PID 1").into());
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
-    let init_mode = unistd::getpid() == Pid::from_raw(1);
-    let result = rt.block_on(real_main(init_mode));
+    let result = rt.block_on(real_main());
 
-    if init_mode {
-        sync();
-        let _ = reboot(RebootMode::RB_POWER_OFF);
-    }
+    sync();
+    let _ = reboot(RebootMode::RB_POWER_OFF);
 
     result
 }
@@ -298,15 +295,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 async fn start_sandbox(
     logger: &Logger,
     config: &AgentConfig,
-    init_mode: bool,
     tasks: &mut Vec<JoinHandle<Result<()>>>,
     shutdown: Receiver<bool>,
 ) -> Result<()> {
     // Initialize unique sandbox structure.
     let s = Sandbox::new(logger).context("Failed to create sandbox")?;
-    if init_mode {
-        s.rtnl.handle_localhost().await?;
-    }
+    s.rtnl.handle_localhost().await?;
 
     let sandbox = Arc::new(Mutex::new(s));
 
@@ -338,12 +332,9 @@ async fn start_sandbox(
 
 // init_agent_as_init will do the initializations such as setting up the rootfs
 // when this agent has been run as the init process.
-fn init_agent_as_init(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result<()> {
-    cgroups_mount(logger, unified_cgroup_hierarchy).map_err(|e| {
-        error!(
-            logger,
-            "fail cgroups mount, unified_cgroup_hierarchy {}: {}", unified_cgroup_hierarchy, e
-        );
+fn init_agent_as_init(logger: &Logger) -> Result<()> {
+    cgroups_mount(logger).map_err(|e| {
+        error!(logger, "fail cgroup2 mount: {}", e);
         e
     })?;
 

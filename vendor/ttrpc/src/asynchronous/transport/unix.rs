@@ -75,17 +75,9 @@ impl TryFrom<StdUnixStream> for Socket {
 fn parse_unix_addr(addr: impl AsRef<str>) -> IoResult<SocketAddr> {
     let addr = addr.as_ref();
 
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     if let Some(addr) = addr.strip_prefix('@') {
         use std::os::linux::net::SocketAddrExt as _;
         return SocketAddr::from_abstract_name(addr);
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    if addr.starts_with('@') {
-        return Err(io_other!(
-            "Abstract unix domain socket is not support on this platform",
-        ));
     }
 
     SocketAddr::from_pathname(addr)

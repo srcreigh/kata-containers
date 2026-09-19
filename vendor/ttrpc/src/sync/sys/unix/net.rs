@@ -1,30 +1,28 @@
 /*
-	Copyright The containerd Authors.
+    Copyright The containerd Authors.
 
-	Licensed under the Apache License, Version 2.0 (the "License");
-	you may not use this file except in compliance with the License.
-	You may obtain a copy of the License at
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
 
-		http://www.apache.org/licenses/LICENSE-2.0
+        http://www.apache.org/licenses/LICENSE-2.0
 
-	Unless required by applicable law or agreed to in writing, software
-	distributed under the License is distributed on an "AS IS" BASIS,
-	WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-	See the License for the specific language governing permissions and
-	limitations under the License.
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
 */
 use crate::error::Result;
 use nix::sys::socket::*;
+use nix::Error;
 use std::io::{self};
 use std::os::unix::io::RawFd;
 use std::os::unix::prelude::AsRawFd;
-use nix::Error;
 
-use nix::unistd::*;
-use crate::common::{self, client_connect, SOCK_CLOEXEC};
-#[cfg(target_os = "macos")] 
-use crate::common::set_fd_close_exec;
+use crate::common::{self, client_connect};
 use nix::sys::socket::{self};
+use nix::unistd::*;
 
 //The libc::poll's max wait time
 const POLL_MAX_TIME: i32 = 10;
@@ -42,7 +40,7 @@ impl AsRawFd for PipeListener {
 
 impl PipeListener {
     pub(crate) fn new(sockaddr: &str) -> Result<PipeListener> {
-        let (fd, _) = common::do_bind(sockaddr)?;
+        let fd = common::do_bind(sockaddr)?;
         common::do_listen(fd)?;
 
         let fds = PipeListener::new_monitor_fd()?;
@@ -62,18 +60,8 @@ impl PipeListener {
         })
     }
 
-    fn new_monitor_fd() ->  Result<(i32, i32)> {
-        #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn new_monitor_fd() -> Result<(i32, i32)> {
         let fds = pipe2(nix::fcntl::OFlag::O_CLOEXEC)?;
- 
-        
-        #[cfg(target_os = "macos")] 
-        let fds = {
-            let (rfd, wfd) = pipe()?;
-            set_fd_close_exec(rfd)?;
-            set_fd_close_exec(wfd)?;
-            (rfd, wfd)
-        };
 
         Ok(fds)
     }
@@ -114,14 +102,13 @@ impl PipeListener {
             error!("fatal error in listener_loop:{:?}", err);
             return Err(err);
         } else if returned < 1 {
-            return Ok(None)
+            return Ok(None);
         }
 
         if pollers[0].revents != 0 || pollers[pollers.len() - 1].revents == 0 {
             return Ok(None);
         }
 
-        #[cfg(any(target_os = "linux", target_os = "android"))]
         let fd = match accept4(self.fd, SockFlag::SOCK_CLOEXEC) {
             Ok(fd) => fd,
             Err(e) => {
@@ -129,25 +116,6 @@ impl PipeListener {
                 return Err(std::io::Error::from_raw_os_error(e as i32));
             }
         };
-
-        // Non Linux platforms do not support accept4 with SOCK_CLOEXEC flag, so instead
-        // use accept and call fcntl separately to set SOCK_CLOEXEC.
-        // Because of this there is chance of the descriptor leak if fork + exec happens in between.
-        #[cfg(target_os = "macos")] 
-        let fd = match accept(self.fd) {
-            Ok(fd) => {
-                if let Err(err) = set_fd_close_exec(fd) {
-                    error!("fcntl failed after accept: {:?}", err);
-                    return Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}")));
-                };
-                fd
-            }
-            Err(e) => {
-                error!("failed to accept error {:?}", e);
-                return Err(std::io::Error::from_raw_os_error(e as i32));
-            }
-        };
-
 
         Ok(Some(PipeConnection { fd }))
     }
@@ -162,7 +130,6 @@ impl PipeListener {
         Ok(())
     }
 }
-
 
 pub struct PipeConnection {
     fd: RawFd,
@@ -179,7 +146,7 @@ impl PipeConnection {
 
     pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
         loop {
-            match  recv(self.fd, buf, MsgFlags::empty()) {
+            match recv(self.fd, buf, MsgFlags::empty()) {
                 Ok(l) => return Ok(l),
                 Err(e) if retryable(e) => {
                     // Should retry
@@ -210,14 +177,14 @@ impl PipeConnection {
     pub fn close(&self) -> Result<()> {
         match close(self.fd) {
             Ok(_) => Ok(()),
-            Err(e) => Err(crate::Error::Nix(e))
+            Err(e) => Err(crate::Error::Nix(e)),
         }
     }
 
     pub fn shutdown(&self) -> Result<()> {
         match socket::shutdown(self.fd, Shutdown::Read) {
             Ok(_) => Ok(()),
-            Err(e) => Err(crate::Error::Nix(e))
+            Err(e) => Err(crate::Error::Nix(e)),
         }
     }
 }
@@ -234,16 +201,12 @@ impl ClientConnection {
     }
 
     pub(crate) fn new(fd: RawFd) -> Result<ClientConnection> {
-        let (recver_fd, close_fd) =
-            socketpair(AddressFamily::Unix, SockType::Stream, None, SOCK_CLOEXEC)?;
-
-        // MacOS doesn't support descriptor creation with SOCK_CLOEXEC automically,
-        // so there is a chance of leak if fork + exec happens in between of these calls.
-        #[cfg(target_os = "macos")]
-        {
-            set_fd_close_exec(recver_fd).unwrap();
-            set_fd_close_exec(close_fd).unwrap();
-        }
+        let (recver_fd, close_fd) = socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::SOCK_CLOEXEC,
+        )?;
 
         Ok(ClientConnection {
             fd,
@@ -277,13 +240,13 @@ impl ClientConnection {
         if returned == -1 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
-                return Ok(None)
+                return Ok(None);
             }
 
             error!("fatal error in process reaper:{}", err);
             return Err(err);
         } else if returned < 1 {
-            return Ok(None)
+            return Ok(None);
         }
 
         if pollers[0].revents != 0 {
@@ -291,7 +254,7 @@ impl ClientConnection {
         }
 
         if pollers[pollers.len() - 1].revents == 0 {
-            return Ok(None)
+            return Ok(None);
         }
 
         Ok(Some(()))
@@ -304,19 +267,19 @@ impl ClientConnection {
     pub fn close_receiver(&self) -> Result<()> {
         match close(self.socket_pair.0) {
             Ok(_) => Ok(()),
-            Err(e) => Err(crate::Error::Nix(e))
+            Err(e) => Err(crate::Error::Nix(e)),
         }
     }
 
     pub fn close(&self) -> Result<()> {
         match close(self.socket_pair.1) {
-            Ok(_) => {},
-            Err(e) => return Err(crate::Error::Nix(e))
+            Ok(_) => {}
+            Err(e) => return Err(crate::Error::Nix(e)),
         };
 
         match close(self.fd) {
             Ok(_) => Ok(()),
-            Err(e) => Err(crate::Error::Nix(e))
+            Err(e) => Err(crate::Error::Nix(e)),
         }
     }
 }

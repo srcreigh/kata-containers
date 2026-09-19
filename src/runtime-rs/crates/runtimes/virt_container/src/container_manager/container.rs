@@ -44,7 +44,6 @@ pub struct Container {
     pid: u32,
     pub container_id: ContainerID,
     config: ContainerConfig,
-    spec: oci::Spec,
     inner: Arc<RwLock<ContainerInner>>,
     agent: Arc<dyn Agent>,
     resource_manager: Arc<ResourceManager>,
@@ -56,7 +55,7 @@ impl Container {
     pub async fn new(
         pid: u32,
         config: ContainerConfig,
-        spec: oci::Spec,
+        spec: &oci::Spec,
         agent: Arc<dyn Agent>,
         resource_manager: Arc<ResourceManager>,
     ) -> Result<Self> {
@@ -78,13 +77,12 @@ impl Container {
             .and_then(|linux| linux.resources().clone());
 
         let termination_file =
-            crate::termination::prepare(&spec).context("validate termination file")?;
+            crate::termination::prepare(spec).context("validate termination file")?;
         Ok(Self {
             termination_file,
             pid,
             container_id,
             config,
-            spec,
             inner: Arc::new(RwLock::new(ContainerInner::new(
                 agent.clone(),
                 init_process,
@@ -605,14 +603,6 @@ impl Container {
         Ok(())
     }
 
-    pub async fn config(&self) -> ContainerConfig {
-        self.config.clone()
-    }
-
-    pub async fn spec(&self) -> oci::Spec {
-        self.spec.clone()
-    }
-
     pub async fn cleanup(&mut self) -> Result<()> {
         let mut inner = self.inner.write().await;
         let device_manager = self.resource_manager.get_device_manager().await;
@@ -645,13 +635,6 @@ fn amend_spec(
     disable_guest_seccomp: bool,
     disable_guest_selinux: bool,
 ) -> Result<()> {
-    // Only the StartContainer hook needs to be reserved for execution in the guest
-    if let Some(hooks) = spec.hooks().as_ref() {
-        let mut oci_hooks = oci::Hooks::default();
-        oci_hooks.set_start_container(hooks.start_container().clone());
-        spec.set_hooks(Some(oci_hooks));
-    }
-
     // special process K8s ephemeral volumes.
     update_ephemeral_storage_type(spec);
 

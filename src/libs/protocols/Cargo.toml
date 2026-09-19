@@ -6,18 +6,15 @@ edition = "2018"
 license = "Apache-2.0"
 
 [features]
-default = []
-with-serde = []
+default = ["async"]
 async = ["ttrpc/async", "async-trait"]
 
 [dependencies]
 ttrpc = { workspace = true }
 async-trait = { version = "0.1.42", optional = true }
 protobuf = { version = "3.7.2" }
-serde = { version = "1.0.130", features = ["derive"] }
 serde_json = "1.0.68"
 oci-spec = { workspace = true }
 
 [build-dependencies]
 ttrpc-codegen = "0.6.0"
-protobuf = { version = "3.7.2" }

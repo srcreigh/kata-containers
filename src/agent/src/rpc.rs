@@ -28,17 +28,13 @@ use oci::{LinuxNamespace, Spec};
 use oci_spec::runtime as oci;
 use protobuf::MessageField;
 use protocols::agent::{
-    AgentDetails, CopyFileRequest, GuestDetailsResponse, Metrics, OOMEvent, ReadStreamResponse,
-    StatsContainerResponse, VolumeStatsRequest, WaitProcessResponse, WriteStreamResponse,
+    CopyFileRequest, Metrics, OOMEvent, ReadStreamResponse, StatsContainerResponse,
+    VolumeStatsRequest, WaitProcessResponse, WriteStreamResponse,
 };
 use protocols::csi::{
     volume_usage::Unit as VolumeUsage_Unit, VolumeCondition, VolumeStatsResponse, VolumeUsage,
 };
 use protocols::empty::Empty;
-use protocols::health::{
-    health_check_response::ServingStatus as HealthCheckResponse_ServingStatus, HealthCheckResponse,
-    VersionCheckResponse,
-};
 #[cfg(test)]
 use protocols::types::Interface;
 use protocols::{agent_ttrpc_async as agent_ttrpc, health_ttrpc_async as health_ttrpc};
@@ -50,19 +46,17 @@ use rustjail::specconv::CreateOpts;
 use nix::errno::Errno;
 use nix::mount::MsFlags;
 use nix::sys::{stat, statfs};
-use nix::unistd::{self, Pid};
+use nix::unistd;
 use rustjail::process::ProcessOperations;
 #[cfg(test)]
 use std::os::fd::AsRawFd;
 
-use crate::features::get_build_features;
 use crate::metrics::get_metrics;
 use crate::mount::baremount;
 use crate::namespace::{NSTYPEIPC, NSTYPEPID, NSTYPEUTS};
 use crate::network::setup_guest_dns;
 use crate::sandbox::{Sandbox, SandboxError};
-use crate::storage::{add_storages, STORAGE_HANDLERS};
-use crate::version::{AGENT_VERSION, API_VERSION};
+use crate::storage::add_storages;
 use crate::AGENT_CONFIG;
 
 use libc::{self, c_ushort, pid_t, winsize, TIOCSWINSZ};
@@ -74,8 +68,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
-
-use kata_types::k8s;
 
 pub const CONTAINER_BASE: &str = "/run/kata-containers";
 const KATA_GUEST_SHARE_DIR: &str = "/run/kata-containers/shared/containers/";
@@ -235,6 +227,14 @@ fn validate_container_device_features(
         }
         kata_types::device::validate_spec_device_features(&spec)
             .map_err(|e| ttrpc_error(ttrpc::Code::INVALID_ARGUMENT, e.to_string()))?;
+        if let Some(resources) = spec
+            .linux()
+            .as_ref()
+            .and_then(|linux| linux.resources().as_ref())
+        {
+            rustjail::cgroups::fs::validate_resources(resources)
+                .map_err(|e| ttrpc_error(ttrpc::Code::INVALID_ARGUMENT, e.to_string()))?;
+        }
     }
     Ok(())
 }
@@ -265,8 +265,6 @@ impl AgentService {
                 return Err(anyhow!(nix::Error::EINVAL));
             }
         };
-
-        let container_name = k8s::container_name(&oci);
 
         info!(sl(), "receive createcontainer, spec: {:?}", &oci);
         info!(
@@ -302,15 +300,8 @@ impl AgentService {
         defer!(unistd::chdir(&olddir).unwrap());
 
         let opts = CreateOpts {
-            cgroup_name: "".to_string(),
-            // The supported guest runs the agent as PID 1 without systemd.
-            use_systemd_cgroup: false,
             no_pivot_root: s.no_pivot_root,
-            no_new_keyring: false,
             spec: Some(oci.clone()),
-            rootless_euid: false,
-            rootless_cgroup: false,
-            container_name,
         };
 
         let mut ctr: LinuxContainer = LinuxContainer::new(
@@ -361,7 +352,7 @@ impl AgentService {
 
         if sid != cid {
             // start oom event loop
-            if let Ok(cg_path) = ctr.cgroup_manager.as_ref().get_cgroup_path("memory") {
+            if let Ok(cg_path) = ctr.cgroup_manager.as_ref().get_cgroup_path() {
                 let rx = notifier::notify_oom(cid.as_str(), cg_path.to_string()).await?;
                 s.run_oom_event_monitor(rx, cid.clone()).await;
             }
@@ -912,13 +903,17 @@ impl agent_ttrpc::AgentService for AgentService {
         crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "update_container");
 
+        let resources: Option<oci::LinuxResources> = req.resources.into_option().map(Into::into);
+        if let Some(resources) = resources.as_ref() {
+            rustjail::cgroups::fs::validate_resources(resources)
+                .map_err(|e| ttrpc_error(ttrpc::Code::INVALID_ARGUMENT, e.to_string()))?;
+        }
         let mut sandbox = self.sandbox.lock().await;
         let ctr = sandbox
             .get_container(&req.container_id)
             .map_ttrpc_err(ttrpc::Code::INVALID_ARGUMENT, "invalid container id")?;
-        if let Some(res) = req.resources.as_ref() {
-            let oci_res = res.clone().into();
-            ctr.set(oci_res).map_ttrpc_err(same)?;
+        if let Some(resources) = resources {
+            ctr.set(resources).map_ttrpc_err(same)?;
         }
 
         Ok(Empty::new())
@@ -1218,31 +1213,6 @@ impl agent_ttrpc::AgentService for AgentService {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn get_guest_details(
-        &self,
-        _ctx: &TtrpcContext,
-        req: protocols::agent::GuestDetailsRequest,
-    ) -> ttrpc::Result<GuestDetailsResponse> {
-        crate::tracer::set_rpc_parent(_ctx);
-        info!(sl(), "rpc call from shim to agent: {}", "get_guest_details");
-
-        info!(sl(), "get guest details!");
-        let mut resp = GuestDetailsResponse::new();
-        if req.mem_block_size || req.mem_hotplug_probe {
-            return Err(ttrpc_error(
-                ttrpc::Code::INVALID_ARGUMENT,
-                "kata-fc: guest memory hotplug information is unsupported",
-            ));
-        }
-
-        // to get agent details
-        let detail = get_agent_details();
-        resp.agent_details = MessageField::some(detail);
-
-        Ok(resp)
-    }
-
-    #[tracing::instrument(skip_all)]
     async fn copy_file(
         &self,
         _ctx: &TtrpcContext,
@@ -1368,27 +1338,10 @@ impl health_ttrpc::Health for HealthService {
         &self,
         _ctx: &TtrpcContext,
         _req: protocols::health::CheckRequest,
-    ) -> ttrpc::Result<HealthCheckResponse> {
+    ) -> ttrpc::Result<Empty> {
         crate::tracer::set_rpc_parent(_ctx);
-        let mut resp = HealthCheckResponse::new();
-        resp.set_status(HealthCheckResponse_ServingStatus::SERVING);
-
-        Ok(resp)
-    }
-
-    #[tracing::instrument(skip_all)]
-    async fn version(
-        &self,
-        _ctx: &TtrpcContext,
-        req: protocols::health::CheckRequest,
-    ) -> ttrpc::Result<VersionCheckResponse> {
-        crate::tracer::set_rpc_parent(_ctx);
-        info!(sl(), "version {:?}", req);
-        let mut rep = protocols::health::VersionCheckResponse::new();
-        rep.agent_version = AGENT_VERSION.to_string();
-        rep.grpc_version = API_VERSION.to_string();
-
-        Ok(rep)
+        // The host health monitor consumes only RPC success.
+        Ok(Empty::new())
     }
 }
 
@@ -1415,28 +1368,6 @@ fn get_volume_inode_stats(path: &str) -> Result<VolumeUsage> {
     usage.unit = VolumeUsage_Unit::INODES.into();
 
     Ok(usage)
-}
-
-pub fn have_seccomp() -> bool {
-    if cfg!(feature = "seccomp") {
-        return true;
-    }
-
-    false
-}
-
-fn get_agent_details() -> AgentDetails {
-    let mut detail = AgentDetails::new();
-
-    detail.set_version(AGENT_VERSION.to_string());
-    detail.set_supports_seccomp(have_seccomp());
-    detail.init_daemon = unistd::getpid() == Pid::from_raw(1);
-
-    detail.device_handlers = Vec::new();
-    detail.storage_handlers = STORAGE_HANDLERS.get_handlers();
-    detail.extra_features = get_build_features();
-
-    detail
 }
 
 async fn read_stream(reader: &Mutex<ReadHalf<PipeStream>>, l: usize) -> Result<Vec<u8>> {
@@ -1967,6 +1898,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_hooks_and_v1_resources_reject_before_locking() {
+        let service = AgentService {
+            sandbox: Arc::new(Mutex::new(Sandbox::new(&sl()).unwrap())),
+        };
+        let ctx = mk_ttrpc_context();
+        let _guard = service.sandbox.lock().await;
+        let mut hooks = protocols::oci::Hooks::default();
+        hooks.StartContainer.push(protocols::oci::Hook::default());
+        let resources = protocols::oci::LinuxResources {
+            Memory: MessageField::some(protocols::oci::LinuxMemory {
+                Kernel: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for spec in [
+            protocols::oci::Spec {
+                Hooks: MessageField::some(hooks),
+                ..Default::default()
+            },
+            protocols::oci::Spec {
+                Linux: MessageField::some(protocols::oci::Linux {
+                    Resources: MessageField::some(resources.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ] {
+            let request = protocols::agent::CreateContainerRequest {
+                OCI: MessageField::some(spec),
+                ..Default::default()
+            };
+            let result = timeout(
+                Duration::from_secs(1),
+                service.create_container(&ctx, request),
+            )
+            .await
+            .expect("validation must not take sandbox lock");
+            assert!(
+                matches!(result, Err(ttrpc::Error::RpcStatus(status)) if status.code() == ttrpc::Code::INVALID_ARGUMENT)
+            );
+        }
+        let request = protocols::agent::UpdateContainerRequest {
+            resources: MessageField::some(resources),
+            ..Default::default()
+        };
+        let result = timeout(
+            Duration::from_secs(1),
+            service.update_container(&ctx, request),
+        )
+        .await
+        .expect("validation must not take sandbox lock");
+        assert!(
+            matches!(result, Err(ttrpc::Error::RpcStatus(status)) if status.code() == ttrpc::Code::INVALID_ARGUMENT)
+        );
+    }
+
+    #[tokio::test]
     async fn minimal_removed_rpcs_are_unimplemented() {
         let sandbox = Sandbox::new(&slog::Logger::root(slog::Discard, o!())).unwrap();
         let service = AgentService {
@@ -2000,6 +1989,7 @@ mod tests {
         reject!(set_policy);
         reject!(reseed_random_dev);
         reject!(close_stdin);
+        reject!(get_guest_details);
     }
 
     #[tokio::test]
@@ -2127,38 +2117,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn minimal_guest_details_reject_hotplug_and_keep_agent_metadata() {
-        let service = AgentService {
-            sandbox: Arc::new(Mutex::new(Sandbox::new(&sl()).unwrap())),
-        };
+    async fn minimal_health_check_is_acknowledgement_only() {
+        use protobuf::Message;
+        use protocols::health_ttrpc_async::Health;
+
+        let service = HealthService;
         let ctx = mk_ttrpc_context();
-        let _guard = service.sandbox.lock().await;
-        for (block, probe) in [(true, false), (false, true), (true, true)] {
-            let request = protocols::agent::GuestDetailsRequest {
-                mem_block_size: block,
-                mem_hotplug_probe: probe,
-                ..Default::default()
-            };
-            match service.get_guest_details(&ctx, request).await.unwrap_err() {
-                ttrpc::Error::RpcStatus(status) => {
-                    assert_eq!(status.code(), ttrpc::Code::INVALID_ARGUMENT)
-                }
-                e => panic!("unexpected error: {:?}", e),
+        let response = service.check(&ctx, Default::default()).await.unwrap();
+        assert!(response.write_to_bytes().unwrap().is_empty());
+        match service.version(&ctx, Default::default()).await.unwrap_err() {
+            ttrpc::Error::RpcStatus(status) => {
+                assert_eq!(status.code(), ttrpc::Code::UNIMPLEMENTED)
             }
+            error => panic!("unexpected error: {:?}", error),
         }
-        let response = service
-            .get_guest_details(&ctx, Default::default())
-            .await
-            .unwrap();
-        assert_eq!(response.mem_block_size_bytes, 0);
-        assert!(!response.support_mem_hotplug_probe);
-        let details = response.agent_details.unwrap();
-        assert_eq!(details.version, AGENT_VERSION);
-        assert!(details.device_handlers.is_empty());
-        assert!(details
-            .storage_handlers
-            .iter()
-            .any(|driver| driver == "mmioblk"));
     }
 
     fn create_dummy_opts() -> CreateOpts {
@@ -2198,14 +2170,8 @@ mod tests {
             .unwrap();
 
         CreateOpts {
-            cgroup_name: "".to_string(),
-            use_systemd_cgroup: false,
             no_pivot_root: false,
-            no_new_keyring: false,
             spec: Some(spec),
-            rootless_euid: false,
-            rootless_cgroup: false,
-            container_name: "".to_string(),
         }
     }
 

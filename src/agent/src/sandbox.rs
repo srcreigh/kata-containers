@@ -548,14 +548,8 @@ mod tests {
             .unwrap();
 
         CreateOpts {
-            cgroup_name: "".to_string(),
-            use_systemd_cgroup: false,
             no_pivot_root: false,
-            no_new_keyring: false,
             spec: Some(spec),
-            rootless_euid: false,
-            rootless_cgroup: false,
-            container_name: "".to_string(),
         }
     }
 

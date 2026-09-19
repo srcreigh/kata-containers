@@ -20,7 +20,6 @@ use crate::SandboxNetworkEnv;
 use anyhow::{Context, Result};
 use kata_sys_util::validate;
 use kata_types::mount::Mount;
-use oci_spec::runtime as oci;
 use strum::Display;
 
 // DEFAULT_SHM_SIZE is the default shm size to be used in case host
@@ -178,8 +177,6 @@ pub struct SandboxConfig {
     pub dns: Vec<String>,
     pub network_env: SandboxNetworkEnv,
     pub annotations: HashMap<String, String, RandomState>,
-    pub hooks: Option<oci::Hooks>,
-    pub state: runtime_spec::State,
     pub shm_size: u64,
 }
 

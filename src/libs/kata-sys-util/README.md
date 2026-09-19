@@ -63,12 +63,6 @@ This crate provides safe wrappers and utility functions for interacting with var
 - Container/exec ID validation
 - Environment variable validation
 
-### Hooks (`hooks`)
-
-- OCI hook execution and management
-- Hook state tracking
-- Timeout handling for hook execution
-
 ### Guest Protection (`protection`)
 
 - Confidential computing detection (TDX, SEV, SNP, PEF, SE, ARM CCA , etc.)

@@ -14,7 +14,6 @@
 
 //! Sync client of ttrpc.
 
-#[cfg(unix)]
 use std::os::unix::io::RawFd;
 
 use protobuf::Message;
@@ -30,9 +29,6 @@ use crate::proto::{
 };
 use crate::sync::channel::{read_message, write_message};
 use crate::sync::sys::ClientConnection;
-
-#[cfg(windows)]
-use super::sys::PipeConnection;
 
 type Sender = mpsc::Sender<(Vec<u8>, mpsc::SyncSender<Result<Vec<u8>>>)>;
 type Receiver = mpsc::Receiver<(Vec<u8>, mpsc::SyncSender<Result<Vec<u8>>>)>;
@@ -52,7 +48,6 @@ impl Client {
         Self::new_client(conn)
     }
 
-    #[cfg(unix)]
     /// Initialize a new [`Client`] from raw file descriptor.
     pub fn new(fd: RawFd) -> Result<Client> {
         let conn =
@@ -107,8 +102,8 @@ impl Client {
         let receiver_client = weak_client.clone();
         thread::spawn(move || {
             loop {
-                //The count of ClientConnection's Arc will be add one , and back to original value when this code ends. 
-                if let Some(receiver_client) = receiver_client.upgrade(){
+                //The count of ClientConnection's Arc will be add one , and back to original value when this code ends.
+                if let Some(receiver_client) = receiver_client.upgrade() {
                     match receiver_client.ready() {
                         Ok(None) => {
                             continue;
@@ -200,16 +195,6 @@ impl Drop for ClientConnection {
         self.close().unwrap();
         self.close_receiver().unwrap();
         trace!("Client is dropped");
-    }
-}
-
-// close everything up from the pipe connection on Windows
-#[cfg(windows)]
-impl Drop for PipeConnection {
-    fn drop(&mut self) {
-        self.close()
-            .unwrap_or_else(|e| trace!("connection may already be closed: {}", e));
-        trace!("pipe connection is dropped");
     }
 }
 

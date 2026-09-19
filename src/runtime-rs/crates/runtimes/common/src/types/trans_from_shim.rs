@@ -18,7 +18,6 @@ use std::{
 };
 
 use protobuf::Message;
-use runtime_spec;
 
 use protocols::api as cri_api_v1;
 
@@ -68,23 +67,14 @@ impl TryFrom<sandbox_api::CreateSandboxRequest> for SandboxRequest {
         });
 
         Ok(SandboxRequest::CreateSandbox(Box::new(SandboxConfig {
-            sandbox_id: from.sandbox_id.clone(),
+            sandbox_id: from.sandbox_id,
             hostname: config.hostname,
             dns,
             network_env: SandboxNetworkEnv {
                 netns: Some(from.netns_path),
                 network_created: false,
             },
-            annotations: config.annotations.clone(),
-            hooks: None,
-            state: runtime_spec::State {
-                version: Default::default(),
-                id: from.sandbox_id,
-                status: runtime_spec::ContainerState::Creating,
-                pid: 0,
-                bundle: from.bundle_path,
-                annotations: config.annotations,
-            },
+            annotations: config.annotations,
             shm_size: DEFAULT_SHM_SIZE,
         })))
     }

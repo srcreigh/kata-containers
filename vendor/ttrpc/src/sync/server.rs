@@ -15,7 +15,6 @@
 //! Sync server of ttrpc.
 //!
 
-#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::time::Duration;
 
@@ -270,7 +269,6 @@ impl Server {
         Ok(self)
     }
 
-    #[cfg(unix)]
     pub fn add_listener(mut self, fd: RawFd) -> Result<Server> {
         if !self.listeners.is_empty() {
             return Err(Error::Others(
@@ -607,14 +605,12 @@ impl Server {
     }
 }
 
-#[cfg(unix)]
 impl FromRawFd for Server {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         Self::default().add_listener(fd).unwrap()
     }
 }
 
-#[cfg(unix)]
 impl AsRawFd for Server {
     fn as_raw_fd(&self) -> RawFd {
         self.listeners[0].as_raw_fd()

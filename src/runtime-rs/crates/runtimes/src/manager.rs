@@ -356,7 +356,6 @@ impl RuntimeHandlerManager {
     async fn task_init_runtime_instance(
         &self,
         spec: &mut oci::Spec,
-        state: &spec::State,
         options: &Option<Vec<u8>>,
     ) -> Result<()> {
         let mut inner: tokio::sync::RwLockWriteGuard<'_, RuntimeHandlerManagerInner> =
@@ -409,14 +408,6 @@ impl RuntimeHandlerManager {
         if netns.as_deref() == Some("/proc/0/ns/net") {
             netns = None;
         }
-        // Docker 26+ may not publish the network namespace in `linux.namespaces` at create; use
-        // `libnetwork-setkey` hook args (see Go `DockerNetnsPath` and #9340).
-        if netns.is_none() {
-            if let Some(p) = kata_sys_util::oci_docker::docker_netns_path(spec) {
-                netns = Some(p);
-            }
-        }
-
         // A nerdctl network namespace to let nerdctl know which namespace to use when calling the
         // selected CNI plugin.
         if let Some(netns_path) = &netns {
@@ -441,8 +432,6 @@ impl RuntimeHandlerManager {
             hostname: spec.hostname().clone().unwrap_or_default(),
             network_env,
             annotations: spec.annotations().clone().unwrap_or_default(),
-            hooks: spec.hooks().clone(),
-            state: state.clone(),
             shm_size,
         };
 
@@ -488,16 +477,7 @@ impl RuntimeHandlerManager {
             );
             let mut spec = oci::Spec::load(&bundler_path).context("load spec")?;
             kata_types::device::validate_spec_device_features(&spec)?;
-            let state = spec::State {
-                version: spec.version().clone(),
-                id: container_config.container_id.to_string(),
-                status: spec::ContainerState::Creating,
-                pid: 0,
-                bundle: container_config.bundle.clone(),
-                annotations: spec.annotations().clone().unwrap_or_default(),
-            };
-
-            self.task_init_runtime_instance(&mut spec, &state, &container_config.options)
+            self.task_init_runtime_instance(&mut spec, &container_config.options)
                 .await
                 .context("try init runtime instance")?;
             let instance = self

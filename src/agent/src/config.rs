@@ -14,8 +14,6 @@ pub struct AgentConfig {
     pub log_vport: u32,
     pub container_pipe_size: i32,
     pub server_addr: String,
-    pub cgroup_no_v1: String,
-    pub unified_cgroup_hierarchy: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -40,8 +38,6 @@ impl Default for AgentConfig {
             log_vport: 0,
             container_pipe_size: 0,
             server_addr: "vsock://-1:1024".into(),
-            cgroup_no_v1: String::new(),
-            unified_cgroup_hierarchy: false,
         }
     }
 }
@@ -62,10 +58,14 @@ impl FromStr for AgentConfig {
             hotplug_timeout,
             log_vport,
             container_pipe_size,
-            server_addr,
-            cgroup_no_v1,
-            unified_cgroup_hierarchy
+            server_addr
         );
+        if let Some(value) = file.cgroup_no_v1 {
+            ensure!(value == "all", "kata-fc: only cgroup v2 is supported");
+        }
+        if let Some(value) = file.unified_cgroup_hierarchy {
+            ensure!(value, "kata-fc: only cgroup v2 is supported");
+        }
         config.validate()?;
         Ok(config)
     }
@@ -118,13 +118,12 @@ impl AgentConfig {
                     ensure!(!value.is_empty(), "empty config file path");
                     config_file = Some(value.to_owned());
                 }
-                "cgroup_no_v1" => config.cgroup_no_v1 = value.into(),
+                "cgroup_no_v1" => ensure!(value == "all", "kata-fc: only cgroup v2 is supported"),
                 "systemd.unified_cgroup_hierarchy" => {
-                    config.unified_cgroup_hierarchy = match value {
-                        "1" | "true" => true,
-                        "0" | "false" => false,
-                        _ => bail!("invalid unified_cgroup_hierarchy value"),
-                    }
+                    ensure!(
+                        matches!(value, "1" | "true"),
+                        "kata-fc: only cgroup v2 is supported"
+                    );
                 }
                 _ if key.starts_with("agent.") => bail!("kata-fc: unsupported agent option {key}"),
                 _ => {} // Ordinary Linux kernel arguments are not agent configuration.
@@ -198,9 +197,33 @@ mod tests {
         assert_eq!(config.log_level, slog::Level::Debug);
         assert_eq!(config.hotplug_timeout, Duration::from_secs(9));
         assert_eq!(config.container_pipe_size, 4096);
-        assert!(config.unified_cgroup_hierarchy);
-        assert_eq!(config.cgroup_no_v1, "all");
         assert_eq!(config.server_addr, "vsock://-1:1024");
+    }
+
+    #[test]
+    fn cgroup_v1_requests_fail_even_with_a_config_file() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), "log_level = 'info'").unwrap();
+        for option in [
+            "systemd.unified_cgroup_hierarchy=0",
+            "systemd.unified_cgroup_hierarchy=false",
+            "cgroup_no_v1=memory",
+            "cgroup_no_v1=",
+        ] {
+            assert!(parse_kernel(option, vec![]).is_err());
+            assert!(parse_kernel(
+                option,
+                vec!["--config".into(), file.path().display().to_string()]
+            )
+            .is_err());
+        }
+        assert!("unified_cgroup_hierarchy = false"
+            .parse::<AgentConfig>()
+            .is_err());
+        assert!("cgroup_no_v1 = 'memory'".parse::<AgentConfig>().is_err());
+        assert!("unified_cgroup_hierarchy = true\ncgroup_no_v1 = 'all'"
+            .parse::<AgentConfig>()
+            .is_ok());
     }
 
     #[test]

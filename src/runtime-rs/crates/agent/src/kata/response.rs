@@ -27,14 +27,7 @@ impl CheckedResponse for crate::VolumeStatsResponse {
 }
 impl CheckedResponse for crate::StatsContainerResponse {
     fn validate(&self) -> Result<()> {
-        ensure!(
-            self.network_stats.len() <= 256,
-            "excessive network statistics"
-        );
         if let Some(stats) = self.cgroup_stats.as_ref() {
-            if let Some(cpu) = stats.cpu_stats.as_ref().and_then(|s| s.cpu_usage.as_ref()) {
-                ensure!(cpu.percpu_usage.len() <= 4096, "excessive CPU statistics");
-            }
             if let Some(memory) = stats.memory_stats.as_ref() {
                 ensure!(memory.stats.len() <= 4096, "excessive memory statistics");
             }
@@ -43,18 +36,10 @@ impl CheckedResponse for crate::StatsContainerResponse {
                 "excessive hugepage statistics"
             );
             if let Some(block) = stats.blkio_stats.as_ref() {
-                for list in [
-                    &block.io_serviced_recursive,
-                    &block.io_service_bytes_recursive,
-                    &block.io_queued_recursive,
-                    &block.io_service_time_recursive,
-                    &block.io_wait_time_recursive,
-                    &block.io_merged_recursive,
-                    &block.io_time_recursive,
-                    &block.sectors_recursive,
-                ] {
-                    ensure!(list.len() <= 4096, "excessive block statistics");
-                }
+                ensure!(
+                    block.io_service_bytes_recursive.len() <= 4096,
+                    "excessive block statistics"
+                );
             }
         }
         Ok(())
@@ -67,7 +52,16 @@ mod tests {
     fn bounds_repeated_statistics_and_event_ids() {
         let mut stats = crate::StatsContainerResponse::default();
         stats.validate().unwrap();
-        stats.network_stats = vec![protocols::agent::NetworkStats::default(); 257];
+        stats.cgroup_stats = protobuf::MessageField::some(protocols::agent::CgroupStats {
+            blkio_stats: protobuf::MessageField::some(protocols::agent::BlkioStats {
+                io_service_bytes_recursive: vec![
+                    protocols::agent::BlkioStatsEntry::default();
+                    4097
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
         assert!(stats.validate().is_err());
         assert!(crate::OomEventResponse {
             container_id: "x".repeat(257),

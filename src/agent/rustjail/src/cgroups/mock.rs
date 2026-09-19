@@ -13,27 +13,21 @@ use cgroups::freezer::FreezerState;
 use libc::{self, pid_t};
 use oci::{LinuxResources, Spec};
 use oci_spec::runtime as oci;
-use serde::{Deserialize, Serialize};
-use std::any::Any;
 use std::collections::HashMap;
 use std::string::String;
 use std::sync::{Arc, RwLock};
 
 use super::DevicesCgroupInfo;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Manager {
-    pub paths: HashMap<String, String>,
-    pub mounts: HashMap<String, String>,
-    pub cpath: String,
-}
+#[derive(Debug, Clone)]
+pub struct Manager;
 
 impl CgroupManager for Manager {
     fn apply(&self, _: pid_t) -> Result<()> {
         Ok(())
     }
 
-    fn set(&self, _: &LinuxResources, _: bool) -> Result<()> {
+    fn set(&self, _: &LinuxResources) -> Result<()> {
         Ok(())
     }
 
@@ -60,16 +54,8 @@ impl CgroupManager for Manager {
         Ok(Vec::new())
     }
 
-    fn update_cpuset_path(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-
-    fn get_cgroup_path(&self, _: &str) -> Result<String> {
+    fn get_cgroup_path(&self) -> Result<String> {
         Ok("".to_string())
-    }
-
-    fn as_any(&self) -> Result<&dyn Any> {
-        Ok(self)
     }
 
     fn name(&self) -> &str {
@@ -79,14 +65,10 @@ impl CgroupManager for Manager {
 
 impl Manager {
     pub fn new(
-        cpath: &str,
+        _cpath: &str,
         _spec: &Spec,
         _devcg_info: Option<Arc<RwLock<DevicesCgroupInfo>>>,
     ) -> Result<Self> {
-        Ok(Self {
-            paths: HashMap::new(),
-            mounts: HashMap::new(),
-            cpath: cpath.to_string(),
-        })
+        Ok(Self)
     }
 }

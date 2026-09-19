@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::convert::TryFrom;
-#[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::result::Result as StdResult;
 use std::sync::{Arc, Mutex};
@@ -92,7 +91,6 @@ impl Server {
         self
     }
 
-    #[cfg(unix)]
     /// # Safety
     /// The file descriptor must represent a unix listener.
     pub unsafe fn add_unix_listener(self, fd: RawFd) -> Result<Server> {
@@ -101,16 +99,6 @@ impl Server {
         Ok(self.add_listener(listener))
     }
 
-    #[cfg(unix)]
-    /// # Safety
-    /// The file descriptor must represent a unix listener.
-    pub unsafe fn add_tcp_listener(self, fd: RawFd) -> Result<Server> {
-        let listener = Listener::from_raw_tcp_listener_fd(fd)
-            .map_err(err_to_others_err!(e, "from_raw_tcp_listener_fd error"))?;
-        Ok(self.add_listener(listener))
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     /// # Safety
     /// The file descriptor must represent a vsock listener.
     pub unsafe fn add_vsock_listener(self, fd: RawFd) -> Result<Self> {
@@ -611,7 +599,6 @@ impl HandlerContext {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests {
     use super::*;

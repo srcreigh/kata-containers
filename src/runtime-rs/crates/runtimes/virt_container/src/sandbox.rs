@@ -31,17 +31,14 @@ use hypervisor::{
     utils::{get_hvsock_path, remove_vmm_user_runtime_dir, vmm_user_runtime_dir},
     HybridVsockConfig, DEFAULT_GUEST_VSOCK_CID,
 };
-use kata_sys_util::hooks::HookStates;
 use kata_sys_util::spec::load_oci_spec;
 
 use kata_types::config::{hypervisor::Factory, TomlConfig};
-use oci_spec::runtime as oci;
 use persist::{self, sandbox_persist::Persist};
 use protobuf::SpecialFields;
 use resource::manager::ManagerArgs;
 use resource::network::{NetworkConfig, NetworkWithNetNsConfig};
 use resource::{ResourceConfig, ResourceManager};
-use runtime_spec as spec;
 use std::sync::Arc;
 use std::time::SystemTime;
 use strum::Display;
@@ -248,38 +245,6 @@ impl VirtSandbox {
         }
     }
 
-    async fn execute_oci_hook_functions(
-        &self,
-        prestart_hooks: &[oci::Hook],
-        create_runtime_hooks: &[oci::Hook],
-        state: &spec::State,
-    ) -> Result<()> {
-        let mut st = state.clone();
-        // for dragonball, we use vmm_master_tid
-        let vmm_pid = self
-            .hypervisor
-            .get_vmm_master_tid()
-            .await
-            .context("get vmm master tid")?;
-        st.pid = vmm_pid as i32;
-
-        // Prestart Hooks [DEPRECATED in newest oci spec]:
-        // * should be run in runtime namespace
-        // * should be run after vm is started, but before container is created
-        //      if Prestart Hook and CreateRuntime Hook are both supported
-        // * spec details: https://github.com/opencontainers/runtime-spec/blob/c1662686cff159595277b79322d0272f5182941b/config.md#prestart
-        let mut prestart_hook_states = HookStates::new();
-        prestart_hook_states.execute_hooks(prestart_hooks, Some(st.clone()))?;
-
-        // CreateRuntime Hooks:
-        // * should be run in runtime namespace
-        // * should be run when creating the runtime
-        // * spec details: https://github.com/opencontainers/runtime-spec/blob/c1662686cff159595277b79322d0272f5182941b/config.md#createruntime-hooks
-        let mut create_runtime_hook_states = HookStates::new();
-        create_runtime_hook_states.execute_hooks(create_runtime_hooks, Some(st.clone()))?;
-        Ok(())
-    }
-
     async fn prepare_rootfs_config(&self) -> Result<Option<BlockConfigModern>> {
         let boot_info = self.hypervisor.hypervisor_config().await.boot_info;
 
@@ -305,14 +270,6 @@ impl VirtSandbox {
             guest_cid: DEFAULT_GUEST_VSOCK_CID,
             uds_path: get_hvsock_path(&self.sid),
         }))
-    }
-
-    fn has_prestart_hooks(
-        &self,
-        prestart_hooks: &[oci::Hook],
-        create_runtime_hooks: &[oci::Hook],
-    ) -> bool {
-        !prestart_hooks.is_empty() || !create_runtime_hooks.is_empty()
     }
 
     fn is_factory_enabled(&self) -> bool {
@@ -455,54 +412,6 @@ impl Sandbox for VirtSandbox {
                 }
             }
         });
-
-        // execute pre-start hook functions, including Prestart Hooks and CreateRuntime Hooks
-        let (prestart_hooks, create_runtime_hooks) =
-            if let Some(hooks) = sandbox_config.hooks.as_ref() {
-                (
-                    hooks.prestart().clone().unwrap_or_default(),
-                    hooks.create_runtime().clone().unwrap_or_default(),
-                )
-            } else {
-                (Vec::new(), Vec::new())
-            };
-
-        self.execute_oci_hook_functions(
-            &prestart_hooks,
-            &create_runtime_hooks,
-            &sandbox_config.state,
-        )
-        .await?;
-
-        // 1. if there are pre-start hook functions, network config might have been changed.
-        //    We need to rescan the netns to handle the change.
-        // 2. Do not scan the netns if we want no network for the VM.
-        // QEMU and Cloud Hypervisor advertise network hotplug support, so
-        // factory VMs using them defer network setup until after VM startup.
-        // Backends without this capability retain pre-start setup.
-        let config = self.resource_manager.config().await;
-        if self.has_prestart_hooks(&prestart_hooks, &create_runtime_hooks)
-            && !defer_network
-            && !config.runtime.disable_new_netns
-        {
-            if let Some(netns_path) = &sandbox_config.network_env.netns {
-                let network_resource = NetworkConfig::NetNs(NetworkWithNetNsConfig {
-                    network_model: config.runtime.internetworking_model.clone(),
-                    netns_path: netns_path.to_owned(),
-                    queues: self
-                        .hypervisor
-                        .hypervisor_config()
-                        .await
-                        .network_info
-                        .network_queues as usize,
-                    network_created: sandbox_config.network_env.network_created,
-                });
-                self.resource_manager
-                    .handle_network(network_resource)
-                    .await
-                    .context("set up device after start vm")?;
-            }
-        }
 
         if defer_network {
             self.setup_deferred_network_after_start(sandbox_config)

@@ -15,7 +15,7 @@ use nix::unistd::{self, Gid, Uid};
 use nix::NixPath;
 use oci::{LinuxDevice, Mount, Process, Spec};
 use oci_spec::runtime as oci;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::mem::MaybeUninit;
 use std::os::unix;
@@ -32,7 +32,6 @@ use crate::selinux;
 use crate::sync::write_count;
 use std::string::ToString;
 
-use crate::cgroups_rs as cgroups;
 use crate::log_child;
 use safe_path::scoped_join;
 
@@ -165,13 +164,7 @@ pub fn umount2<P: ?Sized + NixPath>(
     Ok(())
 }
 
-pub fn init_rootfs(
-    cfd_log: RawFd,
-    spec: &Spec,
-    cpath: &HashMap<String, String>,
-    mounts: &HashMap<String, String>,
-    bind_device: bool,
-) -> Result<()> {
+pub fn init_rootfs(cfd_log: RawFd, spec: &Spec, bind_device: bool) -> Result<()> {
     lazy_static::initialize(&OPTIONS);
     lazy_static::initialize(&PROPAGATION);
     lazy_static::initialize(&LINUXDEVICETYPE);
@@ -246,7 +239,7 @@ pub fn init_rootfs(
         let default_typ = String::new();
         let mount_typ = m.typ().as_ref().unwrap_or(&default_typ);
         if mount_typ == "cgroup" {
-            mount_cgroups(cfd_log, m, rootfs, flags, &data, cpath, mounts)?;
+            mount_cgroups(cfd_log, m, rootfs, flags)?;
         } else {
             if mount_dest.clone().as_str() == "/dev" {
                 if mount_typ == "bind" {
@@ -363,7 +356,7 @@ fn check_proc_mount(m: &Mount) -> Result<()> {
     Ok(())
 }
 
-fn mount_cgroups_v2(cfd_log: RawFd, m: &Mount, rootfs: &str, flags: MsFlags) -> Result<()> {
+fn mount_cgroups(cfd_log: RawFd, m: &Mount, rootfs: &str, flags: MsFlags) -> Result<()> {
     let olddir = unistd::getcwd()?;
     unistd::chdir(rootfs)?;
 
@@ -403,106 +396,6 @@ fn is_none_mount_type(typ: &Option<String>) -> bool {
         Some(t) => t == "none",
         None => true,
     }
-}
-
-fn mount_cgroups(
-    cfd_log: RawFd,
-    m: &Mount,
-    rootfs: &str,
-    flags: MsFlags,
-    _data: &str,
-    cpath: &HashMap<String, String>,
-    mounts: &HashMap<String, String>,
-) -> Result<()> {
-    if cgroups::hierarchies::is_cgroup2_unified_mode() {
-        return mount_cgroups_v2(cfd_log, m, rootfs, flags);
-    }
-
-    let mount_dest = m.destination().display().to_string();
-    // mount tmpfs
-    let mut ctm = oci::Mount::default();
-    ctm.set_source(Some(PathBuf::from("tmpfs")));
-    ctm.set_typ(Some("tmpfs".to_string()));
-    ctm.set_destination(m.destination().clone());
-
-    let cflags = MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
-    mount_from(cfd_log, &ctm, rootfs, cflags, "", "")?;
-    let olddir = unistd::getcwd()?;
-
-    unistd::chdir(rootfs)?;
-
-    let mut srcs: HashSet<String> = HashSet::new();
-
-    // bind mount cgroups
-    for (key, mount) in mounts.iter() {
-        log_child!(cfd_log, "mount cgroup subsystem {}", key);
-        let source = if cpath.get(key).is_some() {
-            cpath.get(key).unwrap()
-        } else {
-            continue;
-        };
-
-        let base = if let Some(o) = mount.rfind('/') {
-            &mount[o + 1..]
-        } else {
-            &mount[..]
-        };
-
-        let destination = format!("{}/{}", &mount_dest, base);
-
-        if srcs.contains(source) {
-            // already mounted, xxx,yyy style cgroup
-            if key != base {
-                let src = format!("{}/{}", &mount_dest, key);
-                unix::fs::symlink(destination.as_str(), &src[1..])?;
-            }
-
-            continue;
-        }
-
-        srcs.insert(source.to_string());
-
-        log_child!(cfd_log, "mount destination: {}", destination.as_str());
-
-        let mut bm = oci::Mount::default();
-        bm.set_source(Some(PathBuf::from(source)));
-        bm.set_typ(Some("bind".to_string()));
-        bm.set_destination(PathBuf::from(destination.clone()));
-
-        let mut mount_flags: MsFlags = flags | MsFlags::MS_REC | MsFlags::MS_BIND;
-        if key.contains("systemd") {
-            mount_flags &= !MsFlags::MS_RDONLY;
-        }
-        mount_from(cfd_log, &bm, rootfs, mount_flags, "", "")?;
-
-        if key != base {
-            let src = format!("{}/{}", &mount_dest, key);
-            unix::fs::symlink(destination.as_str(), &src[1..]).inspect_err(|e| {
-                log_child!(
-                    cfd_log,
-                    "symlink: {} {} err: {}",
-                    key,
-                    destination.as_str(),
-                    e.to_string()
-                )
-            })?;
-        }
-    }
-
-    unistd::chdir(&olddir)?;
-
-    if flags.contains(MsFlags::MS_RDONLY) {
-        let dest = format!("{}{}", rootfs, &mount_dest);
-        mount(
-            Some(dest.as_str()),
-            dest.as_str(),
-            None::<&str>,
-            flags | MsFlags::MS_BIND | MsFlags::MS_REMOUNT,
-            None::<&str>,
-        )?;
-    }
-
-    Ok(())
 }
 
 #[cfg(not(test))]
@@ -1126,7 +1019,6 @@ fn check_paths(path: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs::create_dir;
-    use std::fs::create_dir_all;
     use std::fs::remove_dir_all;
     use std::fs::remove_file;
     use std::io;
@@ -1140,11 +1032,9 @@ mod tests {
     fn test_init_rootfs() {
         let stdout_fd = std::io::stdout().as_raw_fd();
         let mut spec = oci::Spec::default();
-        let cpath = HashMap::new();
-        let mounts = HashMap::new();
 
         // there is no spec.linux, should fail
-        let ret = init_rootfs(stdout_fd, &spec, &cpath, &mounts, true);
+        let ret = init_rootfs(stdout_fd, &spec, true);
         assert!(
             ret.is_err(),
             "Should fail: there is no spec.linux. Got: {:?}",
@@ -1153,7 +1043,7 @@ mod tests {
 
         // there is no spec.Root, should fail
         spec.set_linux(Some(oci::Linux::default()));
-        let ret = init_rootfs(stdout_fd, &spec, &cpath, &mounts, true);
+        let ret = init_rootfs(stdout_fd, &spec, true);
         assert!(
             ret.is_err(),
             "should fail: there is no spec.Root. Got: {:?}",
@@ -1170,7 +1060,7 @@ mod tests {
         spec.set_root(Some(oci_root));
 
         // there is no spec.mounts, but should pass
-        let ret = init_rootfs(stdout_fd, &spec, &cpath, &mounts, true);
+        let ret = init_rootfs(stdout_fd, &spec, true);
         assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
         let _ = remove_dir_all(rootfs.path().join("dev"));
         let _ = create_dir(rootfs.path().join("dev"));
@@ -1187,7 +1077,7 @@ mod tests {
         spec.mounts_mut().as_mut().unwrap().push(oci_mount);
 
         // destination doesn't start with /, should fail
-        let ret = init_rootfs(stdout_fd, &spec, &cpath, &mounts, true);
+        let ret = init_rootfs(stdout_fd, &spec, true);
         assert!(
             ret.is_err(),
             "Should fail: destination doesn't start with '/'. Got: {:?}",
@@ -1205,7 +1095,7 @@ mod tests {
         oci_mount.set_options(Some(vec!["shared".into()]));
         spec.mounts_mut().as_mut().unwrap().push(oci_mount);
 
-        let ret = init_rootfs(stdout_fd, &spec, &cpath, &mounts, true);
+        let ret = init_rootfs(stdout_fd, &spec, true);
         assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
         spec.mounts_mut().as_mut().unwrap().pop();
         let _ = remove_dir_all(rootfs.path().join("dev"));
@@ -1219,7 +1109,7 @@ mod tests {
         oci_mount.set_options(Some(vec!["shared".into()]));
         spec.mounts_mut().as_mut().unwrap().push(oci_mount);
 
-        let ret = init_rootfs(stdout_fd, &spec, &cpath, &mounts, true);
+        let ret = init_rootfs(stdout_fd, &spec, true);
         assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
     }
 
@@ -1237,32 +1127,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let rootfs = tempdir.path().to_str().unwrap().to_string();
         let flags = MsFlags::MS_RDONLY;
-        let mut cpath = HashMap::new();
-        let mut cgroup_mounts = HashMap::new();
-
-        cpath.insert("cpu".to_string(), "cpu".to_string());
-        cpath.insert("memory".to_string(), "memory".to_string());
-
-        cgroup_mounts.insert("default".to_string(), "default".to_string());
-        cgroup_mounts.insert("cpu".to_string(), "cpu".to_string());
-        cgroup_mounts.insert("memory".to_string(), "memory".to_string());
-
-        let ret = create_dir_all(tempdir.path().join("cgroups"));
-        assert!(ret.is_ok(), "Should pass. Got {:?}", ret);
-        let ret = create_dir_all(tempdir.path().join("cpu"));
-        assert!(ret.is_ok(), "Should pass. Got {:?}", ret);
-        let ret = create_dir_all(tempdir.path().join("memory"));
-        assert!(ret.is_ok(), "Should pass. Got {:?}", ret);
-
-        let ret = mount_cgroups(
-            stdout_fd,
-            &mount,
-            &rootfs,
-            flags,
-            "",
-            &cpath,
-            &cgroup_mounts,
-        );
+        let ret = mount_cgroups(stdout_fd, &mount, &rootfs, flags);
         assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
     }
 

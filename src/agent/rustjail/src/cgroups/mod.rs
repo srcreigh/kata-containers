@@ -7,15 +7,14 @@ use anyhow::{anyhow, Result};
 use core::fmt::Debug;
 use oci_spec::runtime::{LinuxDeviceCgroup, LinuxDeviceType, LinuxResources};
 use protocols::agent::CgroupStats;
-use std::any::Any;
 
 use crate::cgroups_rs as cgroups;
 use cgroups::freezer::FreezerState;
 
 pub mod fs;
+#[cfg(test)]
 pub mod mock;
 pub mod notifier;
-pub mod systemd;
 
 #[derive(Default, Debug)]
 pub struct DevicesCgroupInfo {
@@ -47,19 +46,11 @@ pub trait Manager {
         Err(anyhow!("not supported!"))
     }
 
-    fn set(&self, _container: &LinuxResources, _update: bool) -> Result<()> {
+    fn set(&self, _container: &LinuxResources) -> Result<()> {
         Err(anyhow!("not supported!"))
     }
 
-    fn update_cpuset_path(&self, _: &str, _: &str) -> Result<()> {
-        Err(anyhow!("not supported!"))
-    }
-
-    fn get_cgroup_path(&self, _: &str) -> Result<String> {
-        Err(anyhow!("not supported!"))
-    }
-
-    fn as_any(&self) -> Result<&dyn Any> {
+    fn get_cgroup_path(&self) -> Result<String> {
         Err(anyhow!("not supported!"))
     }
 

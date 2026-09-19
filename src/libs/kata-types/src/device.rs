@@ -42,6 +42,21 @@ pub type DeviceHandlerManager<H> = crate::handler::HandlerManager<H>;
 /// Reject device integrations excluded from the Firecracker contract. This is
 /// shared by the shim (before VM/resource creation) and the guest (before edits).
 pub fn validate_spec_device_features(spec: &oci_spec::runtime::Spec) -> anyhow::Result<()> {
+    if let Some(hooks) = spec.hooks() {
+        anyhow::ensure!(
+            [
+                hooks.prestart(),
+                hooks.create_runtime(),
+                hooks.create_container(),
+                hooks.start_container(),
+                hooks.poststart(),
+                hooks.poststop(),
+            ]
+            .iter()
+            .all(|list| list.as_ref().is_none_or(Vec::is_empty)),
+            "kata-fc: OCI lifecycle hooks are unsupported"
+        );
+    }
     if let Some(annotations) = spec.annotations() {
         anyhow::ensure!(
             !annotations.keys().any(|key| key.starts_with("cdi.k8s.io/")),
@@ -119,6 +134,30 @@ mod minimal_device_tests {
         device.set_minor(3);
         linux.set_devices(Some(vec![device]));
         validate_linux_device_features(&linux).unwrap();
+    }
+
+    #[test]
+    fn oci_hooks_are_rejected_but_empty_hook_objects_are_allowed() {
+        use oci_spec::runtime::{Hook, Hooks};
+
+        let mut spec = Spec::default();
+        spec.set_hooks(Some(Hooks::default()));
+        validate_spec_device_features(&spec).unwrap();
+        for stage in 0..6 {
+            let mut hooks = Hooks::default();
+            let hook = Some(vec![Hook::default()]);
+            match stage {
+                0 => hooks.set_prestart(hook),
+                1 => hooks.set_create_runtime(hook),
+                2 => hooks.set_create_container(hook),
+                3 => hooks.set_start_container(hook),
+                4 => hooks.set_poststart(hook),
+                5 => hooks.set_poststop(hook),
+                _ => unreachable!(),
+            };
+            spec.set_hooks(Some(hooks));
+            assert!(validate_spec_device_features(&spec).is_err());
+        }
     }
 
     #[test]

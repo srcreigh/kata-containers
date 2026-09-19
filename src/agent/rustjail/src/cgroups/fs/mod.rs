@@ -4,9 +4,8 @@
 //
 
 use crate::cgroups_rs as cgroups;
-use cgroups::blkio::{BlkIoController, BlkIoData, IoService};
+use cgroups::blkio::BlkIoController;
 use cgroups::cpu::CpuController;
-use cgroups::cpuacct::CpuAcctController;
 use cgroups::cpuset::CpuSetController;
 use cgroups::devices::DevicePermissions;
 use cgroups::devices::DeviceType;
@@ -16,16 +15,16 @@ use cgroups::memory::MemController;
 use cgroups::pid::PidController;
 use cgroups::{
     BlkIoDeviceResource, BlkIoDeviceThrottleResource, Cgroup, CgroupPid, Controller,
-    DeviceResource, HugePageResource, MaxValue, NetworkPriority,
+    DeviceResource, HugePageResource, MaxValue,
 };
 
 use crate::cgroups::{rule_for_all_devices, Manager as CgroupManager};
 use crate::container::DEFAULT_DEVICES;
 use anyhow::{anyhow, Context, Result};
-use libc::{self, pid_t};
+use libc::pid_t;
 use oci::{
     LinuxBlockIo, LinuxCpu, LinuxDevice, LinuxDeviceCgroup, LinuxDeviceCgroupBuilder,
-    LinuxHugepageLimit, LinuxMemory, LinuxNetwork, LinuxPids, LinuxResources, Spec,
+    LinuxHugepageLimit, LinuxMemory, LinuxPids, LinuxResources, Spec,
 };
 use oci_spec::runtime as oci;
 
@@ -34,17 +33,12 @@ use protocols::agent::{
     BlkioStats, BlkioStatsEntry, CgroupStats, CpuStats, CpuUsage, HugetlbStats, MemoryData,
     MemoryStats, PidsStats, ThrottlingData,
 };
-use serde::{Deserialize, Serialize};
-use std::any::Any;
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use super::DevicesCgroupInfo;
 
-const GUEST_CPUS_PATH: &str = "/sys/devices/system/cpu/online";
-const ROOT_SUBCGROUP: &str = "/";
 const INIT_SUBCGROUP: &str = "/init/";
 
 // Convenience function to obtain the scope logger.
@@ -61,16 +55,11 @@ macro_rules! get_controller_or_return_singular_none {
     };
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Manager {
-    pub paths: HashMap<String, String>,
-    pub mounts: HashMap<String, String>,
     pub cpath: String,
-    #[serde(skip)]
     cgroup: cgroups::Cgroup,
-    #[serde(skip)]
     pod_cgroup: Option<cgroups::Cgroup>,
-    #[serde(skip)]
     devcg_allowed_all: bool,
 }
 
@@ -89,7 +78,7 @@ impl CgroupManager for Manager {
         let cgroup_pid = CgroupPid::from(pid as u64);
         if cgroup_has_init_subcgroup(&self.cpath) {
             let cpath = self.cgroup_path_with_subcgroup(INIT_SUBCGROUP);
-            load_cgroup(cgroups::hierarchies::auto(), &cpath)
+            load_cgroup(Box::new(cgroups::hierarchies::V2::new()), &cpath)
                 .add_task_by_tgid(cgroup_pid)
                 .with_context(|| format!("add task {} to cgroup {}", pid, cpath))?;
         } else {
@@ -100,11 +89,13 @@ impl CgroupManager for Manager {
         Ok(())
     }
 
-    fn set(&self, r: &LinuxResources, update: bool) -> Result<()> {
+    fn set(&self, r: &LinuxResources) -> Result<()> {
         info!(
             sl(),
             "cgroup manager set resources for container. Resources input {:?}", r
         );
+
+        validate_resources(r)?;
 
         let res = &mut cgroups::Resources::default();
         let pod_res = &mut cgroups::Resources::default();
@@ -116,7 +107,7 @@ impl CgroupManager for Manager {
 
         // set memory resources
         if let Some(memory) = &r.memory() {
-            set_memory_resources(&self.cgroup, memory, update)?;
+            set_memory_resources(&self.cgroup, memory)?;
         }
 
         // set pids resources
@@ -132,11 +123,6 @@ impl CgroupManager for Manager {
         // set hugepages resources
         if let Some(hugepage_limits) = r.hugepage_limits() {
             set_hugepages_resources(&self.cgroup, hugepage_limits, res);
-        }
-
-        // set network resources
-        if let Some(network) = &r.network() {
-            set_network_resources(&self.cgroup, network, res);
         }
 
         // set devices resources
@@ -161,7 +147,7 @@ impl CgroupManager for Manager {
 
     fn get_stats(&self) -> Result<CgroupStats> {
         // CpuStats
-        let cpu_usage = get_cpuacct_stats(&self.cgroup);
+        let cpu_usage = get_cpu_usage_stats(&self.cgroup);
 
         let throttling_data = get_cpu_stats(&self.cgroup);
 
@@ -231,77 +217,10 @@ impl CgroupManager for Manager {
         Ok(result)
     }
 
-    fn update_cpuset_path(&self, guest_cpuset: &str, container_cpuset: &str) -> Result<()> {
-        if guest_cpuset.is_empty() {
-            return Ok(());
-        }
-        info!(sl(), "update_cpuset_path to: {}", guest_cpuset);
-
-        let h = cgroups::hierarchies::auto();
-        let root_cg = h.root_control_group();
-
-        let root_cpuset_controller: &CpuSetController = root_cg.controller_of().unwrap();
-        let path = root_cpuset_controller.path();
-        let root_path = Path::new(path);
-        info!(sl(), "root cpuset path: {:?}", &path);
-
-        let container_cpuset_controller: &CpuSetController = self.cgroup.controller_of().unwrap();
-        let path = container_cpuset_controller.path();
-        let container_path = Path::new(path);
-        info!(sl(), "container cpuset path: {:?}", &path);
-
-        let mut paths = vec![];
-        for ancestor in container_path.ancestors() {
-            if ancestor == root_path {
-                break;
-            }
-            paths.push(ancestor);
-        }
-        info!(sl(), "parent paths to update cpuset: {:?}", &paths);
-
-        let mut i = paths.len();
-        loop {
-            if i == 0 {
-                break;
-            }
-            i -= 1;
-
-            // remove cgroup root from path
-            let r_path = &paths[i]
-                .to_str()
-                .unwrap()
-                .trim_start_matches(root_path.to_str().unwrap());
-            info!(sl(), "updating cpuset for parent path {:?}", &r_path);
-            let cg = new_cgroup(cgroups::hierarchies::auto(), r_path)?;
-            let cpuset_controller: &CpuSetController = cg.controller_of().unwrap();
-            cpuset_controller.set_cpus(guest_cpuset)?;
-        }
-
-        if !container_cpuset.is_empty() {
-            info!(
-                sl(),
-                "updating cpuset for container path: {:?} cpuset: {}",
-                &container_path,
-                container_cpuset
-            );
-            container_cpuset_controller.set_cpus(container_cpuset)?;
-        }
-
-        Ok(())
-    }
-
-    fn get_cgroup_path(&self, cg: &str) -> Result<String> {
-        if cgroups::hierarchies::is_cgroup2_unified_mode() {
-            let cg_path = format!("/sys/fs/cgroup/{}", self.cpath);
-            return Ok(cg_path);
-        }
-
-        // for cgroup v1
-        Ok(self.paths.get(cg).map(|s| s.to_string()).unwrap())
-    }
-
-    fn as_any(&self) -> Result<&dyn Any> {
-        Ok(self)
+    fn get_cgroup_path(&self) -> Result<String> {
+        Ok(cgroup_path_under_root("/sys/fs/cgroup", &self.cpath)
+            .display()
+            .to_string())
     }
 
     fn name(&self) -> &str {
@@ -309,32 +228,50 @@ impl CgroupManager for Manager {
     }
 }
 
-fn set_network_resources(
-    _cg: &cgroups::Cgroup,
-    network: &LinuxNetwork,
-    res: &mut cgroups::Resources,
-) {
-    info!(sl(), "cgroup manager set network");
-
-    // set classid
-    // description can be found at https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v1/net_cls.html
-    let class_id = network.class_id().unwrap_or(0) as u64;
-    if class_id != 0 {
-        res.network.class_id = Some(class_id);
+/// Reject controls which have no cgroup-v2 implementation before changing resources.
+pub fn validate_resources(resources: &LinuxResources) -> Result<()> {
+    if let Some(network) = resources.network() {
+        if network.class_id().unwrap_or(0) != 0
+            || network.priorities().as_ref().is_some_and(|p| !p.is_empty())
+        {
+            return Err(anyhow!(
+                "kata-fc: cgroup v1 network controls are unsupported"
+            ));
+        }
     }
-
-    // set network priorities
-    // description can be found at https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v1/net_prio.html
-    let mut priorities = vec![];
-    let interface_priority = network.priorities().clone().unwrap_or_default();
-    for p in interface_priority.iter() {
-        priorities.push(NetworkPriority {
-            name: p.name().clone(),
-            priority: p.priority() as u64,
-        });
+    if let Some(cpu) = resources.cpu() {
+        if cpu.realtime_period().unwrap_or(0) != 0 || cpu.realtime_runtime().unwrap_or(0) != 0 {
+            return Err(anyhow!(
+                "kata-fc: cgroup v1 realtime CPU controls are unsupported"
+            ));
+        }
     }
-
-    res.network.priorities = priorities;
+    if let Some(memory) = resources.memory() {
+        if memory.kernel().unwrap_or(0) != 0
+            || memory.kernel_tcp().unwrap_or(0) != 0
+            || memory.swappiness().is_some()
+            || memory.disable_oom_killer().unwrap_or(false)
+        {
+            return Err(anyhow!(
+                "kata-fc: cgroup v1 memory controls are unsupported"
+            ));
+        }
+        convert_memory_swap_to_v2_value(memory.swap().unwrap_or(0), memory.limit().unwrap_or(0))?;
+    }
+    if let Some(block) = resources.block_io() {
+        if block.leaf_weight().unwrap_or(0) != 0
+            || block.weight_device().as_ref().is_some_and(|devices| {
+                devices
+                    .iter()
+                    .any(|device| device.leaf_weight().unwrap_or(0) != 0)
+            })
+        {
+            return Err(anyhow!(
+                "kata-fc: cgroup v1 block leaf weights are unsupported"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn set_devices_resources(
@@ -395,7 +332,6 @@ fn set_block_io_resources(
     info!(sl(), "cgroup manager set block io");
 
     res.blkio.weight = blkio.weight();
-    res.blkio.leaf_weight = blkio.leaf_weight();
 
     let mut blk_device_resources = vec![];
     let default_weight_device = vec![];
@@ -408,7 +344,7 @@ fn set_block_io_resources(
             major: d.major() as u64,
             minor: d.minor() as u64,
             weight: blkio.weight(),
-            leaf_weight: blkio.leaf_weight(),
+            leaf_weight: None,
         };
         blk_device_resources.push(dr);
     }
@@ -455,11 +391,7 @@ fn set_cpu_resources(cg: &cgroups::Cgroup, cpu: &LinuxCpu) -> Result<()> {
     let cpu_controller: &CpuController = cg.controller_of().unwrap();
 
     if let Some(shares) = cpu.shares() {
-        let shares = if cg.v2() {
-            convert_shares_to_v2_value(shares)
-        } else {
-            shares
-        };
+        let shares = convert_shares_to_v2_value(shares);
         if shares != 0 {
             cpu_controller.set_shares(shares)?;
         }
@@ -468,78 +400,21 @@ fn set_cpu_resources(cg: &cgroups::Cgroup, cpu: &LinuxCpu) -> Result<()> {
     set_resource!(cpu_controller, set_cfs_quota, cpu, quota);
     set_resource!(cpu_controller, set_cfs_period, cpu, period);
 
-    set_resource!(cpu_controller, set_rt_runtime, cpu, realtime_runtime);
-    set_resource!(cpu_controller, set_rt_period_us, cpu, realtime_period);
-
     Ok(())
 }
 
-fn set_memory_resources(cg: &cgroups::Cgroup, memory: &LinuxMemory, update: bool) -> Result<()> {
+fn set_memory_resources(cg: &cgroups::Cgroup, memory: &LinuxMemory) -> Result<()> {
     info!(sl(), "cgroup manager set memory");
     let mem_controller: &MemController = cg.controller_of().unwrap();
 
-    if !update {
-        // initialize kmem limits for accounting
-        mem_controller.set_kmem_limit(1)?;
-        mem_controller.set_kmem_limit(-1)?;
+    // OCI expresses memory+swap together; v2 limits swap separately.
+    let swap =
+        convert_memory_swap_to_v2_value(memory.swap().unwrap_or(0), memory.limit().unwrap_or(0))?;
+    set_resource!(mem_controller, set_limit, memory, limit);
+    if swap != 0 || memory.swap().unwrap_or(0) > 0 {
+        mem_controller.set_memswap_limit(swap)?;
     }
-
-    // If the memory update is set to -1 we should also
-    // set swap to -1, it means unlimited memory.
-    let mut swap = memory.swap().unwrap_or(0);
-    if memory.limit() == Some(-1) {
-        swap = -1;
-    }
-
-    if memory.limit().is_some() && swap != 0 {
-        let memstat = get_memory_stats(cg)
-            .into_option()
-            .ok_or_else(|| anyhow!("failed to get the cgroup memory stats"))?;
-        let memusage = memstat.usage();
-
-        // When update memory limit, the kernel would check the current memory limit
-        // set against the new swap setting, if the current memory limit is large than
-        // the new swap, then set limit first, otherwise the kernel would complain and
-        // refused to set; on the other hand, if the current memory limit is smaller than
-        // the new swap, then we should set the swap first and then set the memor limit.
-        if swap == -1 || memusage.limit() < swap as u64 {
-            mem_controller.set_memswap_limit(swap)?;
-            set_resource!(mem_controller, set_limit, memory, limit);
-        } else {
-            set_resource!(mem_controller, set_limit, memory, limit);
-            mem_controller.set_memswap_limit(swap)?;
-        }
-    } else {
-        set_resource!(mem_controller, set_limit, memory, limit);
-        swap = if cg.v2() {
-            convert_memory_swap_to_v2_value(swap, memory.limit().unwrap_or(0))?
-        } else {
-            swap
-        };
-        if swap != 0 {
-            mem_controller.set_memswap_limit(swap)?;
-        }
-    }
-
     set_resource!(mem_controller, set_soft_limit, memory, reservation);
-    set_resource!(mem_controller, set_kmem_limit, memory, kernel);
-    set_resource!(mem_controller, set_tcp_limit, memory, kernel_tcp);
-
-    if let Some(swappiness) = memory.swappiness() {
-        if (0..=100).contains(&swappiness) {
-            mem_controller.set_swappiness(swappiness)?;
-        } else {
-            return Err(anyhow!(
-                "invalid value:{}. valid memory swappiness range is 0-100",
-                swappiness
-            ));
-        }
-    }
-
-    if memory.disable_oom_killer().unwrap_or(false) {
-        mem_controller.disable_oom_killer()?;
-    }
-
     Ok(())
 }
 
@@ -600,13 +475,6 @@ fn linux_device_cgroup_to_device_resource(d: &LinuxDeviceCgroup) -> Option<Devic
     })
 }
 
-// split space separated values into an vector of u64
-fn line_to_vec(line: &str) -> Vec<u64> {
-    line.split_whitespace()
-        .filter_map(|x| x.parse::<u64>().ok())
-        .collect::<Vec<u64>>()
-}
-
 // split flat keyed values into an hashmap of <String, u64>
 fn lines_to_map(content: &str) -> HashMap<String, u64> {
     content
@@ -619,16 +487,9 @@ fn lines_to_map(content: &str) -> HashMap<String, u64> {
         })
 }
 
-pub const NANO_PER_SECOND: u64 = 1000000000;
 pub const WILDCARD: i64 = -1;
 
 lazy_static! {
-    pub static ref CLOCK_TICKS: f64 = {
-        let n = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-
-        n as f64
-    };
-
     pub static ref DEFAULT_ALLOWED_DEVICES: Vec<LinuxDeviceCgroup> = {
         vec![
             // all mknod to all char devices
@@ -707,56 +568,29 @@ fn get_cpu_stats(cg: &cgroups::Cgroup) -> MessageField<ThrottlingData> {
     })
 }
 
-fn get_cpuacct_stats(cg: &cgroups::Cgroup) -> MessageField<CpuUsage> {
-    if let Some(cpuacct_controller) = cg.controller_of::<CpuAcctController>() {
-        let cpuacct = cpuacct_controller.cpuacct();
-
-        let h = lines_to_map(&cpuacct.stat);
-        let usage_in_usermode =
-            (((*h.get("user").unwrap_or(&0) * NANO_PER_SECOND) as f64) / *CLOCK_TICKS) as u64;
-        let usage_in_kernelmode =
-            (((*h.get("system").unwrap_or(&0) * NANO_PER_SECOND) as f64) / *CLOCK_TICKS) as u64;
-
-        let total_usage = cpuacct.usage;
-
-        let percpu_usage = line_to_vec(&cpuacct.usage_percpu);
-
-        return MessageField::some(CpuUsage {
-            total_usage,
-            percpu_usage,
-            usage_in_kernelmode,
-            usage_in_usermode,
-            ..Default::default()
-        });
-    }
-
-    // try to get from cpu controller
+fn get_cpu_usage_stats(cg: &cgroups::Cgroup) -> MessageField<CpuUsage> {
     let cpu_controller: &CpuController = get_controller_or_return_singular_none!(cg);
     let stat = cpu_controller.cpu().stat;
     let h = lines_to_map(&stat);
-    // All fields in CpuUsage are expressed in nanoseconds (ns).
-    //
-    // For cgroup v1 (cpuacct controller):
-    // kata-agent reads the cpuacct.stat file, which reports the number of ticks
-    // consumed by the processes in the cgroup. It then converts these ticks to nanoseconds.
-    // Ref: https://www.kernel.org/doc/Documentation/cgroup-v1/cpuacct.txt
-    //
-    // For cgroup v2 (cpu controller):
-    // kata-agent reads the cpu.stat file, which reports the time consumed by the
-    // processes in the cgroup in microseconds (us). It then converts microseconds to nanoseconds.
-    // Ref: https://www.kernel.org/doc/Documentation/cgroup-v2.txt, section 5-1-1. CPU Interface Files
+    // cpu.stat uses microseconds; the RPC uses nanoseconds.
     let usage_in_usermode = *h.get("user_usec").unwrap_or(&0) * 1000;
     let usage_in_kernelmode = *h.get("system_usec").unwrap_or(&0) * 1000;
     let total_usage = *h.get("usage_usec").unwrap_or(&0) * 1000;
-    let percpu_usage = vec![];
 
     MessageField::some(CpuUsage {
         total_usage,
-        percpu_usage,
         usage_in_kernelmode,
         usage_in_usermode,
         ..Default::default()
     })
+}
+
+// Only send map entries consumed by the host's containerd stats conversion.
+fn host_uses_memory_stat(key: &str) -> bool {
+    matches!(
+        key,
+        "inactive_file" | "inactive_anon" | "active_file" | "unevictable"
+    )
 }
 
 fn get_memory_stats(cg: &cgroups::Cgroup) -> MessageField<MemoryStats> {
@@ -765,10 +599,6 @@ fn get_memory_stats(cg: &cgroups::Cgroup) -> MessageField<MemoryStats> {
     // cache from memory stat
     let memory = memory_controller.memory_stat();
     let cache = memory.stat.cache;
-
-    // use_hierarchy
-    let value = memory.use_hierarchy;
-    let use_hierarchy = value == 1;
 
     // get memory data
     let usage = MessageField::some(MemoryData {
@@ -790,24 +620,16 @@ fn get_memory_stats(cg: &cgroups::Cgroup) -> MessageField<MemoryStats> {
         ..Default::default()
     });
 
-    // get kernel usage
-    let kmem_stat = memory_controller.kmem_stat();
-
-    let kernel_usage = MessageField::some(MemoryData {
-        usage: kmem_stat.usage_in_bytes,
-        max_usage: kmem_stat.max_usage_in_bytes,
-        failcnt: kmem_stat.fail_cnt,
-        limit: kmem_stat.limit_in_bytes as u64,
-        ..Default::default()
-    });
-
     MessageField::some(MemoryStats {
         cache,
         usage,
         swap_usage,
-        kernel_usage,
-        use_hierarchy,
-        stats: memory.stat.raw,
+        stats: memory
+            .stat
+            .raw
+            .into_iter()
+            .filter(|(key, _)| host_uses_memory_stat(key))
+            .collect(),
         ..Default::default()
     })
 }
@@ -833,78 +655,6 @@ fn get_pids_stats(cg: &cgroups::Cgroup) -> MessageField<PidsStats> {
     })
 }
 
-/*
-examples(from runc, cgroup v1):
-https://github.com/opencontainers/runc/blob/a5847db387ae28c0ca4ebe4beee1a76900c86414/libcontainer/cgroups/fs/blkio.go
-
-    blkio.sectors
-    8:0 6792
-
-    blkio.io_service_bytes
-    8:0 Read 1282048
-    8:0 Write 2195456
-    8:0 Sync 2195456
-    8:0 Async 1282048
-    8:0 Total 3477504
-    Total 3477504
-
-    blkio.io_serviced
-    8:0 Read 124
-    8:0 Write 104
-    8:0 Sync 104
-    8:0 Async 124
-    8:0 Total 228
-    Total 228
-
-    blkio.io_queued
-    8:0 Read 0
-    8:0 Write 0
-    8:0 Sync 0
-    8:0 Async 0
-    8:0 Total 0
-    Total 0
-*/
-
-fn get_blkio_stat_blkiodata(blkiodata: &[BlkIoData]) -> Vec<BlkioStatsEntry> {
-    let mut m = Vec::new();
-    if blkiodata.is_empty() {
-        return m;
-    }
-
-    // blkio.time_recursive and blkio.sectors_recursive have no op field.
-    let op = "".to_string();
-    for d in blkiodata {
-        m.push(BlkioStatsEntry {
-            major: d.major as u64,
-            minor: d.minor as u64,
-            op: op.clone(),
-            value: d.data,
-            ..Default::default()
-        });
-    }
-
-    m
-}
-
-fn get_blkio_stat_ioservice(services: &[IoService]) -> Vec<BlkioStatsEntry> {
-    let mut m = Vec::new();
-
-    if services.is_empty() {
-        return m;
-    }
-
-    for s in services {
-        m.push(build_blkio_stats_entry(s.major, s.minor, "read", s.read));
-        m.push(build_blkio_stats_entry(s.major, s.minor, "write", s.write));
-        m.push(build_blkio_stats_entry(s.major, s.minor, "sync", s.sync));
-        m.push(build_blkio_stats_entry(
-            s.major, s.minor, "async", s.r#async,
-        ));
-        m.push(build_blkio_stats_entry(s.major, s.minor, "total", s.total));
-    }
-    m
-}
-
 fn build_blkio_stats_entry(major: i16, minor: i16, op: &str, value: u64) -> BlkioStatsEntry {
     BlkioStatsEntry {
         major: major as u64,
@@ -915,7 +665,7 @@ fn build_blkio_stats_entry(major: i16, minor: i16, op: &str, value: u64) -> Blki
     }
 }
 
-fn get_blkio_stats_v2(cg: &cgroups::Cgroup) -> MessageField<BlkioStats> {
+fn get_blkio_stats(cg: &cgroups::Cgroup) -> MessageField<BlkioStats> {
     let blkio_controller: &BlkIoController = get_controller_or_return_singular_none!(cg);
     let blkio = blkio_controller.blkio();
 
@@ -937,42 +687,6 @@ fn get_blkio_stats_v2(cg: &cgroups::Cgroup) -> MessageField<BlkioStats> {
     resp.io_service_bytes_recursive = blkio_stats;
 
     MessageField::some(resp)
-}
-
-fn get_blkio_stats(cg: &cgroups::Cgroup) -> MessageField<BlkioStats> {
-    if cg.v2() {
-        return get_blkio_stats_v2(cg);
-    }
-
-    let blkio_controller: &BlkIoController = get_controller_or_return_singular_none!(cg);
-    let blkio = blkio_controller.blkio();
-
-    let mut m = BlkioStats::new();
-    let io_serviced_recursive = blkio.io_serviced_recursive;
-
-    if io_serviced_recursive.is_empty() {
-        // fall back to generic stats
-        // blkio.throttle.io_service_bytes,
-        // maybe io_service_bytes_recursive?
-        // stick to runc for now
-        m.io_service_bytes_recursive = get_blkio_stat_ioservice(&blkio.throttle.io_service_bytes);
-        m.io_serviced_recursive = get_blkio_stat_ioservice(&blkio.throttle.io_serviced);
-    } else {
-        // Try to read CFQ stats available on all CFQ enabled kernels first
-        // IoService type data
-        m.io_service_bytes_recursive = get_blkio_stat_ioservice(&blkio.io_service_bytes_recursive);
-        m.io_serviced_recursive = get_blkio_stat_ioservice(&io_serviced_recursive);
-        m.io_queued_recursive = get_blkio_stat_ioservice(&blkio.io_queued_recursive);
-        m.io_service_time_recursive = get_blkio_stat_ioservice(&blkio.io_service_time_recursive);
-        m.io_wait_time_recursive = get_blkio_stat_ioservice(&blkio.io_wait_time_recursive);
-        m.io_merged_recursive = get_blkio_stat_ioservice(&blkio.io_merged_recursive);
-
-        // BlkIoData type data
-        m.io_time_recursive = get_blkio_stat_blkiodata(&blkio.time_recursive);
-        m.sectors_recursive = get_blkio_stat_blkiodata(&blkio.sectors_recursive);
-    }
-
-    MessageField::some(m)
 }
 
 fn get_hugetlb_stats(cg: &cgroups::Cgroup) -> HashMap<String, HugetlbStats> {
@@ -1004,64 +718,14 @@ fn get_hugetlb_stats(cg: &cgroups::Cgroup) -> HashMap<String, HugetlbStats> {
     h
 }
 
-pub const PATHS: &str = "/proc/self/cgroup";
-pub const MOUNTS: &str = "/proc/self/mountinfo";
-
-pub fn get_paths() -> Result<HashMap<String, String>> {
-    let mut m = HashMap::new();
-    for l in fs::read_to_string(PATHS)?.lines() {
-        let fl: Vec<&str> = l.split(':').collect();
-        if fl.len() != 3 {
-            info!(sl(), "Corrupted cgroup data!");
-            continue;
-        }
-
-        let keys: Vec<&str> = fl[1].split(',').collect();
-        for key in &keys {
-            m.insert(key.to_string(), fl[2].to_string());
-        }
-    }
-    Ok(m)
-}
-
 fn cgroup_path_under_root(root: impl AsRef<Path>, cpath: &str) -> PathBuf {
     root.as_ref().join(cpath.trim_start_matches('/'))
 }
 
 fn cgroup_has_init_subcgroup(cpath: &str) -> bool {
-    cgroups::hierarchies::is_cgroup2_unified_mode()
-        && cgroup_path_under_root(cgroups::hierarchies::auto().root(), cpath)
-            .join("init")
-            .exists()
-}
-
-pub fn get_mounts(paths: &HashMap<String, String>) -> Result<HashMap<String, String>> {
-    let mut m = HashMap::new();
-
-    for l in fs::read_to_string(MOUNTS)?.lines() {
-        let p: Vec<&str> = l.splitn(2, " - ").collect();
-        let pre: Vec<&str> = p[0].split(' ').collect();
-        let post: Vec<&str> = p[1].split(' ').collect();
-
-        if post.len() != 3 {
-            warn!(sl(), "can't parse {} line {:?}", MOUNTS, l);
-            continue;
-        }
-
-        if post[0] != "cgroup" && post[0] != "cgroup2" {
-            continue;
-        }
-
-        let names: Vec<&str> = post[2].split(',').collect();
-
-        for name in &names {
-            if paths.contains_key(*name) {
-                m.insert(name.to_string(), pre[4].to_string());
-            }
-        }
-    }
-
-    Ok(m)
+    cgroup_path_under_root("/sys/fs/cgroup", cpath)
+        .join("init")
+        .exists()
 }
 
 #[inline]
@@ -1082,7 +746,12 @@ impl Manager {
         spec: &Spec,
         devcg_info: Option<Arc<RwLock<DevicesCgroupInfo>>>,
     ) -> Result<Self> {
-        let (paths, mounts) = Self::get_paths_and_mounts(cpath).context("Get paths and mounts")?;
+        if !cgroups::hierarchies::is_cgroup2_unified_mode() {
+            return Err(anyhow!("kata-fc requires cgroup v2"));
+        }
+        if let Some(resources) = spec.linux().as_ref().and_then(|l| l.resources().as_ref()) {
+            validate_resources(resources)?;
+        }
 
         // Do not expect poisoning lock
         let mut devices_group_info = devcg_info.as_ref().map(|i| i.write().unwrap());
@@ -1106,7 +775,10 @@ impl Manager {
                 // some excessive permissions, and children inherit upper
                 // node's rules. You'll feel painful to shrink upper nodes'
                 // permissions if the new permissions are subset of old.
-                pod_cgroup = Some(load_cgroup(cgroups::hierarchies::auto(), &pod_cpath));
+                pod_cgroup = Some(load_cgroup(
+                    Box::new(cgroups::hierarchies::V2::new()),
+                    &pod_cpath,
+                ));
                 let pod_cg = pod_cgroup.as_ref().unwrap();
 
                 let is_allowded_all = Self::has_allowed_all_devices_rule(spec);
@@ -1149,7 +821,7 @@ impl Manager {
         }
 
         // Create a cgroup for the container.
-        let cg = new_cgroup(cgroups::hierarchies::auto(), cpath)?;
+        let cg = new_cgroup(Box::new(cgroups::hierarchies::V2::new()), cpath)?;
         // The rules of container cgroup are copied from its parent, which
         // contains some permissions that the container doesn't need.
         // Therefore, resetting the container's devices cgroup is required.
@@ -1161,9 +833,6 @@ impl Manager {
         }
 
         Ok(Self {
-            paths,
-            mounts,
-            // rels: paths,
             cpath: cpath.to_string(),
             cgroup: cg,
             pod_cgroup,
@@ -1171,36 +840,6 @@ impl Manager {
                 .map(|info| info.allowed_all)
                 .unwrap_or(false),
         })
-    }
-
-    /// Create a cgroupfs manager for systemd cgroup.
-    /// The device cgroup is disabled in systemd cgroup, given that it is
-    /// implemented by eBPF.
-    pub fn new_systemd(cpath: &str) -> Result<Self> {
-        let (paths, mounts) = Self::get_paths_and_mounts(cpath).context("Get paths and mounts")?;
-
-        let cg = new_cgroup(cgroups::hierarchies::auto(), cpath)?;
-
-        Ok(Self {
-            paths,
-            mounts,
-            cpath: cpath.to_string(),
-            pod_cgroup: None,
-            cgroup: cg,
-            devcg_allowed_all: false,
-        })
-    }
-
-    pub fn subcgroup(&self) -> &str {
-        // Check if we're running with cgroup v2 delegation by verifying:
-        // 1. We're using cgroups v2 (which restricts direct process control)
-        // 2. An "init" subdirectory exists for delegated process attachment
-        //    (for example, Docker-in-Docker or systemd in a container)
-        if cgroup_has_init_subcgroup(&self.cpath) {
-            INIT_SUBCGROUP
-        } else {
-            ROOT_SUBCGROUP
-        }
     }
 
     fn cgroup_path_with_subcgroup(&self, subcgroup: &str) -> String {
@@ -1212,33 +851,8 @@ impl Manager {
         }
     }
 
-    fn get_paths_and_mounts(
-        cpath: &str,
-    ) -> Result<(HashMap<String, String>, HashMap<String, String>)> {
-        let mut m = HashMap::new();
-
-        let paths = get_paths()?;
-        let mounts = get_mounts(&paths)?;
-
-        for key in paths.keys() {
-            let mnt = mounts.get(key);
-
-            if mnt.is_none() {
-                continue;
-            }
-
-            m.insert(key.to_string(), format!("{}/{}", mnt.unwrap(), cpath));
-        }
-
-        Ok((m, mounts))
-    }
-
     fn setup_allowed_all_mode(cgroup: &cgroups::Cgroup) -> Result<()> {
-        // Insert two rules: `b *:* rwm` and `c *:* rwm`.
-        // The reason of not inserting `a *:* rwm` is that the Linux kernel
-        // will deny writing `a` to `devices.allow` once a cgroup has
-        // children. You can refer to
-        // https://www.kernel.org/doc/Documentation/cgroup-v1/devices.txt.
+        // Allow all block and character devices for privileged containers.
         let res = cgroups::Resources {
             devices: cgroups::DeviceResources {
                 devices: vec![
@@ -1365,12 +979,6 @@ fn linux_device_to_device_resource(d: &LinuxDevice) -> Option<DeviceResource> {
     })
 }
 
-// get the guest's online cpus.
-pub fn get_guest_cpuset() -> Result<String> {
-    let c = fs::read_to_string(GUEST_CPUS_PATH)?;
-    Ok(c.trim().to_string())
-}
-
 // Since the OCI spec is designed for cgroup v1, in some cases
 // there is need to convert from the cgroup v1 configuration to cgroup v2
 // the formula for cpuShares is y = (1 + ((x - 2) * 9999) / 262142)
@@ -1415,24 +1023,12 @@ fn convert_memory_swap_to_v2_value(memory_swap: i64, memory: i64) -> Result<i64>
 mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::process::Command;
-    use std::sync::{Arc, RwLock};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::cgroups_rs as cgroups;
     use cgroups::devices::{DevicePermissions, DeviceType};
-    use oci::{
-        LinuxBuilder, LinuxDeviceCgroup, LinuxDeviceCgroupBuilder, LinuxDeviceType,
-        LinuxResourcesBuilder, SpecBuilder,
-    };
-    use oci_spec::runtime as oci;
-    use test_utils::skip_if_not_root;
 
     use super::{cgroup_path_under_root, default_allowed_devices, load_cgroup};
-    use crate::cgroups::fs::{
-        line_to_vec, lines_to_map, Manager, DEFAULT_ALLOWED_DEVICES, WILDCARD,
-    };
-    use crate::cgroups::DevicesCgroupInfo;
+    use crate::cgroups::fs::{lines_to_map, Manager, DEFAULT_ALLOWED_DEVICES, WILDCARD};
     use crate::container::DEFAULT_DEVICES;
 
     #[test]
@@ -1449,10 +1045,8 @@ mod tests {
     #[test]
     fn test_cgroup_path_with_subcgroup_preserves_absolute_cpath() {
         let manager = Manager {
-            paths: HashMap::new(),
-            mounts: HashMap::new(),
             cpath: "/docker.slice/docker-containers.slice/container".to_string(),
-            cgroup: load_cgroup(cgroups::hierarchies::auto(), "/"),
+            cgroup: load_cgroup(Box::new(cgroups::hierarchies::V2::new()), "/"),
             pod_cgroup: None,
             devcg_allowed_all: false,
         };
@@ -1465,24 +1059,6 @@ mod tests {
             manager.cgroup_path_with_subcgroup("/"),
             "/docker.slice/docker-containers.slice/container"
         );
-    }
-
-    #[test]
-    fn test_line_to_vec() {
-        let test_cases = vec![
-            ("1 2 3", vec![1, 2, 3]),
-            ("a 1 b 2 3 c", vec![1, 2, 3]),
-            ("a b c", vec![]),
-        ];
-
-        for test_case in test_cases {
-            let result = line_to_vec(test_case.0);
-            assert_eq!(
-                result, test_case.1,
-                "except: {:?} for input {}",
-                test_case.1, test_case.0
-            );
-        }
     }
 
     #[test]
@@ -1514,176 +1090,52 @@ mod tests {
         }
     }
 
-    struct MockSandbox {
-        devcg_info: Arc<RwLock<DevicesCgroupInfo>>,
-    }
-
-    impl MockSandbox {
-        fn new() -> Self {
-            Self {
-                devcg_info: Arc::new(RwLock::new(DevicesCgroupInfo::default())),
-            }
+    #[test]
+    fn test_reject_cgroup_v1_resources() {
+        for request in [
+            serde_json::json!({"network": {"classID": 1}}),
+            serde_json::json!({"network": {"priorities": [{"name": "eth0", "priority": 1}]}}),
+            serde_json::json!({"cpu": {"realtimePeriod": 1}}),
+            serde_json::json!({"cpu": {"realtimeRuntime": 1}}),
+            serde_json::json!({"memory": {"kernel": 1}}),
+            serde_json::json!({"memory": {"kernelTCP": 1}}),
+            serde_json::json!({"memory": {"swappiness": 0}}),
+            serde_json::json!({"memory": {"disableOOMKiller": true}}),
+            serde_json::json!({"blockIO": {"leafWeight": 1}}),
+            serde_json::json!({"blockIO": {"weightDevice": [{"major": 8, "minor": 0, "leafWeight": 1}]}}),
+        ] {
+            let resources = serde_json::from_value(request.clone()).unwrap();
+            assert!(
+                super::validate_resources(&resources).is_err(),
+                "accepted {request}"
+            );
         }
+        let resources = serde_json::from_value(serde_json::json!({
+            "cpu": {"period": 100000, "quota": 100000, "shares": 1024},
+            "memory": {"limit": 536870912, "swap": 536870912, "disableOOMKiller": false},
+            "pids": {"limit": 256},
+            "hugepageLimits": [{"pageSize": "2MB", "limit": 2097152}]
+        }))
+        .unwrap();
+        super::validate_resources(&resources).unwrap();
     }
 
     #[test]
-    fn test_new_fs_manager() {
-        skip_if_not_root!();
-
-        let output = Command::new("stat")
-            .arg("-f")
-            .arg("-c")
-            .arg("%T")
-            .arg("/sys/fs/cgroup/")
-            .output()
-            .unwrap();
-        let output_str = String::from_utf8(output.stdout).unwrap();
-        let cgroup_version = output_str.strip_suffix("\n").unwrap();
-        if cgroup_version.eq("cgroup2fs") {
-            println!("INFO: Skipping the test as cgroups v2 is used by default");
-            return;
+    fn test_memory_swap_v2_limit() {
+        for (combined, memory, expected) in [
+            (0, 0, 0),
+            (0, -1, -1),
+            (-1, 512, -1),
+            (512, 512, 0),
+            (1024, 512, 512),
+        ] {
+            assert_eq!(
+                super::convert_memory_swap_to_v2_value(combined, memory).unwrap(),
+                expected
+            );
         }
-
-        struct TestCase {
-            cpath: Vec<String>,
-            devices: Vec<Vec<LinuxDeviceCgroup>>,
-            allowed_all: Vec<bool>,
-            pod_devices_list: Vec<String>,
-            container_devices_list: Vec<String>,
-        }
-
-        let allow_all = LinuxDeviceCgroupBuilder::default()
-            .allow(true)
-            .typ(LinuxDeviceType::A)
-            .major(0)
-            .minor(0)
-            .access("rwm")
-            .build()
-            .unwrap();
-        let deny_all = LinuxDeviceCgroupBuilder::default()
-            .allow(false)
-            .typ(LinuxDeviceType::A)
-            .major(0)
-            .minor(0)
-            .access("rwm")
-            .build()
-            .unwrap();
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let one_time_pod_name = format!("kata-agent-fs-manager-test-{}", now);
-        let one_time_cpath =
-            |child: &str| -> String { format!("/{}/{}", one_time_pod_name, child) };
-
-        let test_cases = [
-            TestCase {
-                cpath: vec![one_time_cpath("child1")],
-                devices: vec![vec![allow_all.clone()]],
-                allowed_all: vec![true],
-                pod_devices_list: vec![String::from("a *:* rwm\n")],
-                container_devices_list: vec![String::from("a *:* rwm\n")],
-            },
-            TestCase {
-                cpath: vec![one_time_cpath("child1")],
-                devices: vec![vec![deny_all.clone()]],
-                allowed_all: vec![false],
-                pod_devices_list: vec![String::new()],
-                container_devices_list: vec![String::new()],
-            },
-            TestCase {
-                cpath: vec![one_time_cpath("child1"), one_time_cpath("child2")],
-                devices: vec![vec![deny_all.clone()], vec![allow_all.clone()]],
-                allowed_all: vec![false, true],
-                pod_devices_list: vec![String::new(), String::from("b *:* rwm\nc *:* rwm\n")],
-                container_devices_list: vec![String::new(), String::from("b *:* rwm\nc *:* rwm\n")],
-            },
-            TestCase {
-                cpath: vec![one_time_cpath("child1"), one_time_cpath("child2")],
-                devices: vec![vec![allow_all], vec![deny_all]],
-                allowed_all: vec![true, true],
-                pod_devices_list: vec![String::from("a *:* rwm\n"), String::from("a *:* rwm\n")],
-                container_devices_list: vec![
-                    String::from("a *:* rwm\n"),
-                    String::from("a *:* rwm\n"),
-                ],
-            },
-        ];
-
-        for (round, tc) in test_cases.iter().enumerate() {
-            let sandbox = MockSandbox::new();
-            let devcg_info = sandbox.devcg_info.read().unwrap();
-            assert!(!devcg_info.inited);
-            assert!(!devcg_info.allowed_all);
-            drop(devcg_info);
-            let mut managers = Vec::with_capacity(tc.devices.len());
-
-            for cid in 0..tc.devices.len() {
-                let spec = SpecBuilder::default()
-                    .linux(
-                        LinuxBuilder::default()
-                            .resources(
-                                LinuxResourcesBuilder::default()
-                                    .devices(tc.devices[cid].clone())
-                                    .build()
-                                    .unwrap(),
-                            )
-                            .build()
-                            .unwrap(),
-                    )
-                    .build()
-                    .unwrap();
-                managers.push(
-                    Manager::new(&tc.cpath[cid], &spec, Some(sandbox.devcg_info.clone())).unwrap(),
-                );
-
-                let devcg_info = sandbox.devcg_info.read().unwrap();
-                assert!(devcg_info.inited);
-                assert_eq!(
-                    devcg_info.allowed_all, tc.allowed_all[cid],
-                    "Test case {}: cid {} allowed all assertion failure",
-                    round, cid
-                );
-                drop(devcg_info);
-
-                let pod_devices_list = Command::new("cat")
-                    .arg(format!(
-                        "/sys/fs/cgroup/devices/{}/devices.list",
-                        one_time_pod_name
-                    ))
-                    .output()
-                    .unwrap();
-                let container_devices_list = Command::new("cat")
-                    .arg(format!(
-                        "/sys/fs/cgroup/devices{}/devices.list",
-                        tc.cpath[cid]
-                    ))
-                    .output()
-                    .unwrap();
-
-                let pod_devices_list = String::from_utf8(pod_devices_list.stdout).unwrap();
-                let container_devices_list =
-                    String::from_utf8(container_devices_list.stdout).unwrap();
-
-                assert_eq!(
-                    &pod_devices_list, &tc.pod_devices_list[cid],
-                    "Test case {}: cid {} allowed all assertion failure",
-                    round, cid
-                );
-                assert_eq!(
-                    &container_devices_list, &tc.container_devices_list[cid],
-                    "Test case {}: cid {} allowed all assertion failure",
-                    round, cid
-                )
-            }
-
-            // Clean up cgroups
-            managers
-                .iter()
-                .for_each(|manager| manager.cgroup.delete().unwrap());
-            // The pod_cgroup must not be None
-            managers[0].pod_cgroup.as_ref().unwrap().delete().unwrap();
+        for (combined, memory) in [(100, 0), (100, -1), (100, 200), (100, -2)] {
+            assert!(super::convert_memory_swap_to_v2_value(combined, memory).is_err());
         }
     }
 
