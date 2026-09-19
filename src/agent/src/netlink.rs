@@ -17,6 +17,7 @@ use netlink_packet_route::{
 use nix::errno::Errno;
 use protocols::types::{ARPNeighbor, IPFamily, Interface, Route};
 use rtnetlink::{new_connection, LinkUnspec, RouteMessageBuilder};
+#[cfg(test)]
 use std::convert::TryFrom;
 use std::fmt;
 use std::fs;
@@ -473,6 +474,7 @@ impl Handle {
     }
 }
 
+#[cfg(test)]
 fn format_address(data: &[u8]) -> Result<String> {
     match data.len() {
         4 => {

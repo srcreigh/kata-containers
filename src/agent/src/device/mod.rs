@@ -19,8 +19,6 @@ use std::os::unix::prelude::FileTypeExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-pub const BLOCK: &str = "block";
-
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
     // The major and minor numbers for the device within the guest
