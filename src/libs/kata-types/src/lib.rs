@@ -27,9 +27,6 @@ pub mod cpu;
 /// Contants and data types related to device.
 pub mod device;
 
-/// Constants and data types related to handler.
-pub mod handler;
-
 /// Constants and data types related to Kubernetes/kubelet.
 pub mod k8s;
 
@@ -44,22 +41,8 @@ pub mod capabilities;
 /// Filesystem-related constants
 pub mod fs;
 
-/// The Initdata specification defines the key data structures and algorithms for injecting
-/// any well-defined data from an untrusted host into a TEE (Trusted Execution Environment).
-pub mod initdata;
-
 /// rootless vmm
 pub mod rootless;
-
-/// machine type
-pub mod machine_type;
-
-/// GPT (GUID Partition Table) disk layout and metadata generation.
-pub mod gpt_disk;
-
-/// dm-verity related constants and data types.
-#[cfg(feature = "devicemapper")]
-pub mod dmverity;
 
 use std::path::Path;
 

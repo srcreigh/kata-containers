@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Context, Result};
-use kata_types::mount::StorageDevice;
 use libc::pid_t;
 use rustjail::cgroups::DevicesCgroupInfo;
 use rustjail::container::BaseContainer;
@@ -25,8 +24,7 @@ use tokio::sync::Mutex;
 use crate::mount::{get_mount_fs_type, TYPE_ROOTFS};
 use crate::namespace::Namespace;
 use crate::netlink::Handle;
-use crate::network::Network;
-use crate::storage::StorageDeviceGeneric;
+use crate::storage::StorageDevice;
 use crate::uevent::{Uevent, UeventMatcher};
 
 /// Errors that can occur when looking up processes in the sandbox.
@@ -45,7 +43,7 @@ type UeventWatcher = (Box<dyn UeventMatcher>, oneshot::Sender<Uevent>);
 #[derive(Clone)]
 pub struct StorageState {
     count: Arc<AtomicU32>,
-    device: Arc<dyn StorageDevice>,
+    device: Arc<StorageDevice>,
 
     /// Whether the storage is shared across multiple containers (e.g.
     /// block-based emptyDirs). Shared storages should not be cleaned up
@@ -65,7 +63,7 @@ impl StorageState {
     fn new(shared: bool) -> Self {
         StorageState {
             count: Arc::new(AtomicU32::new(1)),
-            device: Arc::new(StorageDeviceGeneric::default()),
+            device: Arc::new(StorageDevice::default()),
             shared,
         }
     }
@@ -97,8 +95,6 @@ pub struct Sandbox {
     pub id: String,
     pub hostname: String,
     pub containers: HashMap<String, LinuxContainer>,
-    pub network: Network,
-    pub mounts: Vec<String>,
     pub container_mounts: HashMap<String, Vec<String>>,
     pub uevent_map: HashMap<String, Uevent>,
     pub uevent_watchers: Vec<Option<UeventWatcher>>,
@@ -106,7 +102,6 @@ pub struct Sandbox {
     pub shared_ipcns: Namespace,
     pub sandbox_pidns: Option<Namespace>,
     pub storages: HashMap<String, StorageState>,
-    pub running: bool,
     pub no_pivot_root: bool,
     pub sender: Option<tokio::sync::oneshot::Sender<i32>>,
     pub rtnl: Handle,
@@ -127,9 +122,7 @@ impl Sandbox {
             logger: logger.clone(),
             id: String::new(),
             hostname: String::new(),
-            network: Network::new(),
             containers: HashMap::new(),
-            mounts: Vec::new(),
             container_mounts: HashMap::new(),
             uevent_map: HashMap::new(),
             uevent_watchers: Vec::new(),
@@ -137,7 +130,6 @@ impl Sandbox {
             shared_ipcns: Namespace::new(&logger),
             sandbox_pidns: None,
             storages: HashMap::new(),
-            running: false,
             no_pivot_root: fs_type.eq(TYPE_ROOTFS),
             sender: None,
             rtnl: Handle::new()?,
@@ -173,8 +165,8 @@ impl Sandbox {
     pub fn update_sandbox_storage(
         &mut self,
         path: &str,
-        device: Arc<dyn StorageDevice>,
-    ) -> std::result::Result<Arc<dyn StorageDevice>, Arc<dyn StorageDevice>> {
+        device: Arc<StorageDevice>,
+    ) -> std::result::Result<Arc<StorageDevice>, Arc<StorageDevice>> {
         match self.storages.get(path) {
             None => Err(device),
             Some(existing) => {
@@ -437,7 +429,7 @@ mod tests {
         assert!(bind_mount(srcdir_path, destdir_path, &logger).is_ok());
 
         s.add_sandbox_storage(destdir_path, false).await;
-        let storage = StorageDeviceGeneric::new(destdir_path.to_string());
+        let storage = StorageDevice::new(destdir_path.to_string());
         assert!(s
             .update_sandbox_storage(destdir_path, Arc::new(storage))
             .is_ok());
@@ -455,7 +447,7 @@ mod tests {
             other_dir_str = other_dir_path.to_string();
 
             s.add_sandbox_storage(other_dir_path, false).await;
-            let storage = StorageDeviceGeneric::new(other_dir_path.to_string());
+            let storage = StorageDevice::new(other_dir_path.to_string());
             assert!(s
                 .update_sandbox_storage(other_dir_path, Arc::new(storage))
                 .is_ok());

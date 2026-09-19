@@ -4,13 +4,11 @@
 //
 
 use libc::pid_t;
-use std::fs::File;
 use std::os::unix::io::{IntoRawFd, RawFd};
 use tokio::sync::mpsc::Sender;
 
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, Pid};
 use nix::Result;
 
@@ -36,9 +34,6 @@ macro_rules! close_process_stream {
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum StreamType {
-    Stdin,
-    Stdout,
-    Stderr,
     TermMaster,
     ParentStdin,
     ParentStdout,
@@ -56,7 +51,6 @@ pub struct Process {
     pub stderr: Option<RawFd>,
     pub exit_tx: Option<tokio::sync::watch::Sender<bool>>,
     pub exit_rx: Option<tokio::sync::watch::Receiver<bool>>,
-    pub extra_files: Vec<File>,
     pub term_master: Option<RawFd>,
     pub tty: bool,
     pub parent_stdin: Option<RawFd>,
@@ -70,7 +64,6 @@ pub struct Process {
     pub exit_code: i32,
     pub exit_watchers: Vec<Sender<i32>>,
     pub oci: OCIProcess,
-    pub logger: Logger,
     pub term_exit_notifier: Arc<Notify>,
 
     readers: HashMap<StreamType, Reader>,
@@ -79,17 +72,12 @@ pub struct Process {
 
 pub trait ProcessOperations {
     fn pid(&self) -> Pid;
-    fn wait(&self) -> Result<WaitStatus>;
     fn signal(&self, sig: libc::c_int) -> Result<()>;
 }
 
 impl ProcessOperations for Process {
     fn pid(&self) -> Pid {
         Pid::from_raw(self.pid)
-    }
-
-    fn wait(&self) -> Result<WaitStatus> {
-        wait::waitpid(Some(self.pid()), None)
     }
 
     fn signal(&self, sig: libc::c_int) -> Result<()> {
@@ -117,7 +105,6 @@ impl Process {
             stderr: None,
             exit_tx: Some(exit_tx),
             exit_rx: Some(exit_rx),
-            extra_files: Vec::new(),
             tty: ocip.terminal().unwrap_or_default(),
             term_master: None,
             parent_stdin: None,
@@ -128,7 +115,6 @@ impl Process {
             exit_code: 0,
             exit_watchers: Vec::new(),
             oci: ocip.clone(),
-            logger: logger.clone(),
             term_exit_notifier: Arc::new(Notify::new()),
             readers: HashMap::new(),
             writers: HashMap::new(),
@@ -185,9 +171,6 @@ impl Process {
 
     fn get_fd(&self, stream_type: &StreamType) -> Option<RawFd> {
         match stream_type {
-            StreamType::Stdin => self.stdin,
-            StreamType::Stdout => self.stdout,
-            StreamType::Stderr => self.stderr,
             StreamType::TermMaster => self.term_master,
             StreamType::ParentStdin => self.parent_stdin,
             StreamType::ParentStdout => self.parent_stdout,

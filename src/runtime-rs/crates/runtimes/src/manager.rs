@@ -123,7 +123,6 @@ impl RuntimeHandlerManagerInner {
         &mut self,
         sandbox_config: SandboxConfig,
         config: Arc<TomlConfig>,
-        init_size_manager: InitialSizeManager,
     ) -> Result<()> {
         info!(sl!(), "new runtime handler {}", &config.runtime.name);
         let runtime_handler = match config.runtime.name.as_str() {
@@ -138,7 +137,6 @@ impl RuntimeHandlerManagerInner {
                 &self.id,
                 self.msg_sender.clone(),
                 config.clone(),
-                init_size_manager,
                 sandbox_config,
             )
             .await
@@ -244,7 +242,7 @@ impl RuntimeHandlerManagerInner {
             sandbox_config.network_env.netns = None;
         }
 
-        self.init_runtime_handler(sandbox_config, Arc::new(config), initial_size_manager)
+        self.init_runtime_handler(sandbox_config, Arc::new(config))
             .await
             .context("init runtime handler")?;
 

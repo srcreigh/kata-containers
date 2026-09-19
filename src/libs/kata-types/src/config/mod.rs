@@ -23,9 +23,7 @@ pub mod hypervisor;
 
 pub use self::agent::Agent;
 pub use self::hypervisor::{
-    BootInfo, CloudHypervisorConfig, DragonballConfig, Factory, FirecrackerConfig, Hypervisor,
-    OpenVmmConfig, QemuConfig, RemoteConfig, HYPERVISOR_NAME_DRAGONBALL,
-    HYPERVISOR_NAME_FIRECRACKER, HYPERVISOR_NAME_OPENVMM, HYPERVISOR_NAME_QEMU,
+    BootInfo, FirecrackerConfig, Hypervisor, HYPERVISOR_NAME_FIRECRACKER,
 };
 
 mod runtime;
@@ -174,15 +172,6 @@ impl TomlConfig {
         config.adjust_config()?;
         info!(sl!(), "get kata config: {:?}", config);
         Ok(config)
-    }
-
-    /// Get the `Factory` configuration from the active hypervisor.
-    pub fn get_factory(&self) -> Factory {
-        let hypervisor_name = self.runtime.hypervisor_name.as_str();
-        self.hypervisor
-            .get(hypervisor_name)
-            .map(|hv| hv.factory.clone())
-            .unwrap_or_default()
     }
 
     /// Adjust Kata configuration information.

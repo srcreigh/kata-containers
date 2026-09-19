@@ -19,8 +19,6 @@ use async_trait::async_trait;
 
 pub mod device_manager;
 pub mod driver;
-mod tap;
-pub use self::tap::{Error as TapError, Tap};
 pub mod util;
 
 #[derive(Debug)]

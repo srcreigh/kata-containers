@@ -34,21 +34,6 @@ use std::io::{self, Result};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-mod dragonball;
-pub use self::dragonball::{DragonballConfig, HYPERVISOR_NAME_DRAGONBALL};
-
-mod qemu;
-pub use self::qemu::{QemuConfig, HYPERVISOR_NAME_QEMU};
-
-mod ch;
-pub use self::ch::{CloudHypervisorConfig, HYPERVISOR_NAME_CH};
-
-mod remote;
-pub use self::remote::{RemoteConfig, HYPERVISOR_NAME_REMOTE};
-
-mod openvmm;
-pub use self::openvmm::{OpenVmmConfig, HYPERVISOR_NAME_OPENVMM};
-
 mod rate_limiter;
 pub use self::rate_limiter::{RateLimiterConfig, DEFAULT_RATE_LIMITER_REFILL_TIME};
 
@@ -1022,54 +1007,9 @@ fn default_guest_swap_create_threshold_secs() -> u64 {
 }
 
 /// Get host memory size in MiB.
-/// Retrieves the total physical memory of the host across different platforms.
 fn host_memory_mib() -> io::Result<u64> {
-    // Select a platform-specific implementation via a function pointer.
-    let get_memory: fn() -> io::Result<u64> = {
-        #[cfg(target_os = "linux")]
-        {
-            || {
-                let info = nix::sys::sysinfo::sysinfo().map_err(io::Error::other)?;
-                Ok(info.ram_total() / (1024 * 1024)) // MiB
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            || {
-                use sysctl::{Ctl, CtlValue, Sysctl};
-
-                let v = Ctl::new("hw.memsize")
-                    .map_err(io::Error::other)?
-                    .value()
-                    .map_err(io::Error::other)?;
-
-                let bytes = match v {
-                    CtlValue::S64(x) if x >= 0 => x as u64,
-                    other => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("unexpected sysctl hw.memsize value type: {:?}", other),
-                        ));
-                    }
-                };
-
-                Ok(bytes / (1024 * 1024)) // MiB
-            }
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            || {
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "host memory query not implemented on this platform",
-                ))
-            }
-        }
-    };
-
-    get_memory()
+    let info = nix::sys::sysinfo::sysinfo().map_err(io::Error::other)?;
+    Ok(info.ram_total() / (1024 * 1024))
 }
 
 impl MemoryInfo {
@@ -1792,6 +1732,18 @@ impl Hypervisor {
     }
 }
 
+fn reject_unsupported_hypervisor(conf: &TomlConfig) -> Result<()> {
+    if !conf.runtime.hypervisor_name.is_empty()
+        && conf.runtime.hypervisor_name != HYPERVISOR_NAME_FIRECRACKER
+    {
+        return Err(io::Error::other(format!(
+            "kata-fc: unsupported hypervisor {}",
+            conf.runtime.hypervisor_name
+        )));
+    }
+    Ok(())
+}
+
 impl ConfigOps for Hypervisor {
     /// Adjusts the overall hypervisor configuration after loading from the configuration file.
     ///
@@ -1800,6 +1752,7 @@ impl ConfigOps for Hypervisor {
     /// like `blockdev_info`, `boot_info`, etc. It also resolves paths for
     /// `prefetch_list_path`.
     fn adjust_config(conf: &mut TomlConfig) -> Result<()> {
+        reject_unsupported_hypervisor(conf)?;
         HypervisorVendor::adjust_config(conf)?;
         let hypervisors: Vec<String> = conf.hypervisor.keys().cloned().collect();
         info!(
@@ -1807,6 +1760,11 @@ impl ConfigOps for Hypervisor {
             "Adjusting hypervisor configuration {:?}", hypervisors
         );
         for hypervisor in hypervisors.iter() {
+            if hypervisor != HYPERVISOR_NAME_FIRECRACKER {
+                return Err(io::Error::other(format!(
+                    "kata-fc: unsupported hypervisor {hypervisor}"
+                )));
+            }
             if let Some(plugin) = get_hypervisor_plugin(hypervisor) {
                 plugin.adjust_config(conf)?;
                 // Safe to unwrap() because `hypervisor` is a valid key in the hash map.
@@ -1847,10 +1805,16 @@ impl ConfigOps for Hypervisor {
     /// plugin validations, and then recursively validates nested configuration structs
     /// and various paths (`path`, `ctlpath`, `jailer_path`, `prefetch_list_path`).
     fn validate(conf: &TomlConfig) -> Result<()> {
+        reject_unsupported_hypervisor(conf)?;
         HypervisorVendor::validate(conf)?;
 
         let hypervisors: Vec<String> = conf.hypervisor.keys().cloned().collect();
         for hypervisor in hypervisors.iter() {
+            if hypervisor != HYPERVISOR_NAME_FIRECRACKER {
+                return Err(io::Error::other(format!(
+                    "kata-fc: unsupported hypervisor {hypervisor}"
+                )));
+            }
             if let Some(plugin) = get_hypervisor_plugin(hypervisor) {
                 plugin.validate(conf)?;
 
@@ -1940,14 +1904,14 @@ mod tests {
 
     #[test]
     fn test_register_plugin() {
-        let db = DragonballConfig::new();
+        let db = FirecrackerConfig::new();
         db.register();
 
-        let db = Arc::new(DragonballConfig::new());
-        register_hypervisor_plugin("dragonball", db);
+        let db = Arc::new(FirecrackerConfig::new());
+        register_hypervisor_plugin("firecracker", db);
 
-        assert!(get_hypervisor_plugin("dragonball").is_some());
-        assert!(get_hypervisor_plugin("dragonball2").is_none());
+        assert!(get_hypervisor_plugin("firecracker").is_some());
+        assert!(get_hypervisor_plugin("unsupported").is_none());
     }
 
     #[test]

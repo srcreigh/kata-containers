@@ -20,9 +20,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 slog = { workspace = true }
 slog-scope = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "fs", "process", "io-util"] }
-vmm-sys-util = "0.15.0"
 rand = { workspace = true }
 path-clean = "1.0.1"
 tracing = { workspace = true }
@@ -42,27 +40,10 @@ logging = { workspace = true }
 protocols = { workspace = true, features = ["async"] }
 persist = { workspace = true }
 safe-path = { workspace = true }
-tests_utils = { workspace = true }
 tempfile = { workspace = true }
 
-# Dependencies that only exist to support hypervisors which upstream only
-# build on x86_64 and aarch64 (dragonball, firecracker). Keeping them in a
-# target-specific table means:
-#   * the `dragonball` cargo feature is a safe no-op on s390x/ppc64le/
-#     riscv64gc (so `cargo clippy --all-features` in CI doesn't break),
-#   * the dep graph on those targets is completely free of dragonball
-#     and firecracker artifacts, matching what the Makefile already
-#     installs (`FCCMD` is only defined for x86_64/aarch64), and
-#   * any future `use dbs_utils::...` or `use hyperlocal::...` in code
-#     that isn't already arch-gated will fail to build on those targets,
-#     forcing the new code to grow a proper `cfg(target_arch = ...)`
-#     gate at review time instead of silently shipping dead code.
+# Firecracker's HTTP client uses a Unix-domain socket.
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-# `dbs-utils` is only used by the dragonball and firecracker drivers
-# (both x86_64+aarch64 only). It compiles on every arch, but we have no
-# use for it elsewhere, so don't pull it in.
-dbs-utils = { workspace = true }
-# `hyperlocal` is only used by the firecracker driver (UDS HTTP client).
 hyperlocal = { workspace = true }
 
 [features]

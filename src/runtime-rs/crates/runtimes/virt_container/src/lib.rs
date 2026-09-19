@@ -11,7 +11,6 @@ logging::logger_with_subsystem!(sl, "virt-container");
 
 mod container_manager;
 pub mod contract;
-pub mod factory;
 pub mod health_check;
 mod oom;
 pub mod sandbox;
@@ -33,7 +32,6 @@ use kata_types::config::FirecrackerConfig;
 
 use kata_types::config::{hypervisor::register_hypervisor_plugin, TomlConfig};
 
-use resource::cpu_mem::initial_size::InitialSizeManager;
 use resource::ResourceManager;
 use sandbox::VIRTCONTAINER;
 use tokio::sync::mpsc::Sender;
@@ -75,24 +73,14 @@ impl RuntimeHandler for VirtContainer {
         sid: &str,
         msg_sender: Sender<Message>,
         config: Arc<TomlConfig>,
-        init_size_manager: InitialSizeManager,
         sandbox_config: SandboxConfig,
     ) -> Result<RuntimeInstance> {
-        let factory = config.get_factory();
         crate::contract::validate(&config)?;
         let hypervisor = new_hypervisor(&config).await.context("new hypervisor")?;
         let agent = new_agent(&config).context("new agent")? as Arc<dyn agent::Agent>;
 
-        let resource_manager = Arc::new(
-            ResourceManager::new(
-                sid,
-                agent.clone(),
-                hypervisor.clone(),
-                config,
-                init_size_manager,
-            )
-            .await?,
-        );
+        let resource_manager =
+            Arc::new(ResourceManager::new(sid, agent.clone(), hypervisor.clone(), config).await?);
         let pid = std::process::id();
 
         let sandbox = sandbox::VirtSandbox::new(
@@ -102,7 +90,6 @@ impl RuntimeHandler for VirtContainer {
             hypervisor.clone(),
             resource_manager.clone(),
             sandbox_config,
-            factory,
         )
         .await
         .context("new virt sandbox")?;

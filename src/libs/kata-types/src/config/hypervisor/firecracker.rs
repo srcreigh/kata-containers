@@ -36,6 +36,16 @@ impl FirecrackerConfig {
     }
 }
 
+fn reject_confidential_guest(hypervisor: &super::Hypervisor) -> Result<()> {
+    if hypervisor.security_info.confidential_guest || !hypervisor.security_info.initdata.is_empty()
+    {
+        return Err(std::io::Error::other(
+            "kata-fc: confidential guests and initdata are unsupported",
+        ));
+    }
+    Ok(())
+}
+
 impl ConfigPlugin for FirecrackerConfig {
     fn get_max_cpus(&self) -> u32 {
         MAX_FIRECRACKER_VCPUS
@@ -52,6 +62,7 @@ impl ConfigPlugin for FirecrackerConfig {
     /// Adjust the configuration information after loading from configuration file.
     fn adjust_config(&self, conf: &mut TomlConfig) -> Result<()> {
         if let Some(firecracker) = conf.hypervisor.get_mut(HYPERVISOR_NAME_FIRECRACKER) {
+            reject_confidential_guest(firecracker)?;
             if firecracker.boot_info.vm_rootfs_driver.is_empty() {
                 firecracker.boot_info.vm_rootfs_driver = super::VIRTIO_BLK_MMIO.into();
             }
@@ -83,6 +94,7 @@ impl ConfigPlugin for FirecrackerConfig {
     /// Validate the configuration information.
     fn validate(&self, conf: &TomlConfig) -> Result<()> {
         if let Some(firecracker) = conf.hypervisor.get(HYPERVISOR_NAME_FIRECRACKER) {
+            reject_confidential_guest(firecracker)?;
             if firecracker.path.is_empty() {
                 return Err(std::io::Error::other("Firecracker path is empty"));
             }
@@ -140,5 +152,92 @@ mod minimal_tests {
             h.blockdev_info.block_device_driver,
             super::super::VIRTIO_BLK_MMIO
         );
+    }
+
+    #[test]
+    fn firecracker_configuration_and_annotations_remain_usable() {
+        FirecrackerConfig::new().register();
+        let content = r#"
+[hypervisor.firecracker]
+path = "/dev/null"
+jailer_path = "/dev/null"
+kernel = "/dev/null"
+image = "/dev/null"
+rootfs_type = "ext4"
+shared_fs = "none"
+default_vcpus = 1
+default_maxvcpus = 2
+default_memory = 256
+memory_slots = 1
+enable_annotations = ["default_memory", "default_vcpus", "kernel"]
+[agent.kata]
+[runtime]
+name = "virt_container"
+hypervisor_name = "firecracker"
+agent_name = "kata"
+static_sandbox_resource_mgmt = true
+sandbox_cgroup_only = true
+disable_guest_seccomp = true
+"#;
+        let mut conf = TomlConfig::load(content).unwrap();
+        conf.validate().unwrap();
+        let annotations = crate::annotations::Annotation::new(std::collections::HashMap::from([
+            (
+                crate::annotations::KATA_ANNO_CFG_HYPERVISOR_DEFAULT_MEMORY.into(),
+                "512MiB".into(),
+            ),
+            (
+                crate::annotations::KATA_ANNO_CFG_HYPERVISOR_DEFAULT_VCPUS.into(),
+                "2".into(),
+            ),
+            (
+                crate::annotations::KATA_ANNO_CFG_HYPERVISOR_KERNEL_PATH.into(),
+                "/dev/null".into(),
+            ),
+        ]));
+        annotations.update_config_by_annotation(&mut conf).unwrap();
+        conf.validate().unwrap();
+        let fc = &conf.hypervisor["firecracker"];
+        assert_eq!(fc.memory_info.default_memory, 512);
+        assert_eq!(fc.cpu_info.default_vcpus, 2.0);
+        assert_eq!(fc.boot_info.vm_rootfs_driver, "virtio-blk-mmio");
+    }
+
+    #[test]
+    fn unsupported_backends_fail_before_path_operations() {
+        for name in ["qemu", "clh", "dragonball", "openvmm", "remote", "unknown"] {
+            for content in [
+                format!("[hypervisor.{name}]\npath='/nonexistent/hypervisor'"),
+                format!("[runtime]\nhypervisor_name='{name}'"),
+            ] {
+                let err = TomlConfig::load(&content).unwrap_err();
+                assert!(err.to_string().contains("unsupported hypervisor"), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn confidential_config_rejected_without_decoding() {
+        FirecrackerConfig::new().register();
+        for option in [
+            "confidential_guest = true",
+            "initdata = 'not-base64-or-toml'",
+        ] {
+            let err = TomlConfig::load(&format!("[hypervisor.firecracker]\n{option}")).unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("confidential guests and initdata are unsupported"));
+        }
+        for value in ["", "invalid_base64!!", "H4sIAAAAAAAA"] {
+            let annotations =
+                crate::annotations::Annotation::new(std::collections::HashMap::from([(
+                    crate::annotations::KATA_ANNO_CFG_HYPERVISOR_INIT_DATA.into(),
+                    value.into(),
+                )]));
+            let err = annotations
+                .update_config_by_annotation(&mut TomlConfig::default())
+                .unwrap_err();
+            assert!(err.to_string().contains("initdata is unsupported"));
+        }
     }
 }

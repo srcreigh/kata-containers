@@ -10,7 +10,6 @@ use crate::{message::Message, types::SandboxConfig, ContainerManager, Sandbox};
 use anyhow::Result;
 use async_trait::async_trait;
 use kata_types::config::TomlConfig;
-use resource::cpu_mem::initial_size::InitialSizeManager;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Clone)]
@@ -38,7 +37,6 @@ pub trait RuntimeHandler: Send + Sync {
         sid: &str,
         msg_sender: Sender<Message>,
         config: Arc<TomlConfig>,
-        init_size_manager: InitialSizeManager,
         sandbox_config: SandboxConfig,
     ) -> Result<RuntimeInstance>;
 

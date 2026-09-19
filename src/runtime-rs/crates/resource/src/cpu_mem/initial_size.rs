@@ -19,7 +19,6 @@ use oci_spec::runtime as oci;
 struct InitialSize {
     vcpu: f32,
     mem_mb: u32,
-    orig_toml_default_mem: u32,
 }
 
 const MIB: i64 = 1024 * 1024;
@@ -44,11 +43,7 @@ impl TryFrom<&HashMap<String, String>> for InitialSize {
         }
         let mem_mb = convert_memory_to_mb(memory);
 
-        Ok(Self {
-            vcpu,
-            mem_mb,
-            orig_toml_default_mem: 0,
-        })
+        Ok(Self { vcpu, mem_mb })
     }
 }
 
@@ -94,11 +89,7 @@ impl TryFrom<&oci::Spec> for InitialSize {
             sl!(),
             "(from PodSandbox's annotation / SingleContainer's spec) initial size: vcpu={}, mem_mb={}", vcpu, mem_mb
         );
-        Ok(Self {
-            vcpu,
-            mem_mb,
-            orig_toml_default_mem: 0,
-        })
+        Ok(Self { vcpu, mem_mb })
     }
 }
 
@@ -152,20 +143,16 @@ impl InitialSizeManager {
     }
 
     pub fn setup_config(&mut self, config: &mut TomlConfig) -> Result<()> {
+        ensure!(
+            config.runtime.static_sandbox_resource_mgmt,
+            "kata-fc: dynamic VM sizing is unsupported"
+        );
         // update this data to the hypervisor config for later use by hypervisor
         let hypervisor_name = &config.runtime.hypervisor_name;
         let hv = config
             .hypervisor
             .get_mut(hypervisor_name)
             .context("failed to get hypervisor config")?;
-
-        self.resource.orig_toml_default_mem = hv.memory_info.default_memory;
-
-        // Non-static mode keeps configured defaults unchanged.
-        if !config.runtime.static_sandbox_resource_mgmt {
-            validate_non_zero_sandbox_memory(hypervisor_name, hv.memory_info.default_memory)?;
-            return Ok(());
-        }
 
         if self.resource.vcpu > 0.0 || self.resource.mem_mb > 0 {
             if self.resource.vcpu > 0.0 {
@@ -188,10 +175,6 @@ impl InitialSizeManager {
 
         validate_non_zero_sandbox_memory(hypervisor_name, hv.memory_info.default_memory)?;
         Ok(())
-    }
-
-    pub fn get_orig_toml_default_mem(&self) -> u32 {
-        self.resource.orig_toml_default_mem
     }
 }
 
@@ -283,7 +266,6 @@ mod tests {
                 result: InitialSize {
                     vcpu: 0.0,
                     mem_mb: 0,
-                    orig_toml_default_mem: 0,
                 },
             },
             TestData {
@@ -297,7 +279,6 @@ mod tests {
                 result: InitialSize {
                     vcpu: 3.0,
                     mem_mb: 512,
-                    orig_toml_default_mem: 0,
                 },
             },
             TestData {
@@ -310,7 +291,6 @@ mod tests {
                 result: InitialSize {
                     vcpu: 0.0,
                     mem_mb: 514,
-                    orig_toml_default_mem: 0,
                 },
             },
         ]
@@ -439,16 +419,19 @@ mod tests {
         let mut config = TomlConfig::default();
         config
             .hypervisor
-            .insert("qemu".to_owned(), Hypervisor::default());
-        config.hypervisor.entry("qemu".to_owned()).and_modify(|hv| {
-            hv.cpu_info.default_vcpus = default_vcpus;
-            hv.cpu_info.overhead_vcpus = overhead_vcpus;
-            hv.cpu_info.default_maxvcpus = default_maxvcpus;
-            hv.memory_info.default_memory = default_memory;
-            hv.memory_info.overhead_memory = overhead_memory;
-            hv.memory_info.default_maxmemory = default_maxmemory;
-        });
-        config.runtime.hypervisor_name = "qemu".to_owned();
+            .insert("firecracker".to_owned(), Hypervisor::default());
+        config
+            .hypervisor
+            .entry("firecracker".to_owned())
+            .and_modify(|hv| {
+                hv.cpu_info.default_vcpus = default_vcpus;
+                hv.cpu_info.overhead_vcpus = overhead_vcpus;
+                hv.cpu_info.default_maxvcpus = default_maxvcpus;
+                hv.memory_info.default_memory = default_memory;
+                hv.memory_info.overhead_memory = overhead_memory;
+                hv.memory_info.default_maxmemory = default_maxmemory;
+            });
+        config.runtime.hypervisor_name = "firecracker".to_owned();
         config.runtime.static_sandbox_resource_mgmt = static_sandbox_resource_mgmt;
         config
     }
@@ -460,29 +443,30 @@ mod tests {
             resource: InitialSize {
                 vcpu: 1.2,
                 mem_mb: 512,
-                orig_toml_default_mem: 0,
             },
         };
 
         mgr.setup_config(&mut config).unwrap();
-        let hv = config.hypervisor.get("qemu").unwrap();
+        let hv = config.hypervisor.get("firecracker").unwrap();
         assert_eq!(hv.cpu_info.default_vcpus, 1.7);
         assert_eq!(hv.memory_info.default_memory, 640);
     }
 
     #[test]
-    fn test_setup_config_non_static_does_not_apply() {
+    fn test_setup_config_rejects_dynamic_sizing_without_changing_defaults() {
         let mut config = make_config(1.0, 0.5, 4, 256, 128, 4096, false);
         let mut mgr = InitialSizeManager {
             resource: InitialSize {
                 vcpu: 1.2,
                 mem_mb: 512,
-                orig_toml_default_mem: 0,
             },
         };
 
-        mgr.setup_config(&mut config).unwrap();
-        let hv = config.hypervisor.get("qemu").unwrap();
+        let error = mgr.setup_config(&mut config).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("dynamic VM sizing is unsupported"));
+        let hv = config.hypervisor.get("firecracker").unwrap();
         assert_eq!(hv.cpu_info.default_vcpus, 1.0);
         assert_eq!(hv.memory_info.default_memory, 256);
     }
@@ -494,12 +478,11 @@ mod tests {
             resource: InitialSize {
                 vcpu: 2.5,
                 mem_mb: 0,
-                orig_toml_default_mem: 0,
             },
         };
 
         mgr.setup_config(&mut config).unwrap();
-        let hv = config.hypervisor.get("qemu").unwrap();
+        let hv = config.hypervisor.get("firecracker").unwrap();
         assert_eq!(hv.cpu_info.default_vcpus, 3.5);
         assert_eq!(hv.cpu_info.default_maxvcpus, 4);
     }
@@ -511,12 +494,11 @@ mod tests {
             resource: InitialSize {
                 vcpu: 1.2,
                 mem_mb: 0,
-                orig_toml_default_mem: 0,
             },
         };
 
         mgr.setup_config(&mut config).unwrap();
-        let hv = config.hypervisor.get("qemu").unwrap();
+        let hv = config.hypervisor.get("firecracker").unwrap();
         assert_eq!(hv.cpu_info.default_vcpus, 1.7);
         assert_eq!(hv.cpu_info.default_maxvcpus, 2);
     }
@@ -528,29 +510,13 @@ mod tests {
             resource: InitialSize {
                 vcpu: 0.0,
                 mem_mb: 512,
-                orig_toml_default_mem: 0,
             },
         };
 
         mgr.setup_config(&mut config).unwrap();
-        let hv = config.hypervisor.get("qemu").unwrap();
+        let hv = config.hypervisor.get("firecracker").unwrap();
         assert_eq!(hv.memory_info.default_memory, 640);
         assert_eq!(hv.memory_info.default_maxmemory, 640);
-    }
-
-    #[test]
-    fn test_setup_config_preserves_orig_toml_default_mem() {
-        let mut config = make_config(1.0, 0.5, 4, 256, 128, 4096, true);
-        let mut mgr = InitialSizeManager {
-            resource: InitialSize {
-                vcpu: 0.0,
-                mem_mb: 128,
-                orig_toml_default_mem: 0,
-            },
-        };
-
-        mgr.setup_config(&mut config).unwrap();
-        assert_eq!(mgr.get_orig_toml_default_mem(), 256);
     }
 
     #[test]
@@ -559,7 +525,6 @@ mod tests {
             resource: InitialSize {
                 vcpu: 0.0,
                 mem_mb: 0,
-                orig_toml_default_mem: 0,
             },
         };
 
@@ -656,12 +621,11 @@ mod tests {
             resource: InitialSize {
                 vcpu: 0.0,
                 mem_mb: 0,
-                orig_toml_default_mem: 0,
             },
         };
 
         mgr.setup_config(&mut config).unwrap();
-        let hv = config.hypervisor.get("qemu").unwrap();
+        let hv = config.hypervisor.get("firecracker").unwrap();
         assert_eq!(hv.cpu_info.default_vcpus, 2.0);
         assert_eq!(hv.memory_info.default_memory, 512);
     }
@@ -673,7 +637,6 @@ mod tests {
             resource: InitialSize {
                 vcpu: 1.0,
                 mem_mb: 0,
-                orig_toml_default_mem: 0,
             },
         };
 
@@ -711,12 +674,11 @@ mod tests {
             resource: InitialSize {
                 vcpu: requested_vcpus,
                 mem_mb: requested_mem_mb,
-                orig_toml_default_mem: 0,
             },
         };
 
         mgr.setup_config(&mut config).unwrap();
-        let hv = config.hypervisor.get("qemu").unwrap();
+        let hv = config.hypervisor.get("firecracker").unwrap();
 
         assert_eq!(hv.cpu_info.default_vcpus, expected_default_vcpus);
         assert_eq!(hv.memory_info.default_memory, expected_default_memory);

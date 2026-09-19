@@ -281,13 +281,7 @@ impl AgentService {
         // After all those storages have been processed, no matter the order
         // here, the agent will rely on rustjail (using the oci.Mounts
         // list) to bind mount all of them inside the container.
-        let m = add_storages(
-            sl(),
-            req.storages.clone(),
-            &self.sandbox,
-            Some(req.container_id),
-        )
-        .await?;
+        let m = add_storages(sl(), req.storages.clone(), &self.sandbox).await?;
 
         let mut s = self.sandbox.lock().await;
         s.container_mounts.insert(cid.clone(), m);
@@ -1129,7 +1123,6 @@ impl agent_ttrpc::AgentService for AgentService {
             fs::create_dir_all(KATA_GUEST_SHARE_DIR).map_ttrpc_err(same)?;
 
             s.hostname = req.hostname.clone();
-            s.running = true;
 
             if !req.sandbox_id.is_empty() {
                 s.id = req.sandbox_id.clone();
@@ -1138,18 +1131,11 @@ impl agent_ttrpc::AgentService for AgentService {
             s.setup_shared_namespaces().await.map_ttrpc_err(same)?;
         }
 
-        let m = add_storages(sl(), req.storages.clone(), &self.sandbox, None)
+        add_storages(sl(), req.storages.clone(), &self.sandbox)
             .await
             .map_ttrpc_err(same)?;
-        self.sandbox.lock().await.mounts = m;
 
         setup_guest_dns(sl(), &req.dns).map_ttrpc_err(same)?;
-        {
-            let mut s = self.sandbox.lock().await;
-            for dns in req.dns {
-                s.network.set_dns(dns);
-            }
-        }
 
         Ok(Empty::new())
     }
@@ -2015,7 +2001,7 @@ mod tests {
                 }
                 error => panic!("unexpected error: {:?}", error),
             }
-            assert!(!service.sandbox.lock().await.running);
+            assert!(service.sandbox.lock().await.hostname.is_empty());
         }
         validate_sandbox_features(&Default::default()).unwrap();
     }

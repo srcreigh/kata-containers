@@ -9,7 +9,6 @@ use base64::Engine as _;
 use std::convert::TryFrom;
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::handler::HandlerManager;
 use crate::prefix_with_rootless_dir;
 
 /// Prefix to mark a volume as Kata special.
@@ -80,9 +79,6 @@ pub const DEFAULT_KATA_GUEST_SANDBOX_DIR: &str = "/run/kata-containers/sandbox";
 pub const SHM_DIR: &str = "shm";
 /// shm device path.
 pub const SHM_DEVICE: &str = "/dev/shm";
-
-/// Manager to manage registered storage device handlers.
-pub type StorageHandlerManager<H> = HandlerManager<H>;
 
 /// Get the root path used for concatenating with the direct-volume mount info file path.
 pub fn kata_direct_volume_root_path() -> String {
@@ -494,15 +490,6 @@ impl TryFrom<&NydusExtraOptions> for KataVirtualVolume {
             ..Default::default()
         })
     }
-}
-
-/// Trait object for a storage device.
-pub trait StorageDevice: Send + Sync {
-    /// Returns the path of the storage device, if available.
-    fn path(&self) -> Option<&str>;
-
-    /// Cleans up resources related to the storage device.
-    fn cleanup(&self) -> Result<()>;
 }
 
 /// Joins a user-provided volume path with the Kata direct-volume root path.

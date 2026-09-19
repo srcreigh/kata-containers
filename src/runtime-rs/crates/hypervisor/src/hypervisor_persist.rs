@@ -5,9 +5,7 @@
 //
 
 use crate::HypervisorConfig;
-use kata_sys_util::protection::GuestProtection;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct HypervisorState {
     // Type of hypervisor, E.g. dragonball/qemu/firecracker.
@@ -30,10 +28,26 @@ pub struct HypervisorState {
     pub config: HypervisorConfig,
     /// hypervisor run dir
     pub run_dir: String,
-    /// cached block device
-    pub cached_block_devices: HashSet<String>,
-    pub virtiofs_daemon_pid: i32,
-    pub passfd_listener_port: Option<u32>,
-    /// guest protection
-    pub guest_protection_to_use: GuestProtection,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_unused_backend_fields_do_not_break_restore() {
+        let mut state = HypervisorState::default();
+        state.jailed = true;
+        let mut value = serde_json::to_value(&state).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("cached_block_devices".into(), serde_json::json!(["unused"]));
+        object.insert("virtiofs_daemon_pid".into(), serde_json::json!(123));
+        object.insert("passfd_listener_port".into(), serde_json::json!(10240));
+        object.insert(
+            "guest_protection_to_use".into(),
+            serde_json::json!("NoProtection"),
+        );
+        let decoded: HypervisorState = serde_json::from_value(value).unwrap();
+        assert!(decoded.jailed);
+    }
 }

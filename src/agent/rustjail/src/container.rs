@@ -33,8 +33,6 @@ use crate::selinux;
 use crate::specconv::CreateOpts;
 use crate::{mount, validator};
 
-use protocols::agent::StatsContainerResponse;
-
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::fcntl::{FcntlArg, FdFlag};
@@ -46,8 +44,6 @@ use nix::sys::stat::{self, Mode};
 use nix::unistd::{self, fork, ForkResult, Gid, Pid, Uid, User};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
-
-use protobuf::MessageField;
 
 use std::collections::HashMap;
 use std::os::unix::io::FromRawFd;
@@ -76,18 +72,15 @@ const CLOG_FD: &str = "CLOG_FD";
 const FIFO_FD: &str = "FIFO_FD";
 const HOME_ENV_KEY: &str = "HOME";
 const PIDNS_FD: &str = "PIDNS_FD";
-const PIDNS_ENABLED: &str = "PIDNS_ENABLED";
 
 #[derive(Debug)]
 pub struct ContainerStatus {
-    pre_status: ContainerState,
     cur_status: ContainerState,
 }
 
 impl ContainerStatus {
     pub fn new() -> Self {
         ContainerStatus {
-            pre_status: ContainerState::Created,
             cur_status: ContainerState::Created,
         }
     }
@@ -97,7 +90,6 @@ impl ContainerStatus {
     }
 
     fn transition(&mut self, to: ContainerState) {
-        self.pre_status = self.status();
         self.cur_status = to;
     }
 }
@@ -213,7 +205,6 @@ lazy_static! {
 pub trait BaseContainer {
     fn status(&self) -> ContainerState;
     fn get_process(&mut self, eid: &str) -> Result<&mut Process>;
-    fn stats(&self) -> Result<StatsContainerResponse>;
     fn set(&mut self, config: LinuxResources) -> Result<()>;
     async fn start(&mut self, p: Process) -> Result<()>;
     async fn run(&mut self, p: Process) -> Result<()>;
@@ -239,17 +230,6 @@ pub struct LinuxContainer {
     // paths stored in the OCI spec. Keeping the files open makes those paths continue
     // to resolve to the original namespaces.
     pinned_namespace_fds: HashMap<oci::LinuxNamespaceType, fs::File>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PidNs {
-    enabled: bool,
-    fd: Option<i32>,
-}
-impl PidNs {
-    pub fn new(enabled: bool, fd: Option<i32>) -> Self {
-        Self { enabled, fd }
-    }
 }
 
 pub trait Container: BaseContainer {
@@ -311,22 +291,18 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     let crfd = std::env::var(CRFD_FD)?.parse::<i32>().unwrap();
     let cfd_log = std::env::var(CLOG_FD)?.parse::<i32>().unwrap();
 
-    if std::env::var(PIDNS_ENABLED)?.eq(format!("{}", true).as_str()) {
-        // get the pidns fd from parent, if parent had passed the pidns fd,
-        // then get it and join in this pidns; otherwise, create a new pidns
-        // by unshare from the parent pidns.
-        match std::env::var(PIDNS_FD) {
-            Ok(fd) => {
-                let pidns_fd = unsafe {
-                    OwnedFd::from_raw_fd(fd.parse::<i32>().context("get parent pidns fd")?)
-                };
-                sched::setns(&pidns_fd, CloneFlags::CLONE_NEWPID)
-                    .context("failed to join pidns")?;
-                // close is automatic on drop
-            }
-            Err(_e) => {
-                sched::unshare(CloneFlags::CLONE_NEWPID)?;
-            }
+    // get the pidns fd from parent, if parent had passed the pidns fd,
+    // then get it and join in this pidns; otherwise, create a new pidns
+    // by unshare from the parent pidns.
+    match std::env::var(PIDNS_FD) {
+        Ok(fd) => {
+            let pidns_fd =
+                unsafe { OwnedFd::from_raw_fd(fd.parse::<i32>().context("get parent pidns fd")?) };
+            sched::setns(&pidns_fd, CloneFlags::CLONE_NEWPID).context("failed to join pidns")?;
+            // close is automatic on drop
+        }
+        Err(_e) => {
+            sched::unshare(CloneFlags::CLONE_NEWPID)?;
         }
     }
 
@@ -773,15 +749,6 @@ impl BaseContainer for LinuxContainer {
             .ok_or_else(|| anyhow!("invalid eid {}", eid))
     }
 
-    fn stats(&self) -> Result<StatsContainerResponse> {
-        // what about network interface stats?
-
-        Ok(StatsContainerResponse {
-            cgroup_stats: MessageField::some(self.cgroup_manager.as_ref().get_stats()?),
-            ..Default::default()
-        })
-    }
-
     fn set(&mut self, r: LinuxResources) -> Result<()> {
         self.cgroup_manager.as_ref().set(&r)?;
 
@@ -899,11 +866,7 @@ impl BaseContainer for LinuxContainer {
         }
 
         let pidns = get_pid_namespace(&self.logger, linux)?;
-        if !pidns.enabled {
-            return Err(anyhow!("cannot find the pid ns"));
-        }
-
-        defer!(if let Some(fd) = pidns.fd {
+        defer!(if let Some(fd) = pidns {
             let _ = unistd::close(fd);
         });
 
@@ -919,14 +882,13 @@ impl BaseContainer for LinuxContainer {
             .env(NO_PIVOT, format!("{}", self.config.no_pivot_root))
             .env(CRFD_FD, format!("{}", crfd.as_fd().as_raw_fd()))
             .env(CWFD_FD, format!("{}", cwfd.as_fd().as_raw_fd()))
-            .env(CLOG_FD, format!("{}", cfd_log.as_fd().as_raw_fd()))
-            .env(PIDNS_ENABLED, format!("{}", pidns.enabled));
+            .env(CLOG_FD, format!("{}", cfd_log.as_fd().as_raw_fd()));
 
         if p.init {
             child = child.env(FIFO_FD, format!("{fifofd}"));
         }
 
-        if let Some(fd) = pidns.fd {
+        if let Some(fd) = pidns {
             child = child.env(PIDNS_FD, format!("{fd}"));
         }
 
@@ -1194,12 +1156,12 @@ pub fn update_namespaces(
     Ok(())
 }
 
-fn get_pid_namespace(logger: &Logger, linux: &Linux) -> Result<PidNs> {
+fn get_pid_namespace(logger: &Logger, linux: &Linux) -> Result<Option<i32>> {
     let linux_namespaces = linux.namespaces().clone().unwrap_or_default();
     for ns in &linux_namespaces {
         if &ns.typ().to_string() == "pid" {
             let fd = match ns.path() {
-                None => return Ok(PidNs::new(true, None)),
+                None => return Ok(None),
                 Some(ns_path) => fcntl::open(
                     ns_path.display().to_string().as_str(),
                     OFlag::O_RDONLY,
@@ -1216,11 +1178,11 @@ fn get_pid_namespace(logger: &Logger, linux: &Linux) -> Result<PidNs> {
                 })?,
             };
 
-            return Ok(PidNs::new(true, Some(fd.into_raw_fd())));
+            return Ok(Some(fd.into_raw_fd()));
         }
     }
 
-    Ok(PidNs::new(false, None))
+    Err(anyhow!("cannot find the pid ns"))
 }
 
 fn is_userns_enabled(linux: &Linux) -> bool {
@@ -1507,10 +1469,8 @@ mod tests {
         ];
 
         for s in status_table.iter() {
-            let pre_status = status.status();
             status.transition(*s);
-
-            assert_eq!(pre_status, status.pre_status);
+            assert_eq!(status.status(), *s);
         }
     }
 
@@ -1646,6 +1606,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_pid_namespace_is_required_and_may_be_created_or_joined() {
+        let logger = slog_scope::logger();
+        let mut linux = Linux::default();
+        linux.set_namespaces(None);
+        assert!(get_pid_namespace(&logger, &linux).is_err());
+
+        let mut namespace = LinuxNamespaceBuilder::default()
+            .typ(oci::LinuxNamespaceType::Pid)
+            .build()
+            .unwrap();
+        linux.set_namespaces(Some(vec![namespace.clone()]));
+        assert_eq!(get_pid_namespace(&logger, &linux).unwrap(), None);
+
+        namespace.set_path(Some(PathBuf::from("/proc/self/ns/pid")));
+        linux.set_namespaces(Some(vec![namespace]));
+        let fd = get_pid_namespace(&logger, &linux).unwrap().unwrap();
+        let file = unsafe { fs::File::from_raw_fd(fd) };
+        assert_eq!(
+            file.metadata().unwrap().ino(),
+            fs::metadata("/proc/self/ns/pid").unwrap().ino()
+        );
+    }
+
     fn create_dummy_opts() -> CreateOpts {
         let start = SystemTime::now();
         let since_the_epoch = start
@@ -1740,6 +1724,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a delegated disposable cgroup; empty path targets the host root"]
     fn test_linuxcontainer_pause() {
         let ret = new_linux_container_and_then(|mut c: LinuxContainer| {
             c.cgroup_manager =
@@ -1765,6 +1750,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a delegated disposable cgroup; empty path targets the host root"]
     fn test_linuxcontainer_resume() {
         let ret = new_linux_container_and_then(|mut c: LinuxContainer| {
             c.cgroup_manager =
@@ -1799,12 +1785,6 @@ mod tests {
             assert!(p.is_ok(), "Expecting Ok, Got {:?}", p);
             Ok(())
         });
-    }
-
-    #[test]
-    fn test_linuxcontainer_stats() {
-        let ret = new_linux_container_and_then(|c: LinuxContainer| c.stats());
-        assert!(ret.is_ok(), "Expecting Ok, Got {:?}", ret);
     }
 
     #[test]

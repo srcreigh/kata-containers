@@ -36,9 +36,6 @@ pub const DRIVER_VIRTIOFS_TYPE: &str = "virtio-fs";
 /// DRIVER_VIRTIOFS_TYPE is the driver for Bind watch volume.
 pub const DRIVER_WATCHABLE_BIND_TYPE: &str = "watchable-bind";
 
-/// Registry for the supported guest device handlers.
-pub type DeviceHandlerManager<H> = crate::handler::HandlerManager<H>;
-
 /// Reject device integrations excluded from the Firecracker contract. This is
 /// shared by the shim (before VM/resource creation) and the guest (before edits).
 pub fn validate_spec_device_features(spec: &oci_spec::runtime::Spec) -> anyhow::Result<()> {

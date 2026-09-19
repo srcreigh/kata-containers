@@ -34,7 +34,7 @@ pub struct Runtime {
     #[serde(default)]
     pub name: String,
 
-    /// Hypervisor name: Plan to support dragonball, qemu
+    /// Hypervisor name: only firecracker is supported.
     #[serde(default)]
     pub hypervisor_name: String,
 

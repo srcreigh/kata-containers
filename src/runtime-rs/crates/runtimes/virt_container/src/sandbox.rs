@@ -33,7 +33,7 @@ use hypervisor::{
 };
 use kata_sys_util::spec::load_oci_spec;
 
-use kata_types::config::{hypervisor::Factory, TomlConfig};
+use kata_types::config::TomlConfig;
 use persist::{self, sandbox_persist::Persist};
 use protobuf::SpecialFields;
 use resource::manager::ManagerArgs;
@@ -104,7 +104,6 @@ pub struct VirtSandbox {
     exit_notify_tx: watch::Sender<bool>,
     sandbox_config: Option<SandboxConfig>,
     shm_size: u64,
-    factory: Option<Factory>,
     cancel_token: CancellationToken,
     pub(crate) oom_registry: Arc<crate::oom::OomRegistry>,
 }
@@ -121,7 +120,6 @@ impl std::fmt::Debug for VirtSandbox {
             .field("monitor", &"<HealthCheck>")
             .field("exit_notify_tx", &"<watch::Sender<bool>>")
             .field("sandbox_config", &self.sandbox_config)
-            .field("factory", &self.factory)
             .finish()
     }
 }
@@ -134,7 +132,6 @@ impl VirtSandbox {
         hypervisor: Arc<dyn Hypervisor>,
         resource_manager: Arc<ResourceManager>,
         sandbox_config: SandboxConfig,
-        factory: Factory,
     ) -> Result<Self> {
         let config = resource_manager.config().await;
         let keep_abnormal = config.runtime.keep_abnormal;
@@ -151,7 +148,6 @@ impl VirtSandbox {
             exit_notify_tx,
             shm_size: sandbox_config.shm_size,
             sandbox_config: Some(sandbox_config),
-            factory: Some(factory),
             cancel_token,
             oom_registry: Default::default(),
         })
@@ -202,7 +198,7 @@ impl VirtSandbox {
 
         let network_env: SandboxNetworkEnv = sandbox_config.network_env.clone();
         // prepare network config
-        if !network_env.network_created && !self.should_defer_network().await? {
+        if !network_env.network_created {
             if let Some(network_resource) = self.prepare_network_resource(&network_env).await {
                 resource_configs.push(network_resource);
             }
@@ -270,42 +266,6 @@ impl VirtSandbox {
             guest_cid: DEFAULT_GUEST_VSOCK_CID,
             uds_path: get_hvsock_path(&self.sid),
         }))
-    }
-
-    fn is_factory_enabled(&self) -> bool {
-        self.factory
-            .as_ref()
-            .map(|factory| factory.enable_template)
-            .unwrap_or(false)
-    }
-
-    async fn should_defer_network(&self) -> Result<bool> {
-        if !self.is_factory_enabled() {
-            return Ok(false);
-        }
-
-        Ok(self
-            .hypervisor
-            .capabilities()
-            .await?
-            .is_network_device_hotplug_supported())
-    }
-
-    async fn setup_deferred_network_after_start(
-        &self,
-        sandbox_config: &SandboxConfig,
-    ) -> Result<()> {
-        if let Some(ResourceConfig::Network(network_resource)) = self
-            .prepare_network_resource(&sandbox_config.network_env)
-            .await
-        {
-            self.resource_manager
-                .handle_network(network_resource)
-                .await
-                .context("set up factory network after start vm")?;
-        }
-
-        Ok(())
     }
 
     /// Build a network rescan config targeting the hypervisor's network
@@ -382,8 +342,6 @@ impl Sandbox for VirtSandbox {
             .await
             .context("prepare vm")?;
 
-        let defer_network = self.should_defer_network().await?;
-
         // generate device and setup before start vm
         // should after hypervisor.prepare_vm
         let resources = self.prepare_for_start_sandbox(id, sandbox_config).await?;
@@ -412,11 +370,6 @@ impl Sandbox for VirtSandbox {
                 }
             }
         });
-
-        if defer_network {
-            self.setup_deferred_network_after_start(sandbox_config)
-                .await?;
-        }
 
         // connect agent
         // set agent socket
@@ -876,7 +829,6 @@ impl Persist for VirtSandbox {
             exit_notify_tx: watch::channel(false).0,
             sandbox_config: None,
             shm_size: DEFAULT_SHM_SIZE,
-            factory: None,
             cancel_token: CancellationToken::default(),
             oom_registry: Default::default(),
         })

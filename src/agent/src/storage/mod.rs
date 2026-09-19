@@ -12,16 +12,14 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use kata_sys_util::mount::{create_mount_destination, parse_mount_options};
-use kata_types::mount::{StorageDevice, StorageHandlerManager, KATA_SHAREDFS_GUEST_PREMOUNT_TAG};
+use kata_types::device::{DRIVER_BLK_MMIO_TYPE, DRIVER_EPHEMERAL_TYPE, DRIVER_LOCAL_TYPE};
+use kata_types::mount::KATA_SHAREDFS_GUEST_PREMOUNT_TAG;
 use nix::unistd::{Gid, Uid};
 use protocols::agent::Storage;
 use protocols::types::FSGroupChangePolicy;
 use slog::Logger;
 use tokio::sync::Mutex;
 
-use self::block_handler::VirtioBlkMmioHandler;
-use self::ephemeral_handler::EphemeralHandler;
-use self::local_handler::LocalHandler;
 use crate::mount::{baremount, is_mounted, remove_mounts};
 use crate::sandbox::Sandbox;
 
@@ -35,32 +33,23 @@ const RO_MASK: u32 = 0o440;
 const EXEC_MASK: u32 = 0o110;
 const MODE_SETGID: u32 = 0o2000;
 
-#[derive(Debug)]
-pub struct StorageContext<'a> {
-    cid: &'a Option<String>,
-    logger: &'a Logger,
-    sandbox: &'a Arc<Mutex<Sandbox>>,
-}
-
-/// An implementation of generic storage device.
+/// A mounted storage path and its cleanup behavior.
 #[derive(Default, Debug)]
-pub struct StorageDeviceGeneric {
+pub struct StorageDevice {
     path: Option<String>,
 }
 
-impl StorageDeviceGeneric {
-    /// Create a new instance of `StorageStateCommon`.
+impl StorageDevice {
+    /// Track a storage mount path.
     pub fn new(path: String) -> Self {
-        StorageDeviceGeneric { path: Some(path) }
+        StorageDevice { path: Some(path) }
     }
-}
 
-impl StorageDevice for StorageDeviceGeneric {
-    fn path(&self) -> Option<&str> {
+    pub fn path(&self) -> Option<&str> {
         self.path.as_deref()
     }
 
-    fn cleanup(&self) -> Result<()> {
+    pub fn cleanup(&self) -> Result<()> {
         let path = match self.path() {
             None => return Ok(()),
             Some(v) => {
@@ -107,44 +96,12 @@ impl StorageDevice for StorageDeviceGeneric {
     }
 }
 
-/// Trait object to handle storage device.
-#[async_trait::async_trait]
-pub trait StorageHandler: Send + Sync {
-    /// Create a new storage device.
-    async fn create_device(
-        &self,
-        storage: Storage,
-        ctx: &mut StorageContext,
-    ) -> Result<Arc<dyn StorageDevice>>;
-
-    /// Return the driver types that the handler manages.
-    fn driver_types(&self) -> &[&str];
-}
-
-#[rustfmt::skip]
-lazy_static! {
-    pub static ref STORAGE_HANDLERS: StorageHandlerManager<Arc<dyn StorageHandler>> = {
-        let mut manager: StorageHandlerManager<Arc<dyn StorageHandler>> = StorageHandlerManager::new();
-        let handlers: Vec<Arc<dyn StorageHandler>> = vec![
-            Arc::new(VirtioBlkMmioHandler {}),
-            Arc::new(EphemeralHandler {}),
-            Arc::new(LocalHandler {}),
-        ];
-
-        for handler in handlers {
-            manager.add_handler(handler.driver_types(), handler.clone()).unwrap();
-        }
-
-        manager
-    };
-}
-
 /// Update sandbox storage with the created device.
 /// Handles cleanup on failure.
 async fn update_storage_device(
     sandbox: &Arc<Mutex<Sandbox>>,
     mount_point: &str,
-    device: Arc<dyn StorageDevice>,
+    device: Arc<StorageDevice>,
     logger: &Logger,
 ) -> Result<()> {
     if let Err(device) = sandbox
@@ -181,7 +138,10 @@ async fn update_storage_device(
 pub fn validate_storages(storages: &[Storage]) -> Result<()> {
     for storage in storages {
         anyhow::ensure!(
-            STORAGE_HANDLERS.handler(&storage.driver).is_some(),
+            matches!(
+                storage.driver.as_str(),
+                DRIVER_BLK_MMIO_TYPE | DRIVER_EPHEMERAL_TYPE | DRIVER_LOCAL_TYPE
+            ),
             "kata-fc: unsupported storage driver {}",
             storage.driver
         );
@@ -200,7 +160,6 @@ pub async fn add_storages(
     logger: Logger,
     storages: Vec<Storage>,
     sandbox: &Arc<Mutex<Sandbox>>,
-    cid: Option<String>,
 ) -> Result<Vec<String>> {
     validate_storages(&storages)?;
     let mut mount_list = Vec::new();
@@ -223,21 +182,16 @@ pub async fn add_storages(
             continue;
         }
 
-        // Create device using handler
-        let device = if let Some(handler) = STORAGE_HANDLERS.handler(&storage.driver) {
-            let logger =
-                logger.new(o!("subsystem" => "storage", "storage-type" => storage.driver.clone()));
-            let mut ctx = StorageContext {
-                cid: &cid,
-                logger: &logger,
-                sandbox,
-            };
-            handler.create_device(storage.clone(), &mut ctx).await
-        } else {
-            return Err(anyhow!(
-                "Failed to find the storage handler {}",
+        let logger =
+            logger.new(o!("subsystem" => "storage", "storage-type" => storage.driver.clone()));
+        let device = match storage.driver.as_str() {
+            DRIVER_BLK_MMIO_TYPE => block_handler::create_device(storage, &logger, sandbox).await,
+            DRIVER_EPHEMERAL_TYPE => ephemeral_handler::create_device(storage, &logger),
+            DRIVER_LOCAL_TYPE => local_handler::create_device(storage),
+            _ => Err(anyhow!(
+                "kata-fc: unsupported storage driver {}",
                 storage.driver
-            ));
+            )),
         };
 
         match device {
@@ -262,8 +216,8 @@ pub async fn add_storages(
     Ok(mount_list)
 }
 
-pub(crate) fn new_device(path: String) -> Result<Arc<dyn StorageDevice>> {
-    let device = StorageDeviceGeneric::new(path);
+pub(crate) fn new_device(path: String) -> Result<Arc<StorageDevice>> {
+    let device = StorageDevice::new(path);
     Ok(Arc::new(device))
 }
 
@@ -779,10 +733,10 @@ mod tests {
             .tempdir_in(tmpdir_path)
             .unwrap();
 
-        let s = StorageDeviceGeneric::default();
+        let s = StorageDevice::default();
         assert!(s.cleanup().is_ok());
 
-        let s = StorageDeviceGeneric::new("".to_string());
+        let s = StorageDevice::new("".to_string());
         assert!(s.cleanup().is_ok());
 
         let invalid_dir = emptydir
@@ -791,16 +745,16 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        let s = StorageDeviceGeneric::new(invalid_dir);
+        let s = StorageDevice::new(invalid_dir);
         assert!(s.cleanup().is_ok());
 
         assert!(bind_mount(srcdir_path, destdir_path, &logger).is_ok());
 
-        let s = StorageDeviceGeneric::new(destdir_path.to_string());
+        let s = StorageDevice::new(destdir_path.to_string());
         assert!(s.cleanup().is_ok());
 
         // fail to remove non-empty directory
-        let s = StorageDeviceGeneric::new(srcdir_path.to_string());
+        let s = StorageDevice::new(srcdir_path.to_string());
         s.cleanup().unwrap_err();
 
         // remove a directory without umount

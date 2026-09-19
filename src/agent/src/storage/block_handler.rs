@@ -8,22 +8,20 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use kata_types::device::DRIVER_BLK_MMIO_TYPE;
-use kata_types::mount::{StorageDevice, KATA_BLOCK_VOLUME_CREATE_FS};
+use kata_types::mount::KATA_BLOCK_VOLUME_CREATE_FS;
 use protocols::agent::Storage;
 
+use crate::sandbox::Sandbox;
 use crate::storage::mmio::get_virtio_blk_mmio_device_name;
-use crate::storage::{common_storage_handler, new_device, StorageContext, StorageHandler};
+use crate::storage::{common_storage_handler, new_device, StorageDevice};
 use slog::Logger;
+use tokio::sync::Mutex;
 
 const MKFS_EXT4: &str = "mkfs.ext4";
 const BLOCK_EMPTYDIR_EXT4_MKFS_OPTS: [&str; 8] =
     ["-O", "^has_journal", "-m", "0", "-i", "163840", "-I", "128"];
 
-async fn handle_block_storage(
-    logger: &Logger,
-    storage: &Storage,
-) -> Result<Arc<dyn StorageDevice>> {
+async fn handle_block_storage(logger: &Logger, storage: &Storage) -> Result<Arc<StorageDevice>> {
     if should_create_block_filesystem(storage) {
         ensure_block_filesystem(logger, storage).await?;
     }
@@ -78,27 +76,16 @@ async fn ensure_ext4_filesystem(logger: &Logger, source: &str) -> Result<()> {
     ))
 }
 
-#[derive(Debug)]
-pub struct VirtioBlkMmioHandler {}
-
-#[async_trait::async_trait]
-impl StorageHandler for VirtioBlkMmioHandler {
-    #[tracing::instrument(skip_all)]
-    fn driver_types(&self) -> &[&str] {
-        &[DRIVER_BLK_MMIO_TYPE]
+#[tracing::instrument(skip_all)]
+pub(super) async fn create_device(
+    storage: &Storage,
+    logger: &Logger,
+    sandbox: &Arc<Mutex<Sandbox>>,
+) -> Result<Arc<StorageDevice>> {
+    if !Path::new(&storage.source).exists() {
+        get_virtio_blk_mmio_device_name(sandbox, &storage.source)
+            .await
+            .context("failed to get mmio device name")?;
     }
-
-    #[tracing::instrument(skip_all)]
-    async fn create_device(
-        &self,
-        storage: Storage,
-        ctx: &mut StorageContext,
-    ) -> Result<Arc<dyn StorageDevice>> {
-        if !Path::new(&storage.source).exists() {
-            get_virtio_blk_mmio_device_name(ctx.sandbox, &storage.source)
-                .await
-                .context("failed to get mmio device name")?;
-        }
-        handle_block_storage(ctx.logger, &storage).await
-    }
+    handle_block_storage(logger, storage).await
 }

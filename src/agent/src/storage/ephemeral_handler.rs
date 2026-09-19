@@ -12,162 +12,144 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use kata_types::mount::{StorageDevice, KATA_MOUNT_OPTION_FS_GID};
+use kata_types::mount::KATA_MOUNT_OPTION_FS_GID;
 use nix::unistd::Gid;
 use protocols::agent::Storage;
 use slog::Logger;
 
 use crate::storage::{
-    common_storage_handler, new_device, parse_options, StorageContext, StorageHandler, MODE_SETGID,
+    common_storage_handler, new_device, parse_options, StorageDevice, MODE_SETGID,
 };
-use kata_types::device::DRIVER_EPHEMERAL_TYPE;
 
 const FS_TYPE_HUGETLB: &str = "hugetlbfs";
 const SYS_FS_HUGEPAGES_PREFIX: &str = "/sys/kernel/mm/hugepages";
 
-#[derive(Debug)]
-pub struct EphemeralHandler {}
+#[tracing::instrument(skip_all)]
+pub(super) fn create_device(storage: &Storage, logger: &Logger) -> Result<Arc<StorageDevice>> {
+    // hugetlbfs
+    if storage.fstype == FS_TYPE_HUGETLB {
+        info!(logger, "handle hugetlbfs storage");
+        // Allocate hugepages before mount
+        // /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+        // /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+        // options eg "pagesize=2097152,size=524288000"(2M, 500M)
+        allocate_hugepages(logger, &storage.options).context("allocate hugepages")?;
+        common_storage_handler(logger, storage)?;
+    } else if !storage.options.is_empty() {
+        // By now we only support one option field: "fsGroup" which
+        // isn't an valid mount option, thus we should remove it when
+        // do mount.
+        let opts = parse_options(&storage.options);
+        let mut mount = storage.clone();
+        mount.options.clear();
+        common_storage_handler(logger, &mount)?;
 
-#[async_trait::async_trait]
-impl StorageHandler for EphemeralHandler {
-    #[tracing::instrument(skip_all)]
-    fn driver_types(&self) -> &[&str] {
-        &[DRIVER_EPHEMERAL_TYPE]
-    }
+        // ephemeral_storage didn't support mount options except fsGroup.
+        if let Some(fsgid) = opts.get(KATA_MOUNT_OPTION_FS_GID) {
+            let gid = fsgid.parse::<u32>()?;
 
-    #[tracing::instrument(skip_all)]
-    async fn create_device(
-        &self,
-        mut storage: Storage,
-        ctx: &mut StorageContext,
-    ) -> Result<Arc<dyn StorageDevice>> {
-        // hugetlbfs
-        if storage.fstype == FS_TYPE_HUGETLB {
-            info!(ctx.logger, "handle hugetlbfs storage");
-            // Allocate hugepages before mount
-            // /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
-            // /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
-            // options eg "pagesize=2097152,size=524288000"(2M, 500M)
-            Self::allocate_hugepages(ctx.logger, &storage.options.to_vec())
-                .context("allocate hugepages")?;
-            common_storage_handler(ctx.logger, &storage)?;
-        } else if !storage.options.is_empty() {
-            // By now we only support one option field: "fsGroup" which
-            // isn't an valid mount option, thus we should remove it when
-            // do mount.
-            let opts = parse_options(&storage.options);
-            storage.options = Default::default();
-            common_storage_handler(ctx.logger, &storage)?;
+            nix::unistd::chown(storage.mount_point.as_str(), None, Some(Gid::from_raw(gid)))?;
 
-            // ephemeral_storage didn't support mount options except fsGroup.
-            if let Some(fsgid) = opts.get(KATA_MOUNT_OPTION_FS_GID) {
-                let gid = fsgid.parse::<u32>()?;
+            let meta = fs::metadata(&storage.mount_point)?;
+            let mut permission = meta.permissions();
 
-                nix::unistd::chown(storage.mount_point.as_str(), None, Some(Gid::from_raw(gid)))?;
-
-                let meta = fs::metadata(&storage.mount_point)?;
-                let mut permission = meta.permissions();
-
-                let o_mode = meta.mode() | MODE_SETGID;
-                permission.set_mode(o_mode);
-                fs::set_permissions(&storage.mount_point, permission)?;
-            }
-        } else {
-            common_storage_handler(ctx.logger, &storage)?;
+            let o_mode = meta.mode() | MODE_SETGID;
+            permission.set_mode(o_mode);
+            fs::set_permissions(&storage.mount_point, permission)?;
         }
-
-        new_device("".to_string())
+    } else {
+        common_storage_handler(logger, storage)?;
     }
+
+    new_device("".to_string())
 }
 
-impl EphemeralHandler {
-    // Allocate hugepages by writing to sysfs
-    fn allocate_hugepages(logger: &Logger, options: &[String]) -> Result<()> {
-        info!(logger, "mounting hugePages storage options: {:?}", options);
+// Allocate hugepages by writing to sysfs
+fn allocate_hugepages(logger: &Logger, options: &[String]) -> Result<()> {
+    info!(logger, "mounting hugePages storage options: {:?}", options);
 
-        let (pagesize, size) = Self::get_pagesize_and_size_from_option(options)
-            .context(format!("parse mount options: {:?}", &options))?;
+    let (pagesize, size) = get_pagesize_and_size_from_option(options)
+        .context(format!("parse mount options: {:?}", &options))?;
 
-        info!(
-            logger,
-            "allocate hugepages. pageSize: {}, size: {}", pagesize, size
-        );
+    info!(
+        logger,
+        "allocate hugepages. pageSize: {}, size: {}", pagesize, size
+    );
 
-        // sysfs entry is always of the form hugepages-${pagesize}kB
-        // Ref: https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt
-        let path = Path::new(SYS_FS_HUGEPAGES_PREFIX)
-            .join(format!("hugepages-{}kB", pagesize / 1024))
-            .join("nr_hugepages");
+    // sysfs entry is always of the form hugepages-${pagesize}kB
+    // Ref: https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt
+    let path = Path::new(SYS_FS_HUGEPAGES_PREFIX)
+        .join(format!("hugepages-{}kB", pagesize / 1024))
+        .join("nr_hugepages");
 
-        // write numpages to nr_hugepages file.
-        let numpages = format!("{}", size / pagesize);
-        info!(logger, "write {} pages to {:?}", &numpages, &path);
+    // write numpages to nr_hugepages file.
+    let numpages = format!("{}", size / pagesize);
+    info!(logger, "write {} pages to {:?}", &numpages, &path);
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .context(format!("open nr_hugepages directory {:?}", &path))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .context(format!("open nr_hugepages directory {:?}", &path))?;
 
-        file.write_all(numpages.as_bytes())
-            .context(format!("write nr_hugepages failed: {:?}", &path))?;
+    file.write_all(numpages.as_bytes())
+        .context(format!("write nr_hugepages failed: {:?}", &path))?;
 
-        // Even if the write succeeds, the kernel isn't guaranteed to be
-        // able to allocate all the pages we requested.  Verify that it
-        // did.
-        let verify = fs::read_to_string(&path).context(format!("reading {:?}", &path))?;
-        let allocated = verify
-            .trim_end()
-            .parse::<u64>()
-            .map_err(|_| anyhow!("Unexpected text {:?} in {:?}", &verify, &path))?;
-        if allocated != size / pagesize {
-            return Err(anyhow!(
-                "Only allocated {} of {} hugepages of size {}",
-                allocated,
-                numpages,
-                pagesize
-            ));
-        }
-
-        Ok(())
+    // Even if the write succeeds, the kernel isn't guaranteed to be
+    // able to allocate all the pages we requested.  Verify that it
+    // did.
+    let verify = fs::read_to_string(&path).context(format!("reading {:?}", &path))?;
+    let allocated = verify
+        .trim_end()
+        .parse::<u64>()
+        .map_err(|_| anyhow!("Unexpected text {:?} in {:?}", &verify, &path))?;
+    if allocated != size / pagesize {
+        return Err(anyhow!(
+            "Only allocated {} of {} hugepages of size {}",
+            allocated,
+            numpages,
+            pagesize
+        ));
     }
 
-    // Parse filesystem options string to retrieve hugepage details
-    // options eg "pagesize=2048,size=107374182"
-    fn get_pagesize_and_size_from_option(options: &[String]) -> Result<(u64, u64)> {
-        let mut pagesize_str: Option<&str> = None;
-        let mut size_str: Option<&str> = None;
+    Ok(())
+}
 
-        for option in options {
-            let vars: Vec<&str> = option.trim().split(',').collect();
+// Parse filesystem options string to retrieve hugepage details
+// options eg "pagesize=2048,size=107374182"
+fn get_pagesize_and_size_from_option(options: &[String]) -> Result<(u64, u64)> {
+    let mut pagesize_str: Option<&str> = None;
+    let mut size_str: Option<&str> = None;
 
-            for var in vars {
-                if let Some(stripped) = var.strip_prefix("pagesize=") {
-                    pagesize_str = Some(stripped);
-                } else if let Some(stripped) = var.strip_prefix("size=") {
-                    size_str = Some(stripped);
-                }
+    for option in options {
+        let vars: Vec<&str> = option.trim().split(',').collect();
 
-                if pagesize_str.is_some() && size_str.is_some() {
-                    break;
-                }
+        for var in vars {
+            if let Some(stripped) = var.strip_prefix("pagesize=") {
+                pagesize_str = Some(stripped);
+            } else if let Some(stripped) = var.strip_prefix("size=") {
+                size_str = Some(stripped);
+            }
+
+            if pagesize_str.is_some() && size_str.is_some() {
+                break;
             }
         }
-
-        if pagesize_str.is_none() || size_str.is_none() {
-            return Err(anyhow!("no pagesize/size options found"));
-        }
-
-        let pagesize = pagesize_str
-            .unwrap()
-            .parse::<u64>()
-            .context(format!("parse pagesize: {:?}", &pagesize_str))?;
-        let size = size_str
-            .unwrap()
-            .parse::<u64>()
-            .context(format!("parse size: {:?}", &size_str))?;
-
-        Ok((pagesize, size))
     }
+
+    if pagesize_str.is_none() || size_str.is_none() {
+        return Err(anyhow!("no pagesize/size options found"));
+    }
+
+    let pagesize = pagesize_str
+        .unwrap()
+        .parse::<u64>()
+        .context(format!("parse pagesize: {:?}", &pagesize_str))?;
+    let size = size_str
+        .unwrap()
+        .parse::<u64>()
+        .context(format!("parse size: {:?}", &size_str))?;
+
+    Ok((pagesize, size))
 }
 
 #[cfg(test)]
@@ -216,7 +198,7 @@ mod tests {
 
         for case in data {
             let input = case.0;
-            let r = EphemeralHandler::get_pagesize_and_size_from_option(&[input.to_string()]);
+            let r = get_pagesize_and_size_from_option(&[input.to_string()]);
 
             let is_ok = case.2;
             if is_ok {

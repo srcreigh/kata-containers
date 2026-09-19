@@ -30,7 +30,6 @@ use tokio::{runtime, sync::RwLock};
 
 use crate::{
     cgroups::{CgroupArgs, CgroupsResource},
-    cpu_mem::{cpu::CpuResource, initial_size::InitialSizeManager, mem::MemResource},
     manager::ManagerArgs,
     network::{self, Network, NetworkConfig, NetworkWithNetNsConfig},
     resource_persist::ResourceState,
@@ -50,8 +49,6 @@ pub(crate) struct ResourceManagerInner {
     pub rootfs_resource: RootFsResource,
     pub volume_resource: VolumeResource,
     pub cgroups_resource: CgroupsResource,
-    pub cpu_resource: CpuResource,
-    pub mem_resource: MemResource,
 }
 
 impl ResourceManagerInner {
@@ -60,7 +57,6 @@ impl ResourceManagerInner {
         agent: Arc<dyn Agent>,
         hypervisor: Arc<dyn Hypervisor>,
         toml_config: Arc<TomlConfig>,
-        init_size_manager: InitialSizeManager,
     ) -> Result<Self> {
         // create device manager
         let dev_manager = DeviceManager::new(hypervisor.clone())
@@ -69,8 +65,6 @@ impl ResourceManagerInner {
         let device_manager = Arc::new(RwLock::new(dev_manager));
 
         let cgroups_resource = CgroupsResource::new(sid, &toml_config)?;
-        let cpu_resource = CpuResource::new(toml_config.clone())?;
-        let mem_resource = MemResource::new(init_size_manager)?;
         Ok(Self {
             sid: sid.to_string(),
             toml_config,
@@ -81,8 +75,6 @@ impl ResourceManagerInner {
             rootfs_resource: RootFsResource::new(),
             volume_resource: VolumeResource::new(),
             cgroups_resource,
-            cpu_resource,
-            mem_resource,
         })
     }
 
@@ -110,20 +102,10 @@ impl ResourceManagerInner {
                         .await
                         .context("do handle device failed.")?;
                 }
-                ResourceConfig::GuestExtensionImage(r) => {
-                    do_handle_device(&self.device_manager, &DeviceConfig::BlockCfgModern(r))
-                        .await
-                        .context("do handle extra image device failed.")?;
-                }
                 ResourceConfig::HybridVsock(hv) => {
                     do_handle_device(&self.device_manager, &DeviceConfig::HybridVsockCfg(hv))
                         .await
                         .context("do handle hybrid-vsock device failed.")?;
-                }
-                ResourceConfig::InitData(id) => {
-                    do_handle_device(&self.device_manager, &DeviceConfig::BlockCfgModern(id))
-                        .await
-                        .context("do handle initdata block device failed.")?;
                 }
             };
         }
@@ -147,7 +129,9 @@ impl ResourceManagerInner {
         // tokio runtime, and block the task on it.
         let device_manager = self.device_manager.clone();
         let network = thread::spawn(move || -> Result<Arc<dyn Network>> {
-            let rt = runtime::Builder::new_current_thread().enable_all().build()?;
+            let rt = runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
             let d = rt
                 .block_on(network::new(&network_config, device_manager))
                 .context("new network")?;
@@ -484,7 +468,7 @@ impl ResourceManagerInner {
             "kata-fc: dynamic VM sizing is unsupported"
         );
 
-        // we should firstly update the vcpus and mems, and then update the host cgroups
+        // Update host cgroups while keeping the VM CPU and memory sizes fixed.
         self.cgroups_resource
             .update(cid, linux_resources, op, self.hypervisor.as_ref())
             .await?;
@@ -545,7 +529,6 @@ impl Persist for ResourceManagerInner {
             config: resource_args.config,
         };
 
-        let mem_resource = MemResource::default();
         let device_manager = Arc::new(RwLock::new(
             DeviceManager::new(resource_args.hypervisor.clone()).await?,
         ));
@@ -564,8 +547,6 @@ impl Persist for ResourceManagerInner {
             )
             .await?,
             toml_config: Arc::new(TomlConfig::default()),
-            cpu_resource: CpuResource::default(),
-            mem_resource,
         })
     }
 }

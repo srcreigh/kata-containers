@@ -186,7 +186,7 @@ impl Container {
             .resource_manager
             .handler_devices(&config.container_id, linux)
             .await?;
-        // update vcpus, mems and host cgroups
+        // Update host and guest cgroups; VM CPU and memory sizes stay fixed.
         let resources = self
             .resource_manager
             .update_linux_resource(
@@ -449,7 +449,7 @@ impl Container {
             .await
             .context("stop process")?;
 
-        // update vcpus, mems and host cgroups
+        // Update host and guest cgroups; VM CPU and memory sizes stay fixed.
         if container_process.process_type == ProcessType::Container {
             self.resource_manager
                 .update_linux_resource(
@@ -581,7 +581,7 @@ impl Container {
     pub async fn update(&self, resources: &LinuxResources) -> Result<()> {
         let mut inner = self.inner.write().await;
         inner.linux_resources = Some(resources.clone());
-        // update vcpus, mems and host cgroups
+        // Update host and guest cgroups; VM CPU and memory sizes stay fixed.
         let agent_resources = self
             .resource_manager
             .update_linux_resource(

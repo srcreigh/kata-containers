@@ -4,7 +4,6 @@
 //SPDX-License-Identifier: Apache-2.0
 
 use crate::firecracker::{inner_hypervisor::FC_API_SOCKET_NAME, sl};
-use crate::MemoryConfig;
 use crate::HYPERVISOR_FIRECRACKER;
 use crate::{device::DeviceType, VmmState};
 use crate::{selinux, HypervisorState};
@@ -41,7 +40,6 @@ pub struct FcInner {
     pub(crate) netns: Option<String>,
     pub(crate) client: Client<UnixConnector, Full<Bytes>>,
     pub(crate) jailer_root: String,
-    pub(crate) jailed: bool,
     pub(crate) run_dir: String,
     pub(crate) pending_devices: Vec<DeviceType>,
     pub(crate) capabilities: Capabilities,
@@ -64,7 +62,6 @@ impl FcInner {
             vm_path: String::default(),
             client: Client::unix(),
             jailer_root: String::default(),
-            jailed: false,
             run_dir: String::default(),
             pending_devices: vec![],
             capabilities,
@@ -74,39 +71,25 @@ impl FcInner {
     }
 
     pub(crate) async fn prepare_vmm(&mut self, netns: Option<String>) -> Result<()> {
-        let mut cmd: Command;
+        validate_jailer_config(&self.config)?;
         self.netns = netns.clone();
-        match self.jailed {
-            true => {
-                debug!(sl(), "Running Jailed");
-                cmd = Command::new(&self.config.jailer_path);
-                let api_socket = ["/run/", FC_API_SOCKET_NAME].join("/");
-                let args = [
-                    "--id",
-                    &self.id,
-                    "--gid",
-                    "0",
-                    "--uid",
-                    "0",
-                    "--exec-file",
-                    &self.config.path,
-                    "--chroot-base-dir",
-                    &self.jailer_root,
-                    "--",
-                    "--api-sock",
-                    &api_socket,
-                ];
-                cmd.args(args);
-            }
-            false => {
-                debug!(sl(), "Running non-Jailed");
-                cmd = Command::new(&self.config.path);
-                cmd.args(["--api-sock", &self.asock_path]);
-            }
-        }
-        if self.config.security_info.disable_seccomp {
-            cmd.arg("--no-seccomp");
-        }
+        let mut cmd = Command::new(&self.config.jailer_path);
+        let api_socket = format!("/run/{FC_API_SOCKET_NAME}");
+        cmd.args([
+            "--id",
+            &self.id,
+            "--gid",
+            "0",
+            "--uid",
+            "0",
+            "--exec-file",
+            &self.config.path,
+            "--chroot-base-dir",
+            &self.jailer_root,
+            "--",
+            "--api-sock",
+            &api_socket,
+        ]);
         debug!(sl(), "Exec: {:?}", cmd);
 
         // Make sure we're in the correct Network Namespace
@@ -173,35 +156,18 @@ impl FcInner {
         debug!(sl(), "[Firecracker]: Set Hypervisor config");
         self.config = config;
     }
+}
 
-    pub(crate) fn resize_memory(&mut self, new_mem_mb: u32) -> Result<(u32, MemoryConfig)> {
-        warn!(
-            sl(),
-            "memory size unchanged, requested: {:?} Not implemented", new_mem_mb
-        );
-        Ok((
-            0,
-            MemoryConfig {
-                ..Default::default()
-            },
-        ))
-    }
-
-    pub(crate) fn set_capabilities(&mut self, flag: CapabilityBits) {
-        self.capabilities.add(flag);
-    }
-
-    pub(crate) fn set_guest_memory_block_size(&mut self, size: u32) {
-        warn!(
-            sl(),
-            "guest memory block size unchanged, requested: {:?}, Not implemented", size
-        );
-    }
-
-    pub(crate) fn guest_memory_block_size_mb(&self) -> u32 {
-        warn!(sl(), "guest memory block size Not implemented");
-        0
-    }
+pub(super) fn validate_jailer_config(config: &HypervisorConfig) -> Result<()> {
+    anyhow::ensure!(
+        !config.jailer_path.is_empty(),
+        "kata-fc: Firecracker jailer is required"
+    );
+    anyhow::ensure!(
+        !config.security_info.disable_seccomp,
+        "kata-fc: Firecracker seccomp cannot be disabled"
+    );
+    Ok(())
 }
 
 async fn log_fc_stderr(stderr: ChildStderr, exit_notify: mpsc::Sender<()>) -> Result<()> {
@@ -252,7 +218,7 @@ impl Persist for FcInner {
             id: self.id.clone(),
             vm_path: self.vm_path.clone(),
             config: self.hypervisor_config(),
-            jailed: self.jailed,
+            jailed: true,
             jailer_root: self.jailer_root.clone(),
             run_dir: self.run_dir.clone(),
             netns: self.netns.clone(),
@@ -260,6 +226,11 @@ impl Persist for FcInner {
         })
     }
     async fn restore(exit_notify: mpsc::Sender<()>, hypervisor_state: Self::State) -> Result<Self> {
+        anyhow::ensure!(
+            hypervisor_state.jailed,
+            "kata-fc: unjailed saved VMs are unsupported"
+        );
+        validate_jailer_config(&hypervisor_state.config)?;
         Ok(FcInner {
             id: hypervisor_state.id,
             asock_path: String::default(),
@@ -268,7 +239,6 @@ impl Persist for FcInner {
             config: hypervisor_state.config,
             netns: hypervisor_state.netns,
             pid: None,
-            jailed: hypervisor_state.jailed,
             jailer_root: hypervisor_state.jailer_root,
             client: Client::unix(),
             pending_devices: vec![],
@@ -283,6 +253,38 @@ impl Persist for FcInner {
 #[cfg(test)]
 mod minimal_tests {
     use super::*;
+    #[tokio::test]
+    async fn restore_requires_jailed_seccomp_enabled_state() {
+        let mut state = HypervisorState::default();
+        state.config.jailer_path = "/usr/bin/jailer".into();
+        let (tx, _) = mpsc::channel(1);
+        assert!(FcInner::restore(tx, state.clone()).await.is_err());
+
+        state.jailed = true;
+        state.config.security_info.disable_seccomp = true;
+        let (tx, _) = mpsc::channel(1);
+        assert!(FcInner::restore(tx, state.clone()).await.is_err());
+
+        state.config.security_info.disable_seccomp = false;
+        state.config.jailer_path.clear();
+        let (tx, _) = mpsc::channel(1);
+        assert!(FcInner::restore(tx, state.clone()).await.is_err());
+
+        state.config.jailer_path = "/usr/bin/jailer".into();
+        let (tx, _) = mpsc::channel(1);
+        let restored = FcInner::restore(tx, state).await.unwrap();
+        assert!(restored.save().await.unwrap().jailed);
+    }
+
+    #[tokio::test]
+    async fn prepare_rejects_missing_jailer_before_side_effects() {
+        let (tx, _) = mpsc::channel(1);
+        let mut fc = FcInner::new(tx);
+        assert!(fc.prepare_vm("unsupported", None, None).await.is_err());
+        assert!(fc.vm_path.is_empty());
+        assert!(fc.pid.is_none());
+    }
+
     #[test]
     fn firecracker_requires_hybrid_vsock() {
         let (tx, _) = mpsc::channel(1);

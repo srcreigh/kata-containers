@@ -21,16 +21,13 @@ mod guest_paths;
 pub mod rootfs;
 pub mod volume;
 pub use manager::ResourceManager;
-pub mod coco_data;
 pub mod cpu_mem;
 
 #[derive(Debug)]
 pub enum ResourceConfig {
     Network(NetworkConfig),
     VmRootfs(BlockConfigModern),
-    GuestExtensionImage(BlockConfigModern),
     HybridVsock(HybridVsockConfig),
-    InitData(BlockConfigModern),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

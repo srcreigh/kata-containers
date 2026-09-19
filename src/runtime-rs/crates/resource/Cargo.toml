@@ -34,8 +34,6 @@ uuid = { version = "0.4", features = ["v4"] }
 oci-spec = { workspace = true }
 inotify = "0.11.0"
 walkdir = "2.5.0"
-flate2 = "1.1"
-tempfile = { workspace = true }
 hex = "0.4"
 base64 = { workspace = true }
 
@@ -53,7 +51,6 @@ kata-types = { workspace = true }
 kata-sys-util = { workspace = true }
 logging = { workspace = true }
 persist = { workspace = true }
-tests_utils = { workspace = true }
 
 [features]
 

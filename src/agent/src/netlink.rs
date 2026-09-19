@@ -8,11 +8,8 @@ use futures::{future, TryStreamExt};
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use netlink_packet_route::link::{LinkAttribute, LinkFlags, LinkMessage};
 use netlink_packet_route::neighbour::NeighbourFlags;
+use netlink_packet_route::route::RouteMetric;
 use netlink_packet_route::route::{RouteProtocol, RouteScope, RouteType};
-use netlink_packet_route::{
-    address::{AddressAttribute, AddressMessage},
-    route::RouteMetric,
-};
 use netlink_packet_route::{
     neighbour::NeighbourState,
     route::{RouteAddress, RouteAttribute},
@@ -47,15 +44,6 @@ impl fmt::Display for LinkFilter<'_> {
 
 const ALL_RULE_FLAGS: NeighbourFlags = NeighbourFlags::all();
 
-/// A filter to query addresses.
-pub enum AddressFilter {
-    /// Return addresses that belong to the given interface.
-    LinkIndex(u32),
-    /// Get addresses with the given prefix.
-    #[allow(dead_code)]
-    IpAddress(IpAddr),
-}
-
 /// A high level wrapper for netlink (and `rtnetlink` crate) for use by the Agent's RPC.
 /// It is expected to be consumed by the `AgentService`, so it operates with protobuf
 /// structures directly for convenience.
@@ -73,34 +61,9 @@ impl Handle {
     }
 
     pub async fn update_interface(&mut self, iface: &Interface) -> Result<()> {
-        // The reliable way to find link is using hardware address
-        // as filter. However, hardware filter might not be supported
-        // by netlink, we may have to dump link list and then find the
-        // target link. filter using name or family is supported, but
-        // we cannot use that to find target link.
-        // let's try if hardware address filter works. -_-
-        //
-        // A NIC captured in a VM template is the exception. VMMs without
-        // device hot-plug -- e.g. Dragonball, whose virtio-mmio transport has
-        // no native hot-plug -- cannot attach a fresh NIC to the restored VM
-        // per pod, so the NIC is baked into the template. A pod restored from
-        // that template keeps the template creator's MAC, frozen in the
-        // snapshotted guest RAM, and can never be matched by this pod's MAC.
-        // Fall back to finding the interface by its (stable) name and
-        // retargeting it to the requested MAC, then look it up again. This
-        // assumes a deterministic interface name (true for a single-NIC pod,
-        // where both sides use "eth0").
-        let link = match self
-            .try_find_link(LinkFilter::Address(&iface.hwAddr))
-            .await?
-        {
-            Some(link) => link,
-            None => {
-                self.set_link_mac_by_name(&iface.name, &iface.hwAddr)
-                    .await?;
-                self.find_link(LinkFilter::Address(&iface.hwAddr)).await?
-            }
-        };
+        // Firecracker is configured with this pod's MAC before boot. A missing
+        // MAC is an error; there is no restored-template NIC to retarget.
+        let link = self.find_link(LinkFilter::Address(&iface.hwAddr)).await?;
 
         // Bring down interface if it is UP
         if link.is_up() {
@@ -222,37 +185,6 @@ impl Handle {
         let link = self.find_link(LinkFilter::Name("lo")).await?;
         self.enable_link(link.index(), true).await?;
         Ok(())
-    }
-
-    pub async fn set_link_mac_by_name(&self, ifname: &str, mac: &str) -> Result<String> {
-        let link = self.find_link(LinkFilter::Name(ifname)).await?;
-        let prev_mac = link.address();
-        if prev_mac.eq_ignore_ascii_case(mac) {
-            return Ok(prev_mac);
-        }
-
-        let parsed_mac = parse_mac_address(mac)
-            .with_context(|| format!("failed to parse MAC address: {mac}"))?;
-        if link.is_up() {
-            self.enable_link(link.index(), false).await?;
-        }
-
-        let msg = LinkUnspec::new_with_index(link.index())
-            .set_header(link.header.clone())
-            .address(parsed_mac.to_vec())
-            .build();
-        self.handle
-            .link()
-            .change(msg)
-            .execute()
-            .await
-            .with_context(|| format!("failed to set MAC for interface {} to {}", ifname, mac))?;
-
-        if link.is_up() {
-            self.enable_link(link.index(), true).await?;
-        }
-
-        Ok(prev_mac)
     }
 
     async fn find_link(&self, filter: LinkFilter<'_>) -> Result<Link> {
@@ -469,27 +401,6 @@ impl Handle {
         Ok(())
     }
 
-    async fn list_addresses<F>(&self, filter: F) -> Result<Vec<Address>>
-    where
-        F: Into<Option<AddressFilter>>,
-    {
-        let mut request = self.handle.address().get();
-
-        if let Some(filter) = filter.into() {
-            request = match filter {
-                AddressFilter::LinkIndex(index) => request.set_link_index_filter(index),
-                AddressFilter::IpAddress(addr) => request.set_address_filter(addr),
-            };
-        };
-
-        let list = request
-            .execute()
-            .try_filter_map(|msg| future::ready(Ok(Some(Address(msg))))) // Map message to `Address`
-            .try_collect()
-            .await?;
-        Ok(list)
-    }
-
     // add the addresses to the specified interface, if the addresses existed,
     // replace it with the latest one.
     async fn add_addresses<I>(&mut self, index: u32, list: I) -> Result<()>
@@ -631,6 +542,7 @@ impl Link {
     }
 
     /// Extract Mac address.
+    #[cfg(test)]
     fn address(&self) -> String {
         use LinkAttribute as Nla;
         self.attributes
@@ -669,40 +581,56 @@ impl Deref for Link {
     }
 }
 
-struct Address(AddressMessage);
-
-impl Address {
-    #[cfg(test)]
-    fn prefix(&self) -> u8 {
-        self.0.header.prefix_len
-    }
-
-    fn address(&self) -> String {
-        use AddressAttribute as Nla;
-        self.0
-            .attributes
-            .iter()
-            .find_map(|n| {
-                if let Nla::Address(data) = n {
-                    Some(data.to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netlink_packet_route::address::AddressHeader;
+    use netlink_packet_route::address::{AddressAttribute, AddressHeader, AddressMessage};
     use netlink_packet_route::link::LinkHeader;
     use protocols::types::IPAddress;
     use serial_test::serial;
     use std::iter;
     use std::process::Command;
     use test_utils::skip_if_not_root;
+
+    impl Handle {
+        async fn list_addresses(&self, index: Option<u32>) -> Result<Vec<Address>> {
+            let mut request = self.handle.address().get();
+            if let Some(index) = index {
+                request = request.set_link_index_filter(index);
+            }
+            Ok(request
+                .execute()
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter()
+                .map(Address)
+                .collect())
+        }
+    }
+
+    struct Address(AddressMessage);
+
+    impl Address {
+        #[cfg(test)]
+        fn prefix(&self) -> u8 {
+            self.0.header.prefix_len
+        }
+
+        fn address(&self) -> String {
+            use AddressAttribute as Nla;
+            self.0
+                .attributes
+                .iter()
+                .find_map(|n| {
+                    if let Nla::Address(data) = n {
+                        Some(data.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+        }
+    }
 
     // Constants for ARP neighbor tests
     const TEST_DUMMY_INTERFACE: &str = "dummy_for_arp";
@@ -748,8 +676,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(template_mac_retarget)]
-    async fn update_interface_retargets_mac_by_name() {
+    #[serial(missing_mac_rejected)]
+    async fn update_interface_rejects_missing_mac_without_retargeting() {
         skip_if_not_root!();
 
         const LINK_NAME: &str = "tmpl-mac-test";
@@ -794,8 +722,11 @@ mod tests {
             .await
             .map(|link| link.address());
 
-        update_result.expect("failed to update interface with a restored MAC");
-        assert_eq!(observed_mac.unwrap().to_lowercase(), NEW_MAC);
+        assert!(
+            update_result.is_err(),
+            "unknown MAC must fail instead of retargeting a NIC"
+        );
+        assert_eq!(observed_mac.unwrap().to_lowercase(), OLD_MAC);
     }
 
     #[tokio::test]
@@ -867,7 +798,7 @@ mod tests {
 
             // Make sure the address is there
             let result = handle
-                .list_addresses(AddressFilter::LinkIndex(lo.index()))
+                .list_addresses(Some(lo.index()))
                 .await
                 .unwrap()
                 .into_iter()

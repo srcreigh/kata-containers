@@ -14,7 +14,6 @@ use serde::Deserialize;
 use crate::config::hypervisor::{get_hypervisor_plugin, HugePageType};
 
 use crate::config::TomlConfig;
-use crate::initdata::add_hypervisor_initdata_overrides;
 use crate::sl;
 
 use self::cri_containerd::{SANDBOX_CPU_PERIOD_KEY, SANDBOX_CPU_QUOTA_KEY, SANDBOX_MEM_KEY};
@@ -499,6 +498,14 @@ impl Annotation {
 impl Annotation {
     /// update config info by annotation
     pub fn update_config_by_annotation(&self, config: &mut TomlConfig) -> Result<()> {
+        if self
+            .annotations
+            .contains_key(KATA_ANNO_CFG_HYPERVISOR_INIT_DATA)
+        {
+            return Err(io::Error::other(
+                "kata-fc: confidential guest initdata is unsupported",
+            ));
+        }
         if let Some(hv) = self.annotations.get(KATA_ANNO_CFG_RUNTIME_HYPERVISOR) {
             if config.hypervisor.contains_key(hv) {
                 config.runtime.hypervisor_name = hv.to_string();
@@ -913,10 +920,6 @@ impl Annotation {
                     KATA_ANNO_CFG_HYPERVISOR_GUEST_HOOK_PATH => {
                         hv.security_info.validate_path(value)?;
                         hv.security_info.guest_hook_path = value.to_string();
-                    }
-                    KATA_ANNO_CFG_HYPERVISOR_INIT_DATA => {
-                        hv.security_info.initdata =
-                            add_hypervisor_initdata_overrides(value).unwrap();
                     }
                     KATA_ANNO_CFG_HYPERVISOR_DEFAULT_GPUS => match self.get_value::<u32>(key) {
                         Ok(r) => {

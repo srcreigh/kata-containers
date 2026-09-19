@@ -58,14 +58,10 @@ impl FcInner {
     }
 
     pub(crate) async fn add_hvsock(&mut self, config: &HybridVsockConfig) -> Result<()> {
-        let rel_uds_path = match self.jailed {
-            false => [self.vm_path.as_str(), FC_AGENT_SOCKET_NAME].join("/"),
-            true => FC_AGENT_SOCKET_NAME.to_string(),
-        };
         let body_vsock: String = json!({
             "vsock_id": String::from(ROOT),
             "guest_cid": config.guest_cid,
-            "uds_path": rel_uds_path,
+            "uds_path": FC_AGENT_SOCKET_NAME,
         })
         .to_string();
 

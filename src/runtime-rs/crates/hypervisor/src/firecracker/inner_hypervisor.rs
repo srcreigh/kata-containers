@@ -29,29 +29,11 @@ impl FcInner {
 
         self.id = id.to_string();
 
-        if !self.config.jailer_path.is_empty() {
-            debug!(sl(), "Running jailed");
-            self.jailed = true;
-            self.jailer_root = KATA_PATH.to_string();
-            debug!(sl(), "jailer_root: {:?}", self.jailer_root);
-            self.vm_path = [
-                self.jailer_root.clone(),
-                HYPERVISOR_FIRECRACKER.to_string(),
-                id.to_string(),
-            ]
-            .join("/");
-            debug!(sl(), "VM Path: {:?}", self.vm_path);
-            self.run_dir = [self.vm_path.clone(), "root".to_string(), "run".to_string()].join("/");
-            debug!(sl(), "Rundir: {:?}", self.run_dir);
-            let _ = self.remount_jailer_with_exec().await;
-        } else {
-            self.vm_path = [KATA_PATH.to_string(), id.to_string()].join("/");
-            debug!(sl(), "VM Path: {:?}", self.vm_path);
-            self.run_dir = [self.vm_path.clone(), "run".to_string()].join("/");
-            debug!(sl(), "Rundir: {:?}", self.run_dir);
-        }
-        // We construct the FC API socket path based on the run_dir variable (jailed or
-        // non-jailed).
+        super::inner::validate_jailer_config(&self.config)?;
+        self.jailer_root = KATA_PATH.to_string();
+        self.vm_path = [self.jailer_root.as_str(), HYPERVISOR_FIRECRACKER, id].join("/");
+        self.run_dir = [self.vm_path.as_str(), ROOT, "run"].join("/");
+        let _ = self.remount_jailer_with_exec().await;
         self.asock_path = [self.run_dir.as_str(), "fc.sock"].join("/");
         debug!(sl(), "Socket Path: {:?}", self.asock_path);
 
@@ -129,32 +111,12 @@ impl FcInner {
         }
     }
 
-    pub(crate) fn pause_vm(&self) -> Result<()> {
-        warn!(sl(), "Pause VM: Not implemented");
-        Ok(())
-    }
-
-    pub(crate) async fn save_vm(&self) -> Result<()> {
-        warn!(sl(), "Save VM: Not implemented");
-        Ok(())
-    }
-    pub(crate) fn resume_vm(&self) -> Result<()> {
-        warn!(sl(), "Resume VM: Not implemented");
-        Ok(())
-    }
-
     pub(crate) async fn get_agent_socket(&self) -> Result<String> {
         debug!(sl(), "Get kata-agent socket");
-        let vsock_path = match self.jailed {
-            false => [self.vm_path.as_str(), FC_AGENT_SOCKET_NAME].join("/"),
-            true => [self.vm_path.as_str(), ROOT, FC_AGENT_SOCKET_NAME].join("/"),
-        };
+        let vsock_path = [self.vm_path.as_str(), ROOT, FC_AGENT_SOCKET_NAME].join("/");
         Ok(format!("{HYBRID_VSOCK_SCHEME}://{vsock_path}"))
     }
 
-    pub(crate) async fn disconnect(&mut self) {
-        warn!(sl(), "Disconnect: Not implemented");
-    }
     pub(crate) async fn get_thread_ids(&self) -> Result<VcpuThreadIds> {
         debug!(sl(), "Get Thread IDs");
         Ok(VcpuThreadIds::default())
@@ -182,25 +144,6 @@ impl FcInner {
         debug!(sl(), "Cleanup");
         self.cleanup_resource();
 
-        std::fs::remove_dir_all(self.vm_path.as_str())
-            .inspect_err(|err| {
-                error!(
-                    sl(),
-                    "failed to remove dir all for {} with error: {:?}", &self.vm_path, &err
-                )
-            })
-            .ok();
-
-        Ok(())
-    }
-
-    pub(crate) async fn resize_vcpu(&self, old_vcpu: u32, new_vcpu: u32) -> Result<(u32, u32)> {
-        warn!(sl(), "Resize vCPU: Not implemented");
-        Ok((old_vcpu, new_vcpu))
-    }
-
-    pub(crate) async fn check(&self) -> Result<()> {
-        warn!(sl(), "Check: Not implemented");
         Ok(())
     }
 

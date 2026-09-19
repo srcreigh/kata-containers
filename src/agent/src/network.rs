@@ -12,23 +12,6 @@ use std::path;
 const KATA_GUEST_SANDBOX_DNS_FILE: &str = "/run/kata-containers/sandbox/resolv.conf";
 const GUEST_DNS_FILE: &str = "/etc/resolv.conf";
 
-// Network describes a sandbox network, includings its dns
-// related information.
-#[derive(Debug, Default)]
-pub struct Network {
-    dns: Vec<String>,
-}
-
-impl Network {
-    pub fn new() -> Network {
-        Network { dns: Vec::new() }
-    }
-
-    pub fn set_dns(&mut self, dns: String) {
-        self.dns.push(dns);
-    }
-}
-
 pub fn setup_guest_dns(logger: Logger, dns_list: &[String]) -> Result<()> {
     do_setup_guest_dns(
         logger,

@@ -3,6 +3,7 @@
 //
 //SPDX-License-Identifier: Apache-2.0
 
+use super::mac::MacAddr;
 use crate::{
     firecracker::{
         inner_hypervisor::{FC_AGENT_SOCKET_NAME, ROOT},
@@ -13,7 +14,6 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
-use dbs_utils::net::MacAddr;
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, Method, Request, Response};
 use hyperlocal::Uri;
@@ -32,11 +32,7 @@ const DISK_POOL_SIZE: u32 = 6;
 
 impl FcInner {
     pub(crate) fn get_resource(&self, src: &str, dst: &str) -> Result<String> {
-        if self.jailed {
-            self.jail_resource(src, dst)
-        } else {
-            Ok(src.to_string())
-        }
+        self.jail_resource(src, dst)
     }
 
     fn jail_resource(&self, src: &str, dst: &str) -> Result<String> {
@@ -68,14 +64,9 @@ impl FcInner {
     }
 
     pub(crate) async fn prepare_hvsock(&mut self) -> Result<()> {
-        let rel_uds_path = match self.jailed {
-            false => [self.vm_path.as_str(), FC_AGENT_SOCKET_NAME].join("/"),
-            true => FC_AGENT_SOCKET_NAME.to_string(),
-        };
-
         let body_vsock: String = json!({
             "guest_cid": 3,
-            "uds_path": rel_uds_path,
+            "uds_path": FC_AGENT_SOCKET_NAME,
             "vsock_id": ROOT,
         })
         .to_string();
@@ -140,7 +131,6 @@ impl FcInner {
 
         let abs_path = [&self.vm_path, ROOT].join("/");
 
-        let rel_path = "/".to_string();
         let _ = fs::create_dir_all(&abs_path)
             .await
             .context(format!("failed to create directory {:?}", &abs_path));
@@ -154,13 +144,9 @@ impl FcInner {
                 .await
                 .context(format!("failed to create file {:?}", &full_path_name));
 
-            let path_on_host = match self.jailed {
-                false => abs_path.clone(),
-                true => rel_path.clone(),
-            };
             let body: String = json!({
                 "drive_id": format!("drive{}",i),
-                "path_on_host": format!("{}/drive{}", path_on_host, i),
+                "path_on_host": format!("/drive{}", i),
                 "is_root_device": false,
                 "is_read_only": false
             })
@@ -214,7 +200,7 @@ impl FcInner {
         device_id: String,
     ) -> Result<()> {
         let g_mac = match &config.guest_mac {
-            Some(mac) => MacAddr::from_bytes(&mac.0).ok(),
+            Some(mac) => Some(MacAddr(mac.0)),
             None => None,
         };
         let body: String = json!({
@@ -310,16 +296,11 @@ impl FcInner {
     }
 
     pub(crate) fn cleanup_resource(&self) {
-        if self.jailed {
-            self.umount_jail_resource(FC_KERNEL).ok();
-            self.umount_jail_resource(FC_ROOT_FS).ok();
-
-            for i in 1..DISK_POOL_SIZE {
-                self.umount_jail_resource(&[DRIVE_PREFIX, &i.to_string()].concat())
-                    .ok();
-            }
-
-            self.umount_jail_resource("").ok();
+        let Some(paths) = self.cleanup_resource_paths() else {
+            return;
+        };
+        for path in paths {
+            nix::mount::umount2(path.as_str(), nix::mount::MntFlags::MNT_DETACH).ok();
         }
         std::fs::remove_dir_all(self.vm_path.as_str())
             .inspect_err(|err| {
@@ -331,21 +312,22 @@ impl FcInner {
             .ok();
     }
 
-    pub(crate) fn umount_jail_resource(&self, jailed_path: &str) -> Result<()> {
-        let path = match jailed_path {
-            // Handle final case to umount the bind-mounted `/run/kata/firecracker/{id}/root` dir
-            "" => [self.vm_path.clone(), ROOT.to_string()].join("/"),
-            // Handle generic case to umount the bind-mounted
-            // `/run/kata/firecracker/{id}/root/asset` file/dir
-            _ => [
-                self.vm_path.clone(),
-                ROOT.to_string(),
-                jailed_path.to_string(),
-            ]
-            .join("/"),
-        };
-        nix::mount::umount2(path.as_str(), nix::mount::MntFlags::MNT_DETACH)
-            .with_context(|| format!("umount path {}", &path))
+    fn cleanup_resource_paths(&self) -> Option<Vec<String>> {
+        // Preparation may fail before assigning the jail directory. Never turn
+        // that empty path into host /root mount targets during teardown.
+        if self.vm_path.is_empty() {
+            return None;
+        }
+        let root = [self.vm_path.as_str(), ROOT].join("/");
+        let mut paths = vec![
+            format!("{root}/{FC_KERNEL}"),
+            format!("{root}/{FC_ROOT_FS}"),
+        ];
+        for i in 1..DISK_POOL_SIZE {
+            paths.push(format!("{root}/{DRIVE_PREFIX}{i}"));
+        }
+        paths.push(root);
+        Some(paths)
     }
 }
 
@@ -420,5 +402,42 @@ mod error_tests {
         assert!(text.contains("400"), "{}", text);
         assert!(text.contains("invalid drive path"), "{}", text);
         task.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unprepared_cleanup_has_no_host_targets() {
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let mut fc = FcInner::new(tx);
+        assert_eq!(fc.cleanup_resource_paths(), None);
+        fc.cleanup().await.unwrap();
+
+        assert!(fc.prepare_vm("unsupported", None, None).await.is_err());
+        assert_eq!(fc.cleanup_resource_paths(), None);
+        fc.cleanup().await.unwrap();
+    }
+
+    #[test]
+    fn prepared_cleanup_targets_stay_inside_the_jail() {
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let mut fc = FcInner::new(tx);
+        fc.vm_path = "/run/kata/firecracker/test".into();
+        assert_eq!(
+            fc.cleanup_resource_paths().unwrap(),
+            [
+                "/run/kata/firecracker/test/root/vmlinux",
+                "/run/kata/firecracker/test/root/rootfs",
+                "/run/kata/firecracker/test/root/drive1",
+                "/run/kata/firecracker/test/root/drive2",
+                "/run/kata/firecracker/test/root/drive3",
+                "/run/kata/firecracker/test/root/drive4",
+                "/run/kata/firecracker/test/root/drive5",
+                "/run/kata/firecracker/test/root",
+            ]
+        );
     }
 }

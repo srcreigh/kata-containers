@@ -6,7 +6,7 @@
 
 use std::{
     collections::HashSet,
-    fs::{metadata, set_permissions, File, OpenOptions, Permissions},
+    fs::{metadata, set_permissions, File, Permissions},
     io,
     os::{
         fd::{BorrowedFd, RawFd},
@@ -31,8 +31,6 @@ use nix::{
 use rand::{rng, RngExt};
 use serde::{Deserialize, Serialize};
 use serde_json;
-
-use crate::device::Tap;
 
 use crate::{DEFAULT_HYBRID_VSOCK_NAME, JAILER_ROOT};
 
@@ -148,60 +146,6 @@ where
     set_uid_fn(user.uid).context("setuid failed")?;
 
     Ok(())
-}
-
-pub fn open_named_tuntap(if_name: &str, queues: u32) -> Result<Vec<File>> {
-    let (multi_vq, vq_pairs) = if queues > 1 {
-        (true, queues as usize)
-    } else {
-        (false, 1_usize)
-    };
-
-    let tap: Tap = Tap::open_named(if_name, multi_vq).context("open named tuntap device failed")?;
-    let taps: Vec<Tap> = tap.into_mq_taps(vq_pairs).context("into mq taps failed.")?;
-
-    let mut tap_files: Vec<std::fs::File> = Vec::new();
-    for tap in taps {
-        tap_files.push(tap.tap_file);
-    }
-
-    Ok(tap_files)
-}
-
-// /dev/tap$(cat /sys/class/net/macvtap1/ifindex)
-// for example: /dev/tap2381
-#[allow(dead_code)]
-pub fn create_macvtap_fds(ifindex: u32, queues: u32) -> Result<Vec<File>> {
-    let macvtap = format!("/dev/tap{ifindex}");
-    create_fds(macvtap.as_str(), queues as usize)
-}
-
-pub fn create_vhost_net_fds(queues: u32) -> Result<Vec<File>> {
-    let vhost_dev = "/dev/vhost-net";
-    let num_fds = if queues > 1 { queues as usize } else { 1_usize };
-
-    create_fds(vhost_dev, num_fds)
-}
-
-// For example: if num_fds = 3; fds = {0xc000012028, 0xc000012030, 0xc000012038}
-fn create_fds(device: &str, num_fds: usize) -> Result<Vec<File>> {
-    let mut fds: Vec<File> = Vec::with_capacity(num_fds);
-
-    for i in 0..num_fds {
-        match OpenOptions::new().read(true).write(true).open(device) {
-            Ok(f) => {
-                fds.push(f);
-            }
-            Err(e) => {
-                fds.clear();
-                return Err(anyhow!(
-                    "Failed to open {device} fd index {i}, with error {e}"
-                ));
-            }
-        };
-    }
-
-    Ok(fds)
 }
 
 pub fn create_dir_all_with_inherit_owner<P: AsRef<Path>>(path: P, perm: u32) -> io::Result<()> {
@@ -462,7 +406,6 @@ mod tests {
     use crate::utils::create_dir_all_with_inherit_owner;
     use crate::utils::first_valid_executable_path;
 
-    use super::create_fds;
     use super::remove_dir_all_if_exists;
     use super::set_process_credentials_with;
     use super::vmm_user_runtime_dir;
@@ -579,15 +522,6 @@ mod tests {
         let error = result.expect_err("credential failure must abort setup");
         assert!(format!("{error:#}").contains(expected_error));
         assert_eq!(calls.get(), expected_calls);
-    }
-
-    #[test]
-    fn test_ctreate_fds() {
-        let device = "/dev/null";
-        let num_fds = 3_usize;
-        let fds = create_fds(device, num_fds);
-        assert!(fds.is_ok());
-        assert_eq!(fds.unwrap().len(), num_fds);
     }
 
     #[test]

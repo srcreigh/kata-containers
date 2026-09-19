@@ -22,18 +22,18 @@ mod tests {
         KATA_ANNO_CFG_RUNTIME_NAME,
     };
     use kata_types::config::KataConfig;
-    use kata_types::config::{QemuConfig, TomlConfig};
+    use kata_types::config::{FirecrackerConfig, TomlConfig};
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
     #[test]
     fn test_change_config_annotation() {
         let content = include_str!("texture/configuration-anno-0.toml");
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         std::process::Command::new("mkdir")
             .arg("./hypervisor_path")
@@ -112,7 +112,7 @@ mod tests {
         );
         anno_hash.insert(
             KATA_ANNO_CFG_HYPERVISOR_DEFAULT_MEMORY.to_string(),
-            "100MiB".to_string(),
+            "256MiB".to_string(),
         );
         anno_hash.insert(
             KATA_ANNO_CFG_HYPERVISOR_ENABLE_IO_THREADS.to_string(),
@@ -160,7 +160,7 @@ mod tests {
         let mut config = TomlConfig::load(content).unwrap();
 
         assert!(anno.update_config_by_annotation(&mut config).is_ok());
-        KataConfig::set_active_config(Some(config), "qemu", "agnet0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agnet0");
         if let Some(ag) = KataConfig::get_default_config().get_agent() {
             assert_eq!(
                 ag.kernel_modules[0],
@@ -186,7 +186,7 @@ mod tests {
             assert!(!hv.memory_info.enable_mem_prealloc);
             assert_eq!(hv.cpu_info.default_vcpus, 12.0);
             assert!(!hv.memory_info.enable_guest_swap);
-            assert_eq!(hv.memory_info.default_memory, 100);
+            assert_eq!(hv.memory_info.default_memory, 256);
             assert!(!hv.enable_iothreads);
             assert_eq!(hv.indep_iothreads, 3);
             assert!(!hv.memory_info.enable_hugepages);
@@ -255,11 +255,11 @@ mod tests {
     fn test_fail_to_change_block_device_driver_because_not_enabled() {
         let content = include_str!("texture/configuration-anno-1.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -270,44 +270,43 @@ mod tests {
         let mut config = TomlConfig::load(content).unwrap();
 
         assert!(anno.update_config_by_annotation(&mut config).is_ok());
-        if let Some(hv) = KataConfig::get_default_config().get_hypervisor() {
-            assert_eq!(hv.blockdev_info.block_device_driver, "virtio-blk");
-        }
+        assert_eq!(
+            config.hypervisor["firecracker"].blockdev_info.block_device_driver,
+            "virtio-blk-mmio"
+        );
     }
 
     #[test]
     fn test_fail_to_change_enable_guest_swap_because_not_enabled() {
         let content = include_str!("texture/configuration-anno-1.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
             KATA_ANNO_CFG_HYPERVISOR_ENABLE_GUEST_SWAP.to_string(),
-            "false".to_string(),
+            "true".to_string(),
         );
         let anno = Annotation::new(anno_hash);
         let mut config = TomlConfig::load(content).unwrap();
 
         assert!(anno.update_config_by_annotation(&mut config).is_ok());
-        if let Some(hv) = KataConfig::get_default_config().get_hypervisor() {
-            assert!(hv.memory_info.enable_guest_swap)
-        }
+        assert!(!config.hypervisor["firecracker"].memory_info.enable_guest_swap);
     }
 
     #[test]
     fn test_fail_to_change_hypervisor_path_because_of_invalid_path() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -329,11 +328,11 @@ mod tests {
         let path = Path::new(path).join("tests/texture/configuration-anno-0.toml");
         let content = fs::read_to_string(path).unwrap();
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(&content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -350,10 +349,10 @@ mod tests {
     fn test_fail_to_change_memory_slots_because_of_less_than_zero() {
         let content = include_str!("texture/configuration-anno-0.toml");
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -370,11 +369,11 @@ mod tests {
     fn test_fail_to_change_default_memory_because_less_than_min_memory_size() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -391,11 +390,11 @@ mod tests {
     fn test_fail_to_change_default_vcpus_becuase_more_than_max_cpu_size() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -412,11 +411,11 @@ mod tests {
     fn test_fail_to_change_enable_guest_swap_because_invalid_input() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -433,11 +432,11 @@ mod tests {
     fn test_fail_to_change_default_vcpus_becuase_invalid_input() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -454,11 +453,11 @@ mod tests {
     fn test_fail_to_change_runtime_name() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
             KATA_ANNO_CFG_RUNTIME_NAME.to_string(),
@@ -473,12 +472,12 @@ mod tests {
     fn test_block_device_sector_size_annotations_valid() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         // Valid: 512 logical, 4096 physical
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -492,7 +491,7 @@ mod tests {
         let anno = Annotation::new(anno_hash);
         let mut config = TomlConfig::load(content).unwrap();
         assert!(anno.update_config_by_annotation(&mut config).is_ok());
-        if let Some(hv) = config.hypervisor.get("qemu") {
+        if let Some(hv) = config.hypervisor.get("firecracker") {
             assert_eq!(hv.blockdev_info.block_device_logical_sector_size, 512);
             assert_eq!(hv.blockdev_info.block_device_physical_sector_size, 4096);
         }
@@ -510,7 +509,7 @@ mod tests {
         let anno = Annotation::new(anno_hash);
         let mut config = TomlConfig::load(content).unwrap();
         assert!(anno.update_config_by_annotation(&mut config).is_ok());
-        if let Some(hv) = config.hypervisor.get("qemu") {
+        if let Some(hv) = config.hypervisor.get("firecracker") {
             assert_eq!(hv.blockdev_info.block_device_logical_sector_size, 0);
             assert_eq!(hv.blockdev_info.block_device_physical_sector_size, 0);
         }
@@ -520,11 +519,11 @@ mod tests {
     fn test_block_device_sector_size_annotation_invalid_not_power_of_two() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -540,11 +539,11 @@ mod tests {
     fn test_block_device_sector_size_annotation_invalid_below_minimum() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
@@ -560,11 +559,11 @@ mod tests {
     fn test_block_device_sector_size_annotation_invalid_above_maximum() {
         let content = include_str!("texture/configuration-anno-0.toml");
 
-        let qemu = QemuConfig::new();
-        qemu.register();
+        let firecracker = FirecrackerConfig::new();
+        firecracker.register();
 
         let config = TomlConfig::load(content).unwrap();
-        KataConfig::set_active_config(Some(config), "qemu", "agent0");
+        KataConfig::set_active_config(Some(config), "firecracker", "agent0");
 
         let mut anno_hash = HashMap::new();
         anno_hash.insert(
