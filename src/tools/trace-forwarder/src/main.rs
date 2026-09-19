@@ -3,11 +3,13 @@
 // Restored from Kata's trace forwarder, limited to Firecracker hybrid-vsock.
 use anyhow::{ensure, Context, Result};
 use clap::Parser;
+use kata_sys_util::guest_io::RateLimit;
 use opentelemetry::sdk::export::trace::{SpanData, SpanExporter};
 use std::io::{ErrorKind, Read};
 use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 const MAX_SPAN_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -23,7 +25,32 @@ struct Args {
     trace_name: String,
 }
 
-fn read_span(reader: &mut impl Read) -> Result<Option<SpanData>> {
+// A peer cannot reset the frame deadline by trickling individual bytes.
+struct FrameReader<'a> {
+    stream: &'a mut UnixStream,
+    deadline: Option<Instant>,
+}
+impl Read for FrameReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let timeout = match self.deadline {
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| {
+                    std::io::Error::new(ErrorKind::TimedOut, "trace frame deadline exceeded")
+                })?,
+            None => Duration::from_secs(30),
+        };
+        self.stream.set_read_timeout(Some(timeout))?;
+        let count = self.stream.read(buffer)?;
+        if count > 0 && self.deadline.is_none() {
+            self.deadline = Some(Instant::now() + Duration::from_secs(5));
+        }
+        Ok(count)
+    }
+}
+
+fn read_span(reader: &mut impl Read, budget: &mut RateLimit) -> Result<Option<SpanData>> {
     let mut header = [0u8; 8];
     // EOF is normal only between complete frames.
     match reader.read_exact(&mut header[..1]) {
@@ -38,14 +65,34 @@ fn read_span(reader: &mut impl Read) -> Result<Option<SpanData>> {
         length > 0 && length <= MAX_SPAN_BYTES,
         "invalid trace frame length {length}"
     );
+    budget.check(length as usize)?;
     let mut payload = vec![0; length as usize];
     reader
         .read_exact(&mut payload)
         .context("truncated trace payload")?;
     // Match the guest exporter's JSON format and OpenTelemetry version.
-    Ok(Some(
-        serde_json::from_slice(&payload).context("invalid trace span")?,
-    ))
+    let span: SpanData = serde_json::from_slice(&payload).context("invalid trace span")?;
+    ensure!(
+        span.name.len() <= 4096 && span.status_message.len() <= 16384,
+        "trace text exceeds field limit"
+    );
+    ensure!(
+        span.attributes.len() <= 256 && span.events.len() <= 256 && span.links.len() <= 256,
+        "trace collections exceed field limit"
+    );
+    for event in span.events.iter() {
+        ensure!(
+            event.name.len() <= 4096 && event.attributes.len() <= 256,
+            "trace event exceeds field limit"
+        );
+    }
+    for link in span.links.iter() {
+        ensure!(
+            link.attributes().len() <= 256,
+            "trace link exceeds field limit"
+        );
+    }
+    Ok(Some(span))
 }
 
 fn bind_socket(path: &str) -> Result<UnixListener> {
@@ -78,20 +125,34 @@ fn main() -> Result<()> {
     }
     let mut exporter = opentelemetry_jaeger::new_pipeline()
         .with_service_name(args.trace_name)
+        .with_trace_config(opentelemetry::sdk::trace::config().with_resource(
+            opentelemetry::sdk::Resource::new(vec![opentelemetry::KeyValue::new(
+                "kata.telemetry.origin",
+                "guest",
+            )]),
+        ))
         .with_agent_endpoint(args.jaeger_endpoint)
         .init_sync_exporter()?;
     eprintln!("Trace forwarder listening on {path}");
+    let mut budget = RateLimit::new(256, 8 * 1024 * 1024);
     for connection in listener.incoming() {
         let result = (|| -> Result<()> {
             let mut stream = connection?;
             stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-            while let Some(span) = read_span(&mut stream)? {
+            while let Some(span) = read_span(
+                &mut FrameReader {
+                    stream: &mut stream,
+                    deadline: None,
+                },
+                &mut budget,
+            )? {
                 futures::executor::block_on(exporter.export(vec![span]))?;
             }
             Ok(())
         })();
         if let Err(error) = result {
             eprintln!("Trace connection: {error:#}");
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
     Ok(())
@@ -100,6 +161,9 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn read_span(reader: &mut impl Read) -> Result<Option<SpanData>> {
+        super::read_span(reader, &mut RateLimit::new(256, 8 * 1024 * 1024))
+    }
     #[test]
     fn binds_long_sandbox_paths_without_replacing_existing_sockets() {
         let root = tempfile::tempdir().unwrap();
@@ -122,5 +186,22 @@ mod tests {
         assert!(read_span(&mut frame.as_slice()).is_err());
         frame.pop();
         assert!(read_span(&mut frame.as_slice()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    #[test]
+    fn expired_frame_deadline_rejects_without_blocking_or_reading() {
+        let (mut reader, _peer) = UnixStream::pair().unwrap();
+        let mut bounded = FrameReader {
+            stream: &mut reader,
+            deadline: Some(Instant::now() - Duration::from_secs(1)),
+        };
+        assert_eq!(
+            bounded.read(&mut [0; 1]).unwrap_err().kind(),
+            ErrorKind::TimedOut
+        );
     }
 }

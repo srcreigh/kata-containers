@@ -84,15 +84,20 @@ impl Hypervisor for Firecracker {
         debug!(sl(), "Wait fc sandbox");
         let mut waiter = self.exit_waiter.lock().await;
 
-        //wait until the fc process exited.
-        waiter.0.recv().await;
-
-        let inner = self.inner.read().await;
-        if let Ok(exit_code) = inner.wait_vm().await {
-            waiter.1 = exit_code;
+        loop {
+            {
+                let inner = self.inner.read().await;
+                match inner.wait_vm().await {
+                    Ok(Some(code)) => {
+                        waiter.1 = code;
+                        return Ok(code);
+                    }
+                    Ok(None) => {}
+                    Err(_) => return Ok(waiter.1),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-
-        Ok(waiter.1)
     }
 
     async fn pause_vm(&self) -> Result<()> {

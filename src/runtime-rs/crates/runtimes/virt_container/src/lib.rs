@@ -13,8 +13,10 @@ mod container_manager;
 pub mod contract;
 pub mod factory;
 pub mod health_check;
+mod oom;
 pub mod sandbox;
 pub mod sandbox_persist;
+mod termination;
 
 use std::sync::Arc;
 
@@ -110,6 +112,7 @@ impl RuntimeHandler for VirtContainer {
             agent,
             hypervisor,
             resource_manager,
+            sandbox.oom_registry.clone(),
         );
         Ok(RuntimeInstance {
             sandbox: Arc::new(sandbox),

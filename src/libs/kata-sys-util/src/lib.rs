@@ -9,6 +9,7 @@ extern crate slog;
 pub mod cpu;
 pub mod device;
 pub mod fs;
+pub mod guest_io;
 pub mod hooks;
 pub mod k8s;
 pub mod mount;

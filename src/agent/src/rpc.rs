@@ -675,7 +675,17 @@ impl AgentService {
         // the same limit so a malicious workload cannot exhaust agent memory,
         // and handle non-UTF-8 content gracefully.
         const MAX_TERMINATION_MSG: usize = 4096;
-        let contents = match tokio::fs::read(&host_path).await {
+        let contents = match async {
+            use tokio::io::AsyncReadExt;
+            let file = tokio::fs::File::open(&host_path).await?;
+            let mut buf = Vec::new();
+            file.take(MAX_TERMINATION_MSG as u64)
+                .read_to_end(&mut buf)
+                .await?;
+            Ok::<_, std::io::Error>(buf)
+        }
+        .await
+        {
             Ok(mut buf) => {
                 buf.truncate(MAX_TERMINATION_MSG);
                 String::from_utf8_lossy(&buf).into_owned()

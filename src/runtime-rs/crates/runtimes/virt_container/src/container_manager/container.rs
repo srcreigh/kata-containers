@@ -49,6 +49,7 @@ pub struct Container {
     agent: Arc<dyn Agent>,
     resource_manager: Arc<ResourceManager>,
     logger: slog::Logger,
+    termination_file: Option<Arc<std::fs::File>>,
 }
 
 impl Container {
@@ -76,7 +77,10 @@ impl Container {
             .as_ref()
             .and_then(|linux| linux.resources().clone());
 
+        let termination_file =
+            crate::termination::prepare(&spec).context("validate termination file")?;
         Ok(Self {
+            termination_file,
             pid,
             container_id,
             config,
@@ -462,49 +466,22 @@ impl Container {
     }
 
     async fn copy_termination_log(&self) {
-        let annotations = self.spec.annotations().clone().unwrap_or_default();
-        let policy = annotations.get("io.kubernetes.container.terminationMessagePolicy");
-        if policy.map(|p| p.as_str()) != Some("File") {
+        let Some(file) = self.termination_file.clone() else {
             return;
-        }
-
-        let termination_path =
-            match annotations.get("io.kubernetes.container.terminationMessagePath") {
-                Some(p) if !p.is_empty() => p.clone(),
-                _ => return,
-            };
-
+        };
         let req = agent::GetDiagnosticDataRequest {
             log_type: "termination_log".to_string(),
             container_id: self.container_id.container_id.clone(),
         };
 
-        // The kubelet bind-mounts a host file into the container at
-        // terminationMessagePath, then reads back from that host file.
-        // With shared_fs=none the guest cannot write through that mount,
-        // so we locate the host-side source path from the OCI mounts and
-        // write the data there directly.
-        let host_path = self.spec.mounts().as_ref().and_then(|mounts| {
-            mounts
-                .iter()
-                .find(|m| m.destination() == std::path::Path::new(&termination_path))
-                .and_then(|m| m.source().clone())
-        });
-
-        let host_path = match host_path {
-            Some(p) => p,
-            None => {
-                warn!(
-                    self.logger,
-                    "No host mount found for termination message path"
-                );
-                return;
-            }
-        };
-
         match self.agent.get_diagnostic_data(req).await {
             Ok(resp) if !resp.data.is_empty() => {
-                if let Err(e) = tokio::fs::write(&host_path, resp.data.as_bytes()).await {
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    crate::termination::write(&file, &resp.data)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.into()))
+                {
                     warn!(self.logger, "Failed to write termination message: {}", e);
                 }
             }

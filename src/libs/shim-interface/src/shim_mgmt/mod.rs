@@ -13,6 +13,8 @@ pub const DIRECT_VOLUME_RESIZE_URL: &str = "/direct-volume/resize";
 pub const AGENT_URL: &str = "/agent-url";
 /// URL for querying metrics inside shim
 pub const METRICS_URL: &str = "/metrics";
+/// Untrusted guest-only metrics, kept separate from host metrics.
+pub const GUEST_METRICS_URL: &str = "/metrics/guest";
 /// URL for setting agent policy
 pub const AGENT_POLICY_URL: &str = "/policy";
 

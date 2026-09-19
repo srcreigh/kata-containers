@@ -19,6 +19,7 @@ url = { workspace = true }
 oci-spec = { workspace = true }
 
 # Local dependencies
+kata-sys-util = { workspace = true }
 kata-types = { workspace = true }
 logging = { workspace = true }
 protocols = { workspace = true, features = ["async"] }
@@ -31,3 +32,6 @@ default = []
 
 [package.metadata.cargo-machete]
 ignored = ["slog-scope"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

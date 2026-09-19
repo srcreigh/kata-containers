@@ -114,14 +114,18 @@ impl FcInner {
         Ok(())
     }
 
-    pub(crate) async fn wait_vm(&self) -> Result<i32> {
-        let mut fc_process = self.fc_process.lock().await;
-
-        if let Some(mut fc_process) = fc_process.take() {
-            let status = fc_process.wait().await?;
-            Ok(status.code().unwrap_or(0))
-        } else {
-            Err(anyhow!("the process has been reaped"))
+    pub(crate) async fn wait_vm(&self) -> Result<Option<i32>> {
+        let mut process = self.fc_process.lock().await;
+        let child = process
+            .as_mut()
+            .ok_or_else(|| anyhow!("the process has been reaped"))?;
+        match child.try_wait()? {
+            Some(status) => {
+                let code = status.code().unwrap_or(0);
+                process.take();
+                Ok(Some(code))
+            }
+            None => Ok(None),
         }
     }
 

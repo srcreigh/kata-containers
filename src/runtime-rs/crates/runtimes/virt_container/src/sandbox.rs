@@ -109,6 +109,7 @@ pub struct VirtSandbox {
     shm_size: u64,
     factory: Option<Factory>,
     cancel_token: CancellationToken,
+    pub(crate) oom_registry: Arc<crate::oom::OomRegistry>,
 }
 
 impl std::fmt::Debug for VirtSandbox {
@@ -155,6 +156,7 @@ impl VirtSandbox {
             sandbox_config: Some(sandbox_config),
             factory: Some(factory),
             cancel_token,
+            oom_registry: Default::default(),
         })
     }
 
@@ -549,9 +551,13 @@ impl Sandbox for VirtSandbox {
         let sender = self.msg_sender.clone();
         let cancel_token = self.cancel_token.clone();
 
+        let oom_registry = self.oom_registry.clone();
         info!(sl!(), "oom watcher start");
         tokio::spawn(async move {
+            let mut requests = tokio::time::interval(std::time::Duration::from_millis(100));
+            requests.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
+                tokio::select! { _ = cancel_token.cancelled() => break, _ = requests.tick() => {} }
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
                         // Sandbox or VM is shutting down, gracefully exit watcher
@@ -562,6 +568,7 @@ impl Sandbox for VirtSandbox {
                         match res.context("get oom event") {
                             Ok(resp) => {
                                 let cid = &resp.container_id;
+                                if !oom_registry.accept(cid).await { continue; }
                                 warn!(sl!(), "send oom event for container {}", &cid);
                                 let event = TaskOOM {
                                     container_id: cid.to_string(),
@@ -569,10 +576,14 @@ impl Sandbox for VirtSandbox {
                                 };
                                 let msg = Message::new(Action::Event(Arc::new(event)));
                                 let lock_sender = sender.lock().await;
-                                if let Err(err) = lock_sender.send(msg).await.context("send event") {
+                                let sent = tokio::select! {
+                                    _ = cancel_token.cancelled() => break,
+                                    result = tokio::time::timeout(std::time::Duration::from_secs(1), lock_sender.send(msg)) => result,
+                                };
+                                if !matches!(sent, Ok(Ok(()))) {
                                     error!(
                                         sl!(),
-                                        "failed to send oom event for {} error {:?}", cid, err
+                                        "failed to send bounded oom event for {}", cid
                                     );
                                 }
                             }
@@ -583,6 +594,7 @@ impl Sandbox for VirtSandbox {
                                     break;
                                 } else {
                                     warn!(sl!(), "failed to get oom event error {:?}", err);
+                                    tokio::select! { _ = cancel_token.cancelled() => break, _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {} }
                                     continue;
                                 }
                             }
@@ -957,6 +969,7 @@ impl Persist for VirtSandbox {
             shm_size: DEFAULT_SHM_SIZE,
             factory: None,
             cancel_token: CancellationToken::default(),
+            oom_registry: Default::default(),
         })
     }
 }

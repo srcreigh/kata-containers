@@ -5,6 +5,7 @@
 //
 
 mod agent;
+mod response;
 mod trans;
 
 use std::sync::Arc;
@@ -100,6 +101,16 @@ impl KataAgent {
                 ..Default::default()
             })
             .await?;
+        let limit = match method {
+            "WaitProcess" | "WriteStdin" | "GetOOMEvent" => 4096,
+            "ReadStdout" | "ReadStderr" | "GetDiagnosticData" | "GetVolumeStats" => 64 * 1024,
+            "StatsContainer" | "GetMetrics" => 1024 * 1024,
+            _ => 64 * 1024,
+        };
+        anyhow::ensure!(
+            response.payload.len() <= limit,
+            "guest {method} response exceeds byte limit"
+        );
         Ok(response.payload)
     }
 

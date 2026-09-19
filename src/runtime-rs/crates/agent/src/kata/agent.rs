@@ -2,6 +2,7 @@
 // Copyright (c) 2019-2022 Ant Group
 // SPDX-License-Identifier: Apache-2.0
 
+use super::response::CheckedResponse;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use protobuf::Message;
@@ -63,7 +64,9 @@ macro_rules! impl_agent {
                 async fn $name(&self, req: $req) -> Result<$resp> {
                     let request: protocols::agent::$proto = req.into();
                     let payload = self.request("grpc.AgentService", stringify!($wire), &request, $timeout).await?;
-                    Ok(<$resp>::parse_from_bytes(&payload)?)
+                    let response = <$resp>::parse_from_bytes(&payload)?;
+                    response.validate()?;
+                    Ok(response)
                 }
             )*
         }

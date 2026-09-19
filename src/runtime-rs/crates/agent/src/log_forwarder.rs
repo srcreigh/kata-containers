@@ -5,7 +5,8 @@
 //
 
 use anyhow::Result;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use kata_sys_util::guest_io::{read_line, RateLimit};
+use tokio::io::BufReader;
 
 use crate::sock;
 
@@ -54,10 +55,18 @@ impl LogForwarder {
             match sock.connect(&config).await {
                 Ok(stream) => {
                     info!(logger, "connected to agent-log successfully");
-                    let stream = BufReader::new(stream);
-                    let mut lines = stream.lines();
-                    while let Ok(Some(l)) = lines.next_line().await {
-                        info!(sl!(), "guest agent: {}", l);
+                    let mut stream = BufReader::new(stream);
+                    let mut budget = RateLimit::new(1024, 1024 * 1024);
+                    let result: std::io::Result<()> = async {
+                        while let Some(line) = read_line(&mut stream, 16 * 1024).await? {
+                            budget.check(line.len())?;
+                            info!(sl!(), "guest agent: {}", line);
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        warn!(sl!(), "guest log stream closed: {}", error);
                     }
                 }
                 Err(err) => {

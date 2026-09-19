@@ -14,6 +14,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper_util::client::legacy::Client;
 use hyperlocal::{UnixClientExt, UnixConnector};
+use kata_sys_util::guest_io::{read_line, RateLimit};
 use kata_types::{
     capabilities::{Capabilities, CapabilityBits},
     config::hypervisor::Hypervisor as HypervisorConfig,
@@ -21,7 +22,6 @@ use kata_types::{
 use nix::sched::{setns, CloneFlags};
 use persist::sandbox_persist::Persist;
 use std::process::Stdio;
-use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::process::{Child, ChildStderr, Command};
 use tokio::sync::mpsc;
@@ -207,15 +207,31 @@ impl FcInner {
 async fn log_fc_stderr(stderr: ChildStderr, exit_notify: mpsc::Sender<()>) -> Result<()> {
     info!(sl!(), "starting reading fc stderr");
 
-    let stderr_reader = BufReader::new(stderr);
-    let mut stderr_lines = stderr_reader.lines();
-
-    while let Some(buffer) = stderr_lines
-        .next_line()
-        .await
-        .context("next_line() failed on fc stderr")?
-    {
-        info!(sl!(), "fc stderr: {:?}", buffer);
+    let mut stderr_reader = BufReader::new(stderr);
+    let mut budget = RateLimit::new(1024, 1024 * 1024);
+    let result: std::io::Result<()> = async {
+        while let Some(buffer) = read_line(&mut stderr_reader, 64 * 1024).await? {
+            budget.check(buffer.len())?;
+            info!(sl!(), "fc stderr: {:?}", buffer);
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        warn!(
+            sl!(),
+            "VMM logging disabled for invalid/excessive input: {}", error
+        );
+        // Keep the pipe open and drain with bounded memory and throughput. Logging errors
+        // must not deliver SIGPIPE to the VMM or masquerade as its process exit.
+        use tokio::io::AsyncReadExt;
+        let mut discard = [0u8; 8192];
+        while let Ok(count) = stderr_reader.read(&mut discard).await {
+            if count == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     // Notfiy the waiter the process exit.

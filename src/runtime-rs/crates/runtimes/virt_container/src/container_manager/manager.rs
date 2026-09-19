@@ -41,6 +41,7 @@ pub struct VirtContainerManager {
     agent: Arc<dyn Agent>,
     hypervisor: Arc<dyn Hypervisor>,
     vmm_master_tid: OnceCell<u32>,
+    oom_registry: Arc<crate::oom::OomRegistry>,
 }
 
 impl std::fmt::Debug for VirtContainerManager {
@@ -66,6 +67,7 @@ impl VirtContainerManager {
         agent: Arc<dyn Agent>,
         hypervisor: Arc<dyn Hypervisor>,
         resource_manager: Arc<ResourceManager>,
+        oom_registry: Arc<crate::oom::OomRegistry>,
     ) -> Self {
         Self {
             sid: sid.to_string(),
@@ -75,6 +77,7 @@ impl VirtContainerManager {
             agent,
             hypervisor,
             vmm_master_tid: OnceCell::new(),
+            oom_registry,
         }
     }
 
@@ -128,7 +131,13 @@ impl ContainerManager for VirtContainerManager {
         }
 
         let mut containers = self.containers.write().await;
+        anyhow::ensure!(
+            !containers.contains_key(&config.container_id),
+            "container already registered"
+        );
+        self.oom_registry.register(&config.container_id).await;
         if let Err(e) = container.create(spec).await {
+            self.oom_registry.remove(&config.container_id).await;
             if let Err(inner_e) = container.cleanup().await {
                 warn!(sl!(), "failed to cleanup container {:?}", inner_e);
             }
@@ -163,6 +172,8 @@ impl ContainerManager for VirtContainerManager {
                 let c = containers
                     .remove(container_id)
                     .ok_or_else(|| Error::ContainerNotFound(container_id.to_string()))?;
+
+                self.oom_registry.remove(container_id).await;
 
                 // Poststop Hooks:
                 // * should be run in runtime namespace

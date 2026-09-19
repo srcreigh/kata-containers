@@ -6,6 +6,8 @@ rust-version = "1.95"
 
 [workspace]
 members = [
+  # Pinned transport with host-input hardening and regression tests.
+  "vendor/ttrpc",
   # libs
   "src/libs/kata-sys-util",
   "src/libs/kata-types",
@@ -175,3 +177,7 @@ gpt = "4.1.0"
 devicemapper = { git = "https://github.com/stratis-storage/devicemapper-rs", rev = "078e70ceecf0d08eb0c800626827c9bc0a9a8adc" }
 
 vsock-exporter = { path = "src/agent/vsock-exporter" }
+
+# Local hardening of the locked upstream transport; see vendor/ttrpc/KATA-PATCHES.md.
+[patch.crates-io]
+ttrpc = { path = "vendor/ttrpc" }

@@ -44,6 +44,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "kata-sys-util",
  "kata-types",
  "logging",
  "oci-spec 0.10.0",
@@ -53,6 +54,7 @@ dependencies = [
  "serde",
  "slog",
  "slog-scope",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-opentelemetry 0.18.0",
@@ -2439,6 +2441,7 @@ dependencies = [
  "tempfile",
  "test-utils",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -2448,6 +2451,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "kata-sys-util",
  "nix 0.31.3",
  "opentelemetry 0.17.0",
  "opentelemetry-jaeger 0.16.0",
@@ -5236,8 +5240,6 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "ttrpc"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f12efe237328bbe3b3b50503627f7cc9e74cfae34ffa8438561916623cd8f50"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5425,6 +5427,7 @@ dependencies = [
  "protobuf",
  "resource",
  "runtime-spec",
+ "safe-path",
  "sendfd",
  "serde",
  "serde_json",

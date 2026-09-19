@@ -18,7 +18,7 @@ use url::Url;
 
 use shim_interface::shim_mgmt::{
     AGENT_POLICY_URL, AGENT_URL, DIRECT_VOLUME_PATH_KEY, DIRECT_VOLUME_RESIZE_URL,
-    DIRECT_VOLUME_STATS_URL, METRICS_URL,
+    DIRECT_VOLUME_STATS_URL, GUEST_METRICS_URL, METRICS_URL,
 };
 
 // main router for response, this works as a multiplexer on
@@ -40,6 +40,7 @@ pub(crate) async fn handler_mux(
             Ok(unsupported("kata-fc: volume resize is unsupported"))
         }
         (&Method::GET, METRICS_URL) => metrics_url_handler(sandbox, req).await,
+        (&Method::GET, GUEST_METRICS_URL) => guest_metrics_handler(sandbox).await,
         (&Method::PUT, AGENT_POLICY_URL) => Ok(unsupported("kata-fc: agent policy is unsupported")),
         _ => Ok(not_found(req).await),
     }
@@ -89,13 +90,23 @@ async fn metrics_url_handler(
     sandbox: Arc<dyn Sandbox>,
     _req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>> {
-    // Firecracker has no implemented VMM metrics source; retain agent and shim metrics.
-    let agent_metrics = sandbox.agent_metrics().await.unwrap_or_default();
-    let shim_metrics = get_shim_metrics().unwrap_or_default();
+    let _ = sandbox;
+    metrics_response(get_shim_metrics()?, "host")
+}
 
-    Ok(Response::new(Full::new(Bytes::from(format!(
-        "{agent_metrics}{shim_metrics}"
-    )))))
+async fn guest_metrics_handler(sandbox: Arc<dyn Sandbox>) -> Result<Response<Full<Bytes>>> {
+    metrics_response(sandbox.agent_metrics().await?, "guest")
+}
+
+fn metrics_response(text: String, origin: &str) -> Result<Response<Full<Bytes>>> {
+    anyhow::ensure!(
+        text.len() <= 1024 * 1024,
+        "metrics response exceeds byte limit"
+    );
+    Ok(Response::builder()
+        .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        .header("X-Kata-Metrics-Origin", origin)
+        .body(Full::new(Bytes::from(text)))?)
 }
 
 fn unsupported(message: &'static str) -> Response<Full<Bytes>> {
@@ -103,4 +114,22 @@ fn unsupported(message: &'static str) -> Response<Full<Bytes>> {
         .status(StatusCode::NOT_IMPLEMENTED)
         .body(Full::new(Bytes::from(message)))
         .unwrap()
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    #[tokio::test]
+    async fn metric_origins_never_share_a_response() {
+        let host = metrics_response("host_counter 1\n".into(), "host").unwrap();
+        let guest = metrics_response("host_counter 999\n".into(), "guest").unwrap();
+        assert_eq!(host.headers()["X-Kata-Metrics-Origin"], "host");
+        assert_eq!(guest.headers()["X-Kata-Metrics-Origin"], "guest");
+        assert_eq!(
+            host.into_body().collect().await.unwrap().to_bytes(),
+            "host_counter 1\n"
+        );
+        assert!(metrics_response("x".repeat(1024 * 1024 + 1), "guest").is_err());
+    }
 }

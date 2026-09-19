@@ -24,6 +24,7 @@ use serde_json::json;
 use tokio::{fs, fs::File};
 
 const REQUEST_RETRY: u32 = 500;
+const MAX_ERROR_BODY: usize = 64 * 1024;
 const FC_KERNEL: &str = "vmlinux";
 const FC_ROOT_FS: &str = "rootfs";
 const DRIVE_PREFIX: &str = "drive";
@@ -252,6 +253,7 @@ impl FcInner {
         debug!(sl(), "URI: {:?}", uri.clone());
         debug!(sl(), "DATA: {:?}", data.clone());
         let mut last_error = None;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         for _count in 0..REQUEST_RETRY {
             let req = Request::builder()
                 .method(method.clone())
@@ -260,7 +262,9 @@ impl FcInner {
                 .header("Content-Type", "application/json")
                 .body(Full::new(Bytes::from(data.clone())))?;
 
-            match self.send_request(req).await {
+            let response = tokio::time::timeout_at(deadline, self.send_request(req)).await;
+            let response = response.map_err(|_| anyhow!("Firecracker API deadline exceeded"))?;
+            match response {
                 Ok(resp) => {
                     debug!(sl(), "Request sent, resp: {:?}", resp);
                     return Ok(());
@@ -268,7 +272,7 @@ impl FcInner {
                 Err(resp) => {
                     debug!(sl(), "Request sent with error, resp: {:?}", resp);
                     last_error = Some(resp);
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     continue;
                 }
             }
@@ -289,8 +293,18 @@ impl FcInner {
         if status.is_success() {
             Ok(resp)
         } else {
-            let body = resp.into_body().collect().await?.to_bytes();
-            let body = String::from_utf8_lossy(&body);
+            let mut incoming = resp.into_body();
+            let mut bytes = Vec::new();
+            while let Some(frame) = incoming.frame().await {
+                if let Ok(data) = frame?.into_data() {
+                    anyhow::ensure!(
+                        data.len() <= MAX_ERROR_BODY.saturating_sub(bytes.len()),
+                        "Firecracker API error body exceeds limit"
+                    );
+                    bytes.extend_from_slice(&data);
+                }
+            }
+            let body = String::from_utf8_lossy(&bytes);
             Err(anyhow!("Firecracker API returned HTTP {status}: {body}"))
         }
     }
@@ -339,6 +353,40 @@ impl FcInner {
 mod error_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn oversized_api_error_body_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fc.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            let body = vec![b'x'; MAX_ERROR_BODY + 1];
+            let header = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            let _ = stream.write_all(&body).await;
+        });
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let fc = FcInner::new(tx);
+        let request = Request::builder()
+            .uri(hyper::Uri::from(Uri::new(&path, "/")))
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        assert!(fc
+            .send_request(request)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds limit"));
+        peer.await.unwrap();
+    }
 
     #[tokio::test]
     async fn api_error_body_survives_retries() {
