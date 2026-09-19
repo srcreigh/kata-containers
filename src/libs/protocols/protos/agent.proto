@@ -49,8 +49,8 @@ service AgentService {
 	rpc TtyWinResize(TtyWinResizeRequest) returns (google.protobuf.Empty);
 
 	// networking
-	rpc UpdateInterface(UpdateInterfaceRequest) returns (types.Interface);
-	rpc UpdateRoutes(UpdateRoutesRequest) returns (Routes);
+	rpc UpdateInterface(UpdateInterfaceRequest) returns (google.protobuf.Empty);
+	rpc UpdateRoutes(UpdateRoutesRequest) returns (google.protobuf.Empty);
 	rpc ListInterfaces(ListInterfacesRequest) returns(Interfaces);
 	rpc ListRoutes(ListRoutesRequest) returns (Routes);
 	rpc AddARPNeighbors(AddARPNeighborsRequest) returns (google.protobuf.Empty);

@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use dbs_utils::net::MacAddr;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::{body::Incoming, Method, Request, Response};
 use hyperlocal::Uri;
 use kata_sys_util::mount;
@@ -286,28 +286,12 @@ impl FcInner {
         let status = resp.status();
         debug!(sl(), "Request RESPONSE {:?} {:?}", &status, resp);
         if status.is_success() {
-            return Ok(resp);
+            Ok(resp)
         } else {
-            let body = resp.into_body().collect().await?.to_bytes();
-            if body.is_empty() {
-                debug!(sl(), "Request FAILED WITH STATUS: {:?}", status);
-                None
-            } else {
-                let body = String::from_utf8_lossy(&body).into_owned();
-                debug!(
-                    sl(),
-                    "Request FAILED WITH STATUS: {:?} and BODY: {:?}", status, body
-                );
-                Some(body)
-            };
+            Err(anyhow!("Firecracker API returned HTTP {status}"))
         }
-
-        Err(anyhow::anyhow!(
-            "After {} attempts, it
-                            still doesn't work.",
-            REQUEST_RETRY
-        ))
     }
+
     pub(crate) fn cleanup_resource(&self) {
         if self.jailed {
             self.umount_jail_resource(FC_KERNEL).ok();

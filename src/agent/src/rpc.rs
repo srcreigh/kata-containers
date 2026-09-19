@@ -29,7 +29,7 @@ use oci_spec::runtime as oci;
 use protobuf::MessageField;
 use protocols::agent::{
     AgentDetails, CopyFileRequest, GuestDetailsResponse, Metrics, OOMEvent, ReadStreamResponse,
-    Routes, StatsContainerResponse, VolumeStatsRequest, WaitProcessResponse, WriteStreamResponse,
+    StatsContainerResponse, VolumeStatsRequest, WaitProcessResponse, WriteStreamResponse,
 };
 use protocols::csi::{
     volume_usage::Unit as VolumeUsage_Unit, VolumeCondition, VolumeStatsResponse, VolumeUsage,
@@ -39,6 +39,7 @@ use protocols::health::{
     health_check_response::ServingStatus as HealthCheckResponse_ServingStatus, HealthCheckResponse,
     VersionCheckResponse,
 };
+#[cfg(test)]
 use protocols::types::Interface;
 use protocols::{agent_ttrpc_async as agent_ttrpc, health_ttrpc_async as health_ttrpc};
 use rustjail::cgroups::notifier;
@@ -994,7 +995,7 @@ impl agent_ttrpc::AgentService for AgentService {
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::UpdateInterfaceRequest,
-    ) -> ttrpc::Result<Interface> {
+    ) -> ttrpc::Result<Empty> {
         info!(sl(), "rpc call from shim to agent: {}", "update_interface");
 
         let interface = req.interface.into_option().map_ttrpc_err(
@@ -1016,14 +1017,14 @@ impl agent_ttrpc::AgentService for AgentService {
             .await
             .map_ttrpc_err(|e| format!("update interface: {e:?}"))?;
 
-        Ok(interface)
+        Ok(Empty::new())
     }
 
     async fn update_routes(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::UpdateRoutesRequest,
-    ) -> ttrpc::Result<Routes> {
+    ) -> ttrpc::Result<Empty> {
         info!(sl(), "rpc call from shim to agent: {}", "update_routes");
 
         let new_routes = req
@@ -1040,16 +1041,7 @@ impl agent_ttrpc::AgentService for AgentService {
             .await
             .map_ttrpc_err(|e| format!("Failed to update routes: {e:?}"))?;
 
-        let list = sandbox
-            .rtnl
-            .list_routes()
-            .await
-            .map_ttrpc_err(|e| format!("Failed to list routes after update: {e:?}"))?;
-
-        Ok(protocols::agent::Routes {
-            Routes: list,
-            ..Default::default()
-        })
+        Ok(Empty::new())
     }
 
     async fn create_sandbox(

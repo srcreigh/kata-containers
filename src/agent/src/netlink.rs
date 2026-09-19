@@ -8,19 +8,19 @@ use futures::{future, TryStreamExt};
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use netlink_packet_route::link::{LinkAttribute, LinkFlags, LinkMessage};
 use netlink_packet_route::neighbour::NeighbourFlags;
-use netlink_packet_route::route::{RouteHeader, RouteProtocol, RouteScope, RouteType};
+use netlink_packet_route::route::{RouteProtocol, RouteScope, RouteType};
 use netlink_packet_route::{
     address::{AddressAttribute, AddressMessage},
     route::RouteMetric,
 };
 use netlink_packet_route::{
     neighbour::NeighbourState,
-    route::{RouteAddress, RouteAttribute, RouteMessage},
+    route::{RouteAddress, RouteAttribute},
 };
 use nix::errno::Errno;
-use protocols::types::{ARPNeighbor, IPAddress, IPFamily, Interface, Route};
-use rtnetlink::{new_connection, IpVersion, LinkUnspec, RouteMessageBuilder};
-use std::convert::{TryFrom, TryInto};
+use protocols::types::{ARPNeighbor, IPFamily, Interface, Route};
+use rtnetlink::{new_connection, LinkUnspec, RouteMessageBuilder};
+use std::convert::TryFrom;
 use std::fmt;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -32,8 +32,6 @@ use std::str::{self, FromStr};
 pub enum LinkFilter<'a> {
     /// Find by link name.
     Name(&'a str),
-    /// Find by link index.
-    Index(u32),
     /// Find by MAC address.
     Address(&'a str),
 }
@@ -42,7 +40,6 @@ impl fmt::Display for LinkFilter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LinkFilter::Name(name) => write!(f, "Name: {name}"),
-            LinkFilter::Index(idx) => write!(f, "Index: {idx}"),
             LinkFilter::Address(addr) => write!(f, "Address: {addr}"),
         }
     }
@@ -258,35 +255,6 @@ impl Handle {
         Ok(prev_mac)
     }
 
-    /// Retireve available network interfaces.
-    pub async fn list_interfaces(&self) -> Result<Vec<Interface>> {
-        let mut list = Vec::new();
-
-        let links = self.list_links().await?;
-
-        for link in &links {
-            let mut iface = Interface {
-                name: link.name(),
-                hwAddr: link.address(),
-                mtu: link.mtu().unwrap_or(0),
-                ..Default::default()
-            };
-
-            let ips = self
-                .list_addresses(AddressFilter::LinkIndex(link.index()))
-                .await?
-                .into_iter()
-                .map(|p| p.try_into())
-                .collect::<Result<Vec<IPAddress>>>()?;
-
-            iface.IPAddresses = ips;
-
-            list.push(iface);
-        }
-
-        Ok(list)
-    }
-
     async fn find_link(&self, filter: LinkFilter<'_>) -> Result<Link> {
         self.try_find_link(filter)
             .await?
@@ -301,7 +269,6 @@ impl Handle {
 
         let filtered = match filter {
             LinkFilter::Name(name) => request.match_name(name.to_owned()),
-            LinkFilter::Index(index) => request.match_index(index),
             _ => request, // Post filters
         };
 
@@ -333,6 +300,7 @@ impl Handle {
         Ok(next.map(|msg| msg.into()))
     }
 
+    #[cfg(test)]
     async fn list_links(&self) -> Result<Vec<Link>> {
         let result = self
             .handle
@@ -350,107 +318,6 @@ impl Handle {
         let msg = if up { builder.up() } else { builder.down() };
         self.handle.link().change(msg.build()).execute().await?;
         Ok(())
-    }
-
-    async fn query_routes(&self, ip_version: Option<IpVersion>) -> Result<Vec<RouteMessage>> {
-        let list = if let Some(ip_version) = ip_version {
-            let msg = match ip_version {
-                IpVersion::V4 => RouteMessageBuilder::<std::net::Ipv4Addr>::new().build(),
-                IpVersion::V6 => RouteMessageBuilder::<std::net::Ipv6Addr>::new().build(),
-            };
-            self.handle.route().get(msg).execute().try_collect().await?
-        } else {
-            // These queries must be executed sequentially, otherwise
-            // it'll throw "Device or resource busy (os error 16)"
-            let routes4 = self
-                .handle
-                .route()
-                .get(RouteMessageBuilder::<std::net::Ipv4Addr>::new().build())
-                .execute()
-                .try_collect::<Vec<_>>()
-                .await
-                .with_context(|| "Failed to query IP v4 routes")?;
-
-            let routes6 = self
-                .handle
-                .route()
-                .get(RouteMessageBuilder::<std::net::Ipv6Addr>::new().build())
-                .execute()
-                .try_collect::<Vec<_>>()
-                .await
-                .with_context(|| "Failed to query IP v6 routes")?;
-
-            [routes4, routes6].concat()
-        };
-
-        Ok(list)
-    }
-
-    pub async fn list_routes(&self) -> Result<Vec<Route>> {
-        let mut result = Vec::new();
-
-        for msg in self.query_routes(None).await? {
-            // Ignore non-main tables
-            if msg.header.table != RouteHeader::RT_TABLE_MAIN {
-                continue;
-            }
-
-            let mut route = Route {
-                scope: u8::from(msg.header.scope) as u32,
-                ..Default::default()
-            };
-
-            for attribute in &msg.attributes {
-                if let RouteAttribute::Destination(dest) = attribute {
-                    if let Ok(dest) = parse_route_addr(dest) {
-                        route.dest = format!("{}/{}", dest, msg.header.destination_prefix_length);
-                    }
-                }
-
-                if let RouteAttribute::Source(src) = attribute {
-                    if let Ok(src) = parse_route_addr(src) {
-                        route.source = format!("{}/{}", src, msg.header.source_prefix_length)
-                    }
-                }
-
-                if let RouteAttribute::Gateway(g) = attribute {
-                    if let Ok(addr) = parse_route_addr(g) {
-                        // For gateway, destination is 0.0.0.0
-                        if addr.is_ipv4() {
-                            route.dest = String::from("0.0.0.0");
-                        } else {
-                            route.dest = String::from("::1");
-                        }
-                    }
-
-                    route.gateway = parse_route_addr(g)
-                        .map(|g| g.to_string())
-                        .unwrap_or_default();
-                }
-
-                if let RouteAttribute::Metrics(metrics) = attribute {
-                    for m in metrics {
-                        if let RouteMetric::Mtu(mtu) = m {
-                            route.mtu = *mtu;
-                            break;
-                        }
-                    }
-                }
-
-                if let RouteAttribute::Oif(index) = attribute {
-                    route.device = match self.find_link(LinkFilter::Index(*index)).await {
-                        Ok(link) => link.name(),
-                        Err(_) => String::new(),
-                    };
-                }
-            }
-
-            if !route.dest.is_empty() {
-                result.push(route);
-            }
-        }
-
-        Ok(result)
     }
 
     /// Add a list of routes from iterable object `I`.
@@ -786,17 +653,6 @@ impl Link {
     fn index(&self) -> u32 {
         self.header.index
     }
-
-    fn mtu(&self) -> Option<u64> {
-        use LinkAttribute as Nla;
-        self.attributes.iter().find_map(|n| {
-            if let Nla::Mtu(mtu) = n {
-                Some(*mtu as u64)
-            } else {
-                None
-            }
-        })
-    }
 }
 
 impl From<LinkMessage> for Link {
@@ -815,38 +671,8 @@ impl Deref for Link {
 
 struct Address(AddressMessage);
 
-impl TryFrom<Address> for IPAddress {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Address) -> Result<Self, Self::Error> {
-        let family = if value.is_ipv6() {
-            IPFamily::v4
-        } else {
-            IPFamily::v6
-        };
-
-        let mut address = value.address();
-        if address.is_empty() {
-            address = value.local();
-        }
-
-        let mask = format!("{}", value.0.header.prefix_len);
-
-        Ok(IPAddress {
-            family: family.into(),
-            address,
-            mask,
-            ..Default::default()
-        })
-    }
-}
-
 impl Address {
-    fn is_ipv6(&self) -> bool {
-        u8::from(self.0.header.family) == libc::AF_INET6 as u8
-    }
-
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn prefix(&self) -> u8 {
         self.0.header.prefix_len
     }
@@ -865,31 +691,6 @@ impl Address {
             })
             .unwrap_or_default()
     }
-
-    fn local(&self) -> String {
-        use AddressAttribute as Nla;
-        self.0
-            .attributes
-            .iter()
-            .find_map(|n| {
-                if let Nla::Local(data) = n {
-                    Some(data.to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default()
-    }
-}
-
-fn parse_route_addr(ra: &RouteAddress) -> Result<IpAddr> {
-    let ipaddr = match ra {
-        RouteAddress::Inet6(ipv6_addr) => ipv6_addr.to_canonical(),
-        RouteAddress::Inet(ipv4_addr) => IpAddr::from(*ipv4_addr),
-        _ => return Err(anyhow!("got invalid route address")),
-    };
-
-    Ok(ipaddr)
 }
 
 #[cfg(test)]
@@ -897,6 +698,7 @@ mod tests {
     use super::*;
     use netlink_packet_route::address::AddressHeader;
     use netlink_packet_route::link::LinkHeader;
+    use protocols::types::IPAddress;
     use serial_test::serial;
     use std::iter;
     use std::process::Command;
@@ -1028,21 +830,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(arp_neighbor_tests)]
-    async fn list_routes() {
-        clean_env_for_test_add_one_arp_neighbor(TEST_DUMMY_INTERFACE, TEST_ARP_IP);
-        let devices: Vec<Interface> = Handle::new().unwrap().list_interfaces().await.unwrap();
-        let all = Handle::new()
-            .unwrap()
-            .list_routes()
-            .await
-            .context(format!("available devices: {devices:?}"))
-            .expect("Failed to list routes");
-
-        assert_ne!(all.len(), 0);
-    }
-
-    #[tokio::test]
     async fn list_addresses() {
         let list = Handle::new()
             .unwrap()
@@ -1053,25 +840,6 @@ mod tests {
         assert_ne!(list.len(), 0);
         for addr in &list {
             assert_ne!(addr.0.header, AddressHeader::default());
-        }
-    }
-
-    #[tokio::test]
-    async fn list_interfaces() {
-        let list = Handle::new()
-            .unwrap()
-            .list_interfaces()
-            .await
-            .expect("Failed to list interfaces");
-
-        for iface in &list {
-            assert_ne!(iface.name.len(), 0);
-            assert_ne!(iface.mtu, 0);
-
-            for ip in &iface.IPAddresses {
-                assert_ne!(ip.mask.len(), 0);
-                assert_ne!(ip.address.len(), 0);
-            }
         }
     }
 
