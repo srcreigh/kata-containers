@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use kata_types::config::Agent as AgentConfig;
 use protobuf::Message;
 use tokio::sync::RwLock;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use ttrpc::asynchronous::Client;
 
 use crate::{log_forwarder::LogForwarder, sock};
@@ -77,11 +78,23 @@ impl KataAgent {
                 timeout.unwrap_or(configured as i64),
             )
         };
+        let mut carrier = std::collections::HashMap::new();
+        opentelemetry::global::get_text_map_propagator(|p| {
+            p.inject_context(&tracing::Span::current().context(), &mut carrier);
+        });
         let response = client
             .request(ttrpc::Request {
                 service: service.to_owned(),
                 method: method.to_owned(),
                 payload: request.write_to_bytes()?,
+                metadata: carrier
+                    .into_iter()
+                    .map(|(key, value)| ttrpc::proto::KeyValue {
+                        key,
+                        value,
+                        ..Default::default()
+                    })
+                    .collect(),
                 timeout_nano: timeout_ms * 1_000_000,
                 ..Default::default()
             })

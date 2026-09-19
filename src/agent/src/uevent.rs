@@ -60,6 +60,7 @@ impl Uevent {
         event
     }
 
+    #[tracing::instrument(skip_all)]
     async fn process_add(&self, _logger: &Logger, sandbox: &Arc<Mutex<Sandbox>>) {
         let mut sb = sandbox.lock().await;
 
@@ -77,11 +78,13 @@ impl Uevent {
         })
     }
 
+    #[tracing::instrument(skip_all)]
     async fn process_remove(&self, _logger: &Logger, sandbox: &Arc<Mutex<Sandbox>>) {
         let mut sb = sandbox.lock().await;
         sb.uevent_map.remove(&self.devpath);
     }
 
+    #[tracing::instrument(skip_all)]
     async fn process(&self, logger: &Logger, sandbox: &Arc<Mutex<Sandbox>>) {
         if self.action == U_EVENT_ACTION_ADD {
             return self.process_add(logger, sandbox).await;
@@ -92,6 +95,7 @@ impl Uevent {
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn wait_for_uevent(
     sandbox: &Arc<Mutex<Sandbox>>,
     matcher: impl UeventMatcher,
@@ -139,6 +143,7 @@ pub async fn wait_for_uevent(
     Ok(uev)
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn watch_uevents(
     sandbox: Arc<Mutex<Sandbox>>,
     mut shutdown: Receiver<bool>,

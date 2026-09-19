@@ -71,6 +71,12 @@ pathrs.workspace = true
 
 
 
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-opentelemetry = "0.17.0"
+opentelemetry.workspace = true
+vsock-exporter.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 which.workspace = true

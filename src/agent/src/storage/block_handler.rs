@@ -83,10 +83,12 @@ pub struct VirtioBlkMmioHandler {}
 
 #[async_trait::async_trait]
 impl StorageHandler for VirtioBlkMmioHandler {
+    #[tracing::instrument(skip_all)]
     fn driver_types(&self) -> &[&str] {
         &[DRIVER_BLK_MMIO_TYPE]
     }
 
+    #[tracing::instrument(skip_all)]
     async fn create_device(
         &self,
         storage: Storage,

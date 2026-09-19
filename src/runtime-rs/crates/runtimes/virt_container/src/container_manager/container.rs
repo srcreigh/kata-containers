@@ -180,7 +180,10 @@ impl Container {
             .as_ref()
             .context("OCI spec missing linux field")?;
 
-        self.resource_manager.validate_devices(linux).await?;
+        let devices_agent = self
+            .resource_manager
+            .handler_devices(&config.container_id, linux)
+            .await?;
         // update vcpus, mems and host cgroups
         let resources = self
             .resource_manager
@@ -216,6 +219,7 @@ impl Container {
             storages,
             oci: Some(spec),
             sandbox_pidns,
+            devices: devices_agent,
             ..Default::default()
         };
 

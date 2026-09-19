@@ -6,16 +6,16 @@
 
 use std::{collections::HashMap, sync::Arc, thread};
 
-use agent::{ARPNeighbor, Agent, Storage};
+use agent::{types::Device, ARPNeighbor, Agent, Storage};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use hypervisor::{
     device::{
-        device_manager::{do_handle_device, DeviceManager},
-        util::{get_host_path, DEVICE_TYPE_CHAR},
-        DeviceConfig,
+        device_manager::{do_handle_device, get_block_device_info, DeviceManager},
+        util::{get_host_path, DEVICE_TYPE_BLOCK, DEVICE_TYPE_CHAR},
+        DeviceConfig, DeviceType,
     },
-    Hypervisor,
+    BlockConfigModern, Hypervisor,
 };
 use kata_types::mount::{kata_guest_sandbox_dir, Mount, KATA_EPHEMERAL_VOLUME_TYPE, SHM_DIR};
 use kata_types::{
@@ -35,7 +35,7 @@ use crate::{
     network::{self, Network, NetworkConfig, NetworkWithNetNsConfig},
     resource_persist::ResourceState,
     rootfs::{RootFsResource, Rootfs},
-    volume::{Volume, VolumeResource},
+    volume::{utils::is_block_device_readonly, Volume, VolumeResource},
     ResourceConfig, ResourceUpdateOp,
 };
 
@@ -382,8 +382,8 @@ impl ResourceManagerInner {
         self.volume_resource.handler_volumes(&ctx, cid, spec).await
     }
 
-    pub fn validate_devices(&self, linux: &Linux) -> Result<()> {
-        // Retain host character-device validation; raw block nodes are rejected.
+    pub async fn handler_devices(&self, _cid: &str, linux: &Linux) -> Result<Vec<Device>> {
+        // Check the entire request before attaching the first block device.
         kata_types::device::validate_linux_device_features(linux)?;
         for d in linux
             .devices()
@@ -395,7 +395,48 @@ impl ResourceManagerInner {
                 .context("resolve character device")?;
             kata_types::device::validate_device_path(std::path::Path::new(&host_path))?;
         }
-        Ok(())
+        let mut devices = Vec::new();
+        for d in linux
+            .devices()
+            .iter()
+            .flatten()
+            .filter(|d| d.typ() == LinuxDeviceType::B)
+        {
+            let blkdev_info = get_block_device_info(&self.device_manager).await;
+            // Read-only intent comes from the cgroup device access rule.
+            // Also honor the host device's own read-only flag (BLKROGET):
+            // block-mode volumes frequently carry no read-only signal in
+            // the OCI spec, so the device flag is the only reliable
+            // source. Either signal being positive marks it read-only.
+            let is_readonly =
+                device_cgroup_access_is_readonly(linux, LinuxDeviceType::B, d.major(), d.minor())
+                    || block_device_node_is_readonly(d.major(), d.minor());
+            let dev_info = DeviceConfig::BlockCfgModern(BlockConfigModern {
+                major: d.major(),
+                minor: d.minor(),
+                is_readonly,
+                driver_option: blkdev_info.block_device_driver,
+                ..Default::default()
+            });
+
+            let device_info = do_handle_device(&self.device_manager, &dev_info)
+                .await
+                .context("do handle device")?;
+
+            // Firecracker block devices use the guest MMIO device path.
+            if let DeviceType::BlockModern(device_mod) = device_info {
+                let device = device_mod.lock().await.clone();
+                let agent_device = Device {
+                    id: device.config.virt_path.clone(),
+                    container_path: d.path().display().to_string().clone(),
+                    field_type: device.config.driver_option,
+                    vm_path: device.config.virt_path,
+                    ..Default::default()
+                };
+                devices.push(agent_device);
+            }
+        }
+        Ok(devices)
     }
 
     pub async fn cleanup(&self) -> Result<()> {
@@ -519,5 +560,170 @@ impl Persist for ResourceManagerInner {
             cpu_resource: CpuResource::default(),
             mem_resource,
         })
+    }
+}
+
+/// Derive a device's read-only intent from the cgroup device access rules.
+///
+/// Block-mode volumes (e.g. Kubernetes volumeDevices) are passed as device
+/// nodes in `spec.Linux.Devices` and carry no mount "ro" option; their
+/// read-only intent is expressed solely through the cgroup device access in
+/// `spec.Linux.Resources.Devices` ("rm" = read+mknod, no write, for read-only;
+/// "rwm" for read-write).
+///
+/// The allow rule that exactly matches the device (type and exact major/minor)
+/// decides: the device is read-only when that rule grants access without the
+/// write ("w") bit. Wildcard rules (no major/minor) describe broad device
+/// classes and are ignored so they cannot override a specific device's access.
+/// If no exact rule matches, the device is left read-write.
+fn device_cgroup_access_is_readonly(
+    linux: &Linux,
+    dev_type: LinuxDeviceType,
+    major: i64,
+    minor: i64,
+) -> bool {
+    let devices = match linux
+        .resources()
+        .as_ref()
+        .and_then(|r| r.devices().as_ref())
+    {
+        Some(devices) => devices,
+        None => return false,
+    };
+
+    for r in devices.iter() {
+        if !r.allow() {
+            continue;
+        }
+        let (rule_major, rule_minor) = match (r.major(), r.minor()) {
+            (Some(major), Some(minor)) => (major, minor),
+            _ => continue,
+        };
+        if rule_major != major || rule_minor != minor {
+            continue;
+        }
+        // A specific type must match; `A` (all) and an unset type are wildcards.
+        if let Some(typ) = r.typ() {
+            if typ != LinuxDeviceType::A && typ != dev_type {
+                continue;
+            }
+        }
+
+        return !r.access().as_deref().unwrap_or("").contains('w');
+    }
+
+    false
+}
+
+/// block_device_node_is_readonly reports whether the host block device
+/// identified by major:minor advertises the read-only flag (BLKROGET). This is
+/// the ground truth for a device's writability: block-mode volumes frequently
+/// carry no read-only signal in the OCI spec, so the device flag is the only
+/// reliable source. Any failure is logged and treated as not-read-only so it
+/// can never flip a positive signal back.
+fn block_device_node_is_readonly(major: i64, minor: i64) -> bool {
+    let host_path = match get_host_path(DEVICE_TYPE_BLOCK, major, minor) {
+        Ok(path) if !path.is_empty() => path,
+        Ok(_) => return false,
+        Err(e) => {
+            warn!(
+                sl!(),
+                "could not resolve host path for block device {}:{}: {:?}", major, minor, e
+            );
+            return false;
+        }
+    };
+
+    is_block_device_readonly(&host_path).unwrap_or_else(|e| {
+        warn!(
+            sl!(),
+            "could not query block device read-only flag for {}: {:?}", host_path, e
+        );
+        false
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_cgroup_access_is_readonly;
+    use oci_spec::runtime::{
+        Linux, LinuxBuilder, LinuxDeviceCgroup, LinuxDeviceCgroupBuilder, LinuxDeviceType,
+        LinuxResourcesBuilder,
+    };
+    use rstest::rstest;
+
+    const MAJOR: i64 = 8;
+    const MINOR: i64 = 0;
+
+    fn rule(
+        allow: bool,
+        typ: LinuxDeviceType,
+        major: Option<i64>,
+        minor: Option<i64>,
+        access: &str,
+    ) -> LinuxDeviceCgroup {
+        let mut builder = LinuxDeviceCgroupBuilder::default()
+            .allow(allow)
+            .typ(typ)
+            .access(access);
+        if let Some(major) = major {
+            builder = builder.major(major);
+        }
+        if let Some(minor) = minor {
+            builder = builder.minor(minor);
+        }
+        builder.build().unwrap()
+    }
+
+    fn linux_with_rules(rules: Vec<LinuxDeviceCgroup>) -> Linux {
+        LinuxBuilder::default()
+            .resources(
+                LinuxResourcesBuilder::default()
+                    .devices(rules)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()
+    }
+
+    #[rstest]
+    #[case::no_rules(vec![], false)]
+    #[case::exact_match_rm(vec![rule(true, LinuxDeviceType::B, Some(MAJOR), Some(MINOR), "rm")], true)]
+    #[case::exact_match_r(vec![rule(true, LinuxDeviceType::B, Some(MAJOR), Some(MINOR), "r")], true)]
+    #[case::exact_match_rwm(vec![rule(true, LinuxDeviceType::B, Some(MAJOR), Some(MINOR), "rwm")], false)]
+    #[case::type_all_is_wildcard(vec![rule(true, LinuxDeviceType::A, Some(MAJOR), Some(MINOR), "rm")], true)]
+    #[case::deny_rule_ignored(vec![rule(false, LinuxDeviceType::B, Some(MAJOR), Some(MINOR), "rm")], false)]
+    #[case::wildcard_major_ignored(vec![rule(true, LinuxDeviceType::B, None, Some(MINOR), "rm")], false)]
+    #[case::wildcard_minor_ignored(vec![rule(true, LinuxDeviceType::B, Some(MAJOR), None, "rm")], false)]
+    #[case::type_mismatch_ignored(vec![rule(true, LinuxDeviceType::C, Some(MAJOR), Some(MINOR), "rm")], false)]
+    #[case::different_device_ignored(vec![rule(true, LinuxDeviceType::B, Some(9), Some(1), "rm")], false)]
+    #[case::first_exact_match_wins(
+        vec![
+            rule(true, LinuxDeviceType::B, Some(MAJOR), Some(MINOR), "rm"),
+            rule(true, LinuxDeviceType::B, Some(MAJOR), Some(MINOR), "rwm"),
+        ],
+        true
+    )]
+    fn test_device_cgroup_access_is_readonly(
+        #[case] rules: Vec<LinuxDeviceCgroup>,
+        #[case] expected: bool,
+    ) {
+        let linux = linux_with_rules(rules);
+        assert_eq!(
+            device_cgroup_access_is_readonly(&linux, LinuxDeviceType::B, MAJOR, MINOR),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_no_resources() {
+        let linux = LinuxBuilder::default().build().unwrap();
+        assert!(!device_cgroup_access_is_readonly(
+            &linux,
+            LinuxDeviceType::B,
+            MAJOR,
+            MINOR
+        ));
     }
 }

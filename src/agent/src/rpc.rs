@@ -196,14 +196,43 @@ impl<T> OptionToTtrpcResult<T> for Option<T> {
 fn validate_container_device_features(
     req: &protocols::agent::CreateContainerRequest,
 ) -> ttrpc::Result<()> {
-    if !req.devices.is_empty() || !req.shared_mounts.is_empty() {
+    if !req.shared_mounts.is_empty() {
         return Err(ttrpc_error(
             ttrpc::Code::INVALID_ARGUMENT,
-            "kata-fc: raw device passthrough and cross-container shared mounts are unsupported",
+            "kata-fc: cross-container shared mounts are unsupported",
         ));
+    }
+    for device in &req.devices {
+        if device.type_ != kata_types::device::DRIVER_BLK_MMIO_TYPE
+            || !device.options.is_empty()
+            || device.vm_path.is_empty()
+            || device.container_path.is_empty()
+        {
+            return Err(ttrpc_error(
+                ttrpc::Code::INVALID_ARGUMENT,
+                "kata-fc: only MMIO block devices without driver options are supported",
+            ));
+        }
     }
     if let Some(spec) = req.OCI.as_ref() {
         let spec: Spec = spec.clone().into();
+        for device in spec
+            .linux()
+            .iter()
+            .flat_map(|l| l.devices().iter().flatten())
+        {
+            if device.typ() == oci::LinuxDeviceType::B
+                && !req
+                    .devices
+                    .iter()
+                    .any(|d| std::path::Path::new(&d.container_path) == device.path())
+            {
+                return Err(ttrpc_error(
+                    ttrpc::Code::INVALID_ARGUMENT,
+                    "kata-fc: raw block node requires an MMIO device mapping",
+                ));
+            }
+        }
         kata_types::device::validate_spec_device_features(&spec)
             .map_err(|e| ttrpc_error(ttrpc::Code::INVALID_ARGUMENT, e.to_string()))?;
     }
@@ -244,6 +273,8 @@ impl AgentService {
             sl(),
             "receive createcontainer, storages: {:?}", &req.storages
         );
+
+        crate::device::add_devices(&sl(), &req.devices, &mut oci, &self.sandbox).await?;
 
         // Both rootfs and volumes (invoked with --volume for instance) will
         // be processed the same way. The idea is to always mount any provided
@@ -791,70 +822,84 @@ impl AgentService {
 
 #[async_trait]
 impl agent_ttrpc::AgentService for AgentService {
+    #[tracing::instrument(skip_all)]
     async fn create_container(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::CreateContainerRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "create_container");
         self.do_create_container(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn start_container(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::StartContainerRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "start_container");
         self.do_start_container(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn remove_container(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::RemoveContainerRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "remove_container");
         self.do_remove_container(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_process(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::ExecProcessRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "exec_process");
         self.do_exec_process(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn signal_process(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::SignalProcessRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "signal_process");
         self.do_signal_process(req).await.map_ttrpc_err(same)?;
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn wait_process(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::WaitProcessRequest,
     ) -> ttrpc::Result<WaitProcessResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "wait_process");
         self.do_wait_process(req).await.map_ttrpc_err(same)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn update_container(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::UpdateContainerRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "update_container");
 
         let mut sandbox = self.sandbox.lock().await;
@@ -869,11 +914,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn stats_container(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::StatsContainerRequest,
     ) -> ttrpc::Result<StatsContainerResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "stats_container");
 
         // Clone the container's cgroup manager (an Arc) while holding the sandbox lock, then
@@ -907,11 +954,13 @@ impl agent_ttrpc::AgentService for AgentService {
         })
     }
 
+    #[tracing::instrument(skip_all)]
     async fn pause_container(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::PauseContainerRequest,
     ) -> ttrpc::Result<protocols::empty::Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "pause_container");
 
         let mut sandbox = self.sandbox.lock().await;
@@ -922,11 +971,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn resume_container(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::ResumeContainerRequest,
     ) -> ttrpc::Result<protocols::empty::Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "resume_container");
 
         let mut sandbox = self.sandbox.lock().await;
@@ -937,35 +988,43 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn write_stdin(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::WriteStreamRequest,
     ) -> ttrpc::Result<WriteStreamResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         self.do_write_stream(req).await.map_ttrpc_err(same)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn read_stdout(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::ReadStreamRequest,
     ) -> ttrpc::Result<ReadStreamResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         self.do_read_stream(&req, true).await.map_ttrpc_err(same)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn read_stderr(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::ReadStreamRequest,
     ) -> ttrpc::Result<ReadStreamResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         self.do_read_stream(&req, false).await.map_ttrpc_err(same)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn tty_win_resize(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::TtyWinResizeRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "tty_win_resize");
 
         let mut sandbox = self.sandbox.lock().await;
@@ -991,11 +1050,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn update_interface(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::UpdateInterfaceRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "update_interface");
 
         let interface = req.interface.into_option().map_ttrpc_err(
@@ -1020,11 +1081,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn update_routes(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::UpdateRoutesRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "update_routes");
 
         let new_routes = req
@@ -1044,11 +1107,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn create_sandbox(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::CreateSandboxRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "create_sandbox");
         validate_sandbox_features(&req)?;
 
@@ -1084,11 +1149,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn destroy_sandbox(
         &self,
         _ctx: &TtrpcContext,
         _req: protocols::agent::DestroySandboxRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "destroy_sandbox");
 
         let mut sandbox = self.sandbox.lock().await;
@@ -1111,11 +1178,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn add_arp_neighbors(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::AddARPNeighborsRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "add_arp_neighbors");
 
         let neighs = req
@@ -1138,11 +1207,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_guest_details(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::GuestDetailsRequest,
     ) -> ttrpc::Result<GuestDetailsResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "get_guest_details");
 
         info!(sl(), "get guest details!");
@@ -1161,11 +1232,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(resp)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn copy_file(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::CopyFileRequest,
     ) -> ttrpc::Result<Empty> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "copy_file");
         // Potentially untrustworthy data from the host needs to go into the shared dir.
         let root_path = PathBuf::from(KATA_GUEST_SHARE_DIR);
@@ -1174,11 +1247,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_metrics(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::GetMetricsRequest,
     ) -> ttrpc::Result<Metrics> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "get_metrics");
 
         let s = get_metrics(&req).map_ttrpc_err(same)?;
@@ -1187,11 +1262,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(metrics)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_oom_event(
         &self,
         _ctx: &TtrpcContext,
         _req: protocols::agent::GetOOMEventRequest,
     ) -> ttrpc::Result<OOMEvent> {
+        crate::tracer::set_rpc_parent(_ctx);
         let event_rx = {
             let s = self.sandbox.lock().await;
             s.event_rx.clone()
@@ -1210,11 +1287,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(resp)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_volume_stats(
         &self,
         _ctx: &TtrpcContext,
         req: VolumeStatsRequest,
     ) -> ttrpc::Result<VolumeStatsResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "rpc call from shim to agent: {}", "get_volume_stats");
 
         info!(sl(), "get volume stats!");
@@ -1244,11 +1323,13 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(resp)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_diagnostic_data(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::agent::GetDiagnosticDataRequest,
     ) -> ttrpc::Result<protocols::agent::GetDiagnosticDataResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(
             sl(),
             "rpc call from shim to agent: {}", "get_diagnostic_data"
@@ -1272,22 +1353,26 @@ struct HealthService;
 
 #[async_trait]
 impl health_ttrpc::Health for HealthService {
+    #[tracing::instrument(skip_all)]
     async fn check(
         &self,
         _ctx: &TtrpcContext,
         _req: protocols::health::CheckRequest,
     ) -> ttrpc::Result<HealthCheckResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         let mut resp = HealthCheckResponse::new();
         resp.set_status(HealthCheckResponse_ServingStatus::SERVING);
 
         Ok(resp)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn version(
         &self,
         _ctx: &TtrpcContext,
         req: protocols::health::CheckRequest,
     ) -> ttrpc::Result<VersionCheckResponse> {
+        crate::tracer::set_rpc_parent(_ctx);
         info!(sl(), "version {:?}", req);
         let mut rep = protocols::health::VersionCheckResponse::new();
         rep.agent_version = AGENT_VERSION.to_string();
@@ -1773,7 +1858,7 @@ mod tests {
             "vfio-ap",
             "unknown",
         ] {
-            // No request may start waiting for a raw device, including MMIO.
+            // A malformed second mapping must fail before waiting for the first device.
             requests.push(protocols::agent::CreateContainerRequest {
                 container_id: "device-rejection-test".into(),
                 devices: vec![

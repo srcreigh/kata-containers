@@ -19,6 +19,8 @@ members = [
   # kata-agent
   "src/agent",
   "src/agent/rustjail",
+  "src/agent/vsock-exporter",
+  "src/tools/trace-forwarder",
 
   # Dragonball
   "src/dragonball/crates/dbs_utils",
@@ -171,3 +173,5 @@ url = "2.5.4"
 which = "4.3.0"
 gpt = "4.1.0"
 devicemapper = { git = "https://github.com/stratis-storage/devicemapper-rs", rev = "078e70ceecf0d08eb0c800626827c9bc0a9a8adc" }
+
+vsock-exporter = { path = "src/agent/vsock-exporter" }

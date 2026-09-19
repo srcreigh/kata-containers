@@ -8,6 +8,7 @@ use std::{env, fs, str::FromStr, time::Duration};
 
 #[derive(Debug)]
 pub struct AgentConfig {
+    pub tracing: bool,
     pub log_level: slog::Level,
     pub hotplug_timeout: Duration,
     pub log_vport: u32,
@@ -20,6 +21,7 @@ pub struct AgentConfig {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
+    tracing: Option<bool>,
     log_level: Option<String>,
     hotplug_timeout: Option<Duration>,
     log_vport: Option<u32>,
@@ -32,6 +34,7 @@ struct ConfigFile {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            tracing: false,
             log_level: slog::Level::Info,
             hotplug_timeout: Duration::from_secs(3),
             log_vport: 0,
@@ -55,6 +58,7 @@ impl FromStr for AgentConfig {
             ($($field:ident),*) => { $(if let Some(v) = file.$field { config.$field = v; })* };
         }
         copy!(
+            tracing,
             hotplug_timeout,
             log_vport,
             container_pipe_size,
@@ -93,6 +97,13 @@ impl AgentConfig {
         for param in cmdline.split_ascii_whitespace() {
             let (key, value) = param.split_once('=').unwrap_or((param, ""));
             match key {
+                "agent.trace" => {
+                    config.tracing = match value {
+                        "" | "true" | "1" => true,
+                        "false" | "0" => false,
+                        _ => bail!("invalid agent.trace value"),
+                    }
+                }
                 "agent.log" => config.log_level = log_level(value)?,
                 "agent.hotplug_timeout" => {
                     config.hotplug_timeout = Duration::from_secs(value.parse()?)
@@ -172,6 +183,15 @@ mod tests {
     }
 
     #[test]
+    fn tracing_can_be_enabled_explicitly() {
+        assert!(!AgentConfig::default().tracing);
+        assert!(parse_kernel("agent.trace=true", vec![]).unwrap().tracing);
+        assert!("tracing = true".parse::<AgentConfig>().unwrap().tracing);
+        assert!(!parse_kernel("agent.trace=false", vec![]).unwrap().tracing);
+        assert!(parse_kernel("agent.trace=invalid", vec![]).is_err());
+    }
+
+    #[test]
     fn supported_boot_config() {
         let config = parse_kernel("console=ttyS0 root=/dev/vda agent.log_vport=1025 systemd.unified_cgroup_hierarchy=1 cgroup_no_v1=all agent.log=debug agent.hotplug_timeout=9 agent.container_pipe_size=4096", vec![]).unwrap();
         assert_eq!(config.log_vport, 1025);
@@ -190,7 +210,6 @@ mod tests {
         for key in [
             "debug_console",
             "devmode",
-            "trace",
             "passfd_listener_port",
             "cdh_api_timeout",
             "image_pull_timeout",
@@ -222,7 +241,7 @@ mod tests {
             }
             assert!(format!("{key} = false").parse::<AgentConfig>().is_err());
         }
-        for key in ["tracing", "dev_mode", "policy_file", "debug_console_vport"] {
+        for key in ["dev_mode", "policy_file", "debug_console_vport"] {
             assert!(format!("{key} = false").parse::<AgentConfig>().is_err());
         }
     }

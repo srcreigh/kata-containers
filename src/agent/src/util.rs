@@ -56,10 +56,12 @@ where
     Ok(total_bytes)
 }
 
+#[tracing::instrument(skip_all)]
 pub fn get_vsock_incoming(fd: RawFd) -> Incoming {
     unsafe { VsockListener::from_raw_fd(fd).incoming() }
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn get_vsock_stream(fd: RawFd) -> Result<VsockStream> {
     let stream = get_vsock_incoming(fd)
         .next()

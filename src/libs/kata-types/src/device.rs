@@ -36,6 +36,9 @@ pub const DRIVER_VIRTIOFS_TYPE: &str = "virtio-fs";
 /// DRIVER_VIRTIOFS_TYPE is the driver for Bind watch volume.
 pub const DRIVER_WATCHABLE_BIND_TYPE: &str = "watchable-bind";
 
+/// Registry for the supported guest device handlers.
+pub type DeviceHandlerManager<H> = crate::handler::HandlerManager<H>;
+
 /// Reject device integrations excluded from the Firecracker contract. This is
 /// shared by the shim (before VM/resource creation) and the guest (before edits).
 pub fn validate_spec_device_features(spec: &oci_spec::runtime::Spec) -> anyhow::Result<()> {
@@ -70,10 +73,6 @@ pub fn validate_spec_device_features(spec: &oci_spec::runtime::Spec) -> anyhow::
 /// Reject excluded passthrough nodes before attaching any requested device.
 pub fn validate_linux_device_features(linux: &oci_spec::runtime::Linux) -> anyhow::Result<()> {
     for device in linux.devices().iter().flatten() {
-        anyhow::ensure!(
-            device.typ() != oci_spec::runtime::LinuxDeviceType::B,
-            "kata-fc: raw block device nodes are unsupported; use a filesystem volume"
-        );
         validate_device_path(device.path())?;
     }
     Ok(())
@@ -104,7 +103,7 @@ mod minimal_device_tests {
     use oci_spec::runtime::{Linux, LinuxDevice, Process, Spec};
 
     #[test]
-    fn raw_block_nodes_rejected_but_character_devices_retained() {
+    fn raw_block_and_character_devices_retained() {
         use oci_spec::runtime::LinuxDeviceType;
         let mut device = LinuxDevice::default();
         device.set_path("/dev/arbitrary-name".into());
@@ -113,7 +112,7 @@ mod minimal_device_tests {
         device.set_minor(0);
         let mut linux = Linux::default();
         linux.set_devices(Some(vec![device.clone()]));
-        assert!(validate_linux_device_features(&linux).is_err());
+        validate_linux_device_features(&linux).unwrap();
         device.set_path("/dev/null".into());
         device.set_typ(LinuxDeviceType::C);
         device.set_major(1);

@@ -20,10 +20,12 @@ pub struct LocalHandler {}
 
 #[async_trait::async_trait]
 impl StorageHandler for LocalHandler {
+    #[tracing::instrument(skip_all)]
     fn driver_types(&self) -> &[&str] {
         &[DRIVER_LOCAL_TYPE]
     }
 
+    #[tracing::instrument(skip_all)]
     async fn create_device(
         &self,
         storage: Storage,

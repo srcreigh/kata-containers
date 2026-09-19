@@ -20,6 +20,7 @@ pub const NSTYPEIPC: &str = "ipc";
 pub const NSTYPEUTS: &str = "uts";
 pub const NSTYPEPID: &str = "pid";
 
+#[tracing::instrument(skip_all)]
 pub fn get_current_thread_ns_path(ns_type: &str) -> String {
     format!("/proc/{}/task/{}/ns/{}", getpid(), gettid(), ns_type)
 }
@@ -35,6 +36,7 @@ pub struct Namespace {
 }
 
 impl Namespace {
+    #[tracing::instrument(skip_all)]
     pub fn new(logger: &Logger) -> Self {
         Namespace {
             logger: logger.clone(),
@@ -45,11 +47,13 @@ impl Namespace {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn get_ipc(mut self) -> Self {
         self.ns_type = NamespaceType::Ipc;
         self
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn get_uts(mut self, hostname: &str) -> Self {
         self.ns_type = NamespaceType::Uts;
         if !hostname.is_empty() {
@@ -58,6 +62,7 @@ impl Namespace {
         self
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn get_pid(mut self) -> Self {
         self.ns_type = NamespaceType::Pid;
         self

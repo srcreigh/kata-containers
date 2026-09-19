@@ -107,8 +107,8 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
     );
     ensure!(!c.runtime.use_passfd_io, "{fail}: passfd IO");
     ensure!(
-        !c.runtime.enable_tracing && !c.runtime.enable_pprof,
-        "{fail}: tracing/profiling servers"
+        !c.runtime.enable_pprof,
+        "{fail}: profiling is not implemented in the Rust shim"
     );
     let a = c
         .agent
@@ -116,10 +116,7 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("{fail}: missing kata agent"))?;
     ensure!(a.policy.is_empty(), "{fail}: agent policy");
     ensure!(!a.debug_console_enabled, "{fail}: guest debug console");
-    ensure!(
-        !a.enable_tracing && !a.visible_cdi_devices,
-        "{fail}: agent tracing/CDI"
-    );
+    ensure!(!a.visible_cdi_devices, "{fail}: agent CDI");
     ensure!(
         a.kernel_modules.is_empty(),
         "{fail}: runtime kernel-module loading"
@@ -148,6 +145,43 @@ mod tests {
     fn supported_contract() {
         validate(&supported()).unwrap();
     }
+    #[test]
+    fn tracing_annotations_enable_both_sides() {
+        kata_types::config::FirecrackerConfig::new().register();
+        let mut config = supported();
+        config.runtime.agent_name = "kata".into();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap().to_owned();
+        let hv = config.hypervisor.get_mut("firecracker").unwrap();
+        hv.path = path.clone();
+        hv.jailer_path = path.clone();
+        hv.boot_info.kernel = path.clone();
+        hv.boot_info.image = path;
+        config.agent.insert("kata".into(), Default::default());
+        let annotations = [
+            (
+                "io.katacontainers.config.runtime.enable_tracing".into(),
+                "true".into(),
+            ),
+            (
+                "io.katacontainers.config.agent.enable_tracing".into(),
+                "true".into(),
+            ),
+        ]
+        .into();
+        validate_annotations(&annotations).unwrap();
+        kata_types::annotations::Annotation::new(annotations)
+            .update_config_by_annotation(&mut config)
+            .unwrap();
+        validate(&config).unwrap();
+        assert!(config.runtime.enable_tracing);
+        assert!(config.agent["kata"].enable_tracing);
+        assert_eq!(
+            config.get_agent_kernel_params().unwrap()["agent.trace"],
+            "true"
+        );
+    }
+
     #[test]
     fn excluded_features_fail_closed() {
         let mutations: Vec<fn(&mut TomlConfig)> = vec![
@@ -337,6 +371,8 @@ pub fn validate_annotations(annotations: &std::collections::HashMap<String, Stri
             matches!(
                 key.as_str(),
                 "io.katacontainers.config.hypervisor.default_vcpus"
+                    | "io.katacontainers.config.runtime.enable_tracing"
+                    | "io.katacontainers.config.agent.enable_tracing"
                     | "io.katacontainers.config.hypervisor.default_memory"
             ),
             "kata-fc-minimal: unsupported configuration annotation {key}"

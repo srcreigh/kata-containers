@@ -37,6 +37,7 @@ use std::process::exit;
 use std::sync::Arc;
 
 mod config;
+mod device;
 mod features;
 mod linux_abi;
 mod metrics;
@@ -47,6 +48,7 @@ mod network;
 mod sandbox;
 mod signal;
 mod storage;
+mod tracer;
 mod uevent;
 mod util;
 mod version;
@@ -209,8 +211,16 @@ async fn real_main(init_mode: bool) -> std::result::Result<(), Box<dyn std::erro
         ttrpc_log_guard = Ok(slog_stdlog::init()?);
     }
 
+    if config.tracing {
+        tracer::setup_tracing(NAME, &logger)?;
+    }
+
     // Start the sandbox and wait for its ttRPC server to end
     start_sandbox(&logger, config, init_mode, &mut tasks, shutdown_rx.clone()).await?;
+
+    if config.tracing {
+        tracer::end_tracing();
+    }
 
     // Install a NOP logger for the remainder of the shutdown sequence
     // to ensure any log calls made by local crates using the scope logger

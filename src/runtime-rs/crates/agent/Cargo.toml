@@ -23,6 +23,9 @@ kata-types = { workspace = true }
 logging = { workspace = true }
 protocols = { workspace = true, features = ["async"] }
 
+opentelemetry = "0.18.0"
+tracing-opentelemetry = "0.18.0"
+
 [features]
 default = []
 

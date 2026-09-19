@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use dbs_utils::net::MacAddr;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, Method, Request, Response};
 use hyperlocal::Uri;
 use kata_sys_util::mount;
@@ -251,6 +251,7 @@ impl FcInner {
         debug!(sl(), "METHOD: {:?}", method.clone());
         debug!(sl(), "URI: {:?}", uri.clone());
         debug!(sl(), "DATA: {:?}", data.clone());
+        let mut last_error = None;
         for _count in 0..REQUEST_RETRY {
             let req = Request::builder()
                 .method(method.clone())
@@ -266,15 +267,15 @@ impl FcInner {
                 }
                 Err(resp) => {
                     debug!(sl(), "Request sent with error, resp: {:?}", resp);
+                    last_error = Some(resp);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 }
             }
         }
-        Err(anyhow::anyhow!(
-            "After {} attempts, it still doesn't work.",
-            REQUEST_RETRY
-        ))
+        Err(last_error.unwrap_or_else(|| anyhow!("Firecracker request was not attempted"))).context(
+            format!("Firecracker request failed after {REQUEST_RETRY} attempts"),
+        )
     }
 
     pub(crate) async fn send_request(
@@ -288,7 +289,9 @@ impl FcInner {
         if status.is_success() {
             Ok(resp)
         } else {
-            Err(anyhow!("Firecracker API returned HTTP {status}"))
+            let body = resp.into_body().collect().await?.to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            Err(anyhow!("Firecracker API returned HTTP {status}: {body}"))
         }
     }
 
@@ -329,5 +332,45 @@ impl FcInner {
         };
         nix::mount::umount2(path.as_str(), nix::mount::MntFlags::MNT_DETACH)
             .with_context(|| format!("umount path {}", &path))
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn api_error_body_survives_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fc.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let task = tokio::spawn(async move {
+            for _ in 0..REQUEST_RETRY {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                }
+                let body = "{\"fault_message\":\"invalid drive path\"}";
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let fc = FcInner::new(tx);
+        let uri = Uri::new(&path, "/drives/test").into();
+        let error = fc
+            .send_request_with_retry(Method::GET, uri, String::new())
+            .await
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("400"), "{}", text);
+        assert!(text.contains("invalid drive path"), "{}", text);
+        task.await.unwrap();
     }
 }

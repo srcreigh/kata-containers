@@ -28,7 +28,7 @@ use crate::sandbox::Sandbox;
 mod block_handler;
 mod ephemeral_handler;
 mod local_handler;
-mod mmio;
+pub(crate) mod mmio;
 
 const RW_MASK: u32 = 0o660;
 const RO_MASK: u32 = 0o440;
@@ -195,6 +195,7 @@ pub fn validate_storages(storages: &[Storage]) -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn add_storages(
     logger: Logger,
     storages: Vec<Storage>,
@@ -266,6 +267,7 @@ pub(crate) fn new_device(path: String) -> Result<Arc<dyn StorageDevice>> {
     Ok(Arc::new(device))
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) fn common_storage_handler(logger: &Logger, storage: &Storage) -> Result<String> {
     mount_storage(logger, storage)?;
     set_ownership(logger, storage)?;
@@ -274,6 +276,7 @@ pub(crate) fn common_storage_handler(logger: &Logger, storage: &Storage) -> Resu
 
 // mount_storage performs the mount described by the storage structure.
 
+#[tracing::instrument(skip_all)]
 fn mount_storage(logger: &Logger, storage: &Storage) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "mount"));
 
@@ -312,6 +315,7 @@ fn mount_storage(logger: &Logger, storage: &Storage) -> Result<()> {
     )
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) fn parse_options(option_list: &[String]) -> HashMap<String, String> {
     let mut options = HashMap::new();
     for opt in option_list {
@@ -323,6 +327,7 @@ pub(crate) fn parse_options(option_list: &[String]) -> HashMap<String, String> {
     options
 }
 
+#[tracing::instrument(skip_all)]
 pub fn set_ownership(logger: &Logger, storage: &Storage) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "mount", "fn" => "set_ownership"));
 
@@ -373,6 +378,7 @@ pub fn set_ownership(logger: &Logger, storage: &Storage) -> Result<()> {
     )
 }
 
+#[tracing::instrument(skip_all)]
 pub fn recursive_ownership_change(
     path: &Path,
     uid: Option<Uid>,

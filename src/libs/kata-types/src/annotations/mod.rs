@@ -1096,6 +1096,12 @@ impl Annotation {
                             return Err(bool_err);
                         }
                     },
+                    "io.katacontainers.config.runtime.enable_tracing" => {
+                        match self.get_value::<bool>(key) {
+                            Ok(r) => config.runtime.enable_tracing = r.unwrap_or_default(),
+                            Err(_) => return Err(bool_err),
+                        }
+                    }
                     KATA_ANNO_CFG_ENABLE_PPROF => match self.get_value::<bool>(key) {
                         Ok(r) => {
                             config.runtime.enable_pprof = r.unwrap_or_default();

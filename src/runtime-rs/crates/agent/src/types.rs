@@ -98,6 +98,7 @@ pub struct Routes {
 
 #[derive(PartialEq, Clone, Default)]
 pub struct CreateContainerRequest {
+    pub devices: Vec<Device>,
     pub process_id: ContainerProcessID,
     pub string_user: Option<StringUser>,
     pub storages: Vec<Storage>,
@@ -288,4 +289,13 @@ pub struct VolumeStatsRequest {
 pub struct GetDiagnosticDataRequest {
     pub log_type: String,
     pub container_id: String,
+}
+
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct Device {
+    pub id: String,
+    pub field_type: String,
+    pub vm_path: String,
+    pub container_path: String,
+    pub options: Vec<String>,
 }

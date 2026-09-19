@@ -6,6 +6,7 @@
 
 use std::convert::Into;
 
+use crate::types::Device;
 use crate::{
     ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, CheckRequest, ContainerID, CopyFileRequest,
     CreateContainerRequest, CreateSandboxRequest, Empty, ExecProcessRequest, FSGroup,
@@ -136,6 +137,7 @@ impl From<CreateContainerRequest> for agent::CreateContainerRequest {
         Self {
             container_id: from.process_id.container_id(),
             exec_id: from.process_id.exec_id(),
+            devices: trans_vec(from.devices),
             string_user: from_option(from.string_user),
             storages: trans_vec(from.storages),
             OCI: from_option(from.oci),
@@ -391,6 +393,19 @@ impl From<VolumeStatsRequest> for agent::VolumeStatsRequest {
     fn from(from: VolumeStatsRequest) -> Self {
         Self {
             volume_guest_path: from.volume_guest_path,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<Device> for agent::Device {
+    fn from(from: Device) -> Self {
+        Self {
+            id: from.id,
+            type_: from.field_type,
+            vm_path: from.vm_path,
+            container_path: from.container_path,
+            options: trans_vec(from.options),
             ..Default::default()
         }
     }

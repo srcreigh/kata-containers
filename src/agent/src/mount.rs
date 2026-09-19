@@ -61,6 +61,7 @@ lazy_static! {
     ];
 }
 
+#[tracing::instrument(skip_all)]
 pub fn baremount(
     source: &Path,
     destination: &Path,
@@ -120,12 +121,14 @@ pub fn baremount(
 
 /// Looks for `mount_point` entry in the /proc/mounts.
 
+#[tracing::instrument(skip_all)]
 pub fn is_mounted(mount_point: &str) -> Result<bool> {
     let mount_point = mount_point.trim_end_matches('/');
     let found = fs::metadata(mount_point).is_ok() && get_linux_mount_info(mount_point).is_ok();
     Ok(found)
 }
 
+#[tracing::instrument(skip_all)]
 fn mount_to_rootfs(logger: &Logger, m: &InitMount) -> Result<()> {
     fs::create_dir_all(m.dest).context("could not create directory")?;
 
@@ -146,6 +149,7 @@ fn mount_to_rootfs(logger: &Logger, m: &InitMount) -> Result<()> {
     })
 }
 
+#[tracing::instrument(skip_all)]
 pub fn general_mount(logger: &Logger) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "mount"));
 
@@ -164,6 +168,7 @@ pub fn get_mount_fs_type(mount_point: &str) -> Result<String> {
 // get_mount_fs_type_from_file returns the FS type corresponding to the passed mount point and
 // any error encountered.
 
+#[tracing::instrument(skip_all)]
 pub fn get_mount_fs_type_from_file(mount_file: &str, mount_point: &str) -> Result<String> {
     if mount_point.is_empty() {
         return Err(anyhow!("Invalid mount point {}", mount_point));
@@ -190,6 +195,7 @@ pub fn get_mount_fs_type_from_file(mount_file: &str, mount_point: &str) -> Resul
     ))
 }
 
+#[tracing::instrument(skip_all)]
 pub fn get_cgroup_mounts(
     logger: &Logger,
     cg_path: &str,
@@ -281,6 +287,7 @@ pub fn get_cgroup_mounts(
     Ok(cg_mounts)
 }
 
+#[tracing::instrument(skip_all)]
 pub fn cgroups_mount(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "mount"));
 
@@ -301,6 +308,7 @@ pub fn cgroups_mount(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result<
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 pub fn remove_mounts<P: AsRef<str> + std::fmt::Debug>(mounts: &[P]) -> Result<()> {
     for m in mounts.iter() {
         nix::mount::umount(m.as_ref()).context(format!("failed to umount {:?}", m.as_ref()))?;

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "kata-trace-forwarder"
+version = "0.0.1"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+futures.workspace = true
+serde_json.workspace = true
+opentelemetry = { workspace = true, features = ["serialize"] }
+opentelemetry-jaeger = "0.16.0"
+nix = { workspace = true, features = ["user"] }

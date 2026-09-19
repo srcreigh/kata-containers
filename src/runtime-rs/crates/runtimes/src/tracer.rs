@@ -97,6 +97,9 @@ impl KataTracer {
         let subscriber = Arc::new(sub);
         tracing::subscriber::set_global_default(subscriber.clone())?;
         self.subscriber = subscriber;
+        global::set_text_map_propagator(
+            opentelemetry::sdk::propagation::TraceContextPropagator::new(),
+        );
 
         // enter the rootspan
         self.trace_enter_root();

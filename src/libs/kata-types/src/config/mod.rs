@@ -207,10 +207,13 @@ impl TomlConfig {
     pub fn get_agent_kernel_params(&self) -> Result<BTreeMap<String, String>> {
         let mut kv = BTreeMap::new();
         if let Some(cfg) = self.agent.get(&self.runtime.agent_name) {
-            if cfg.enable_tracing || cfg.debug_console_enabled || cfg.visible_cdi_devices {
+            if cfg.debug_console_enabled || cfg.visible_cdi_devices {
                 return Err(io::Error::other(
-                    "kata-fc: guest tracing/debug console/CDI is unsupported",
+                    "kata-fc: guest debug console/CDI is unsupported",
                 ));
+            }
+            if cfg.enable_tracing {
+                kv.insert(TRACE_MODE_OPTION.into(), TRACE_MODE_ENABLE.into());
             }
             if cfg.debug {
                 kv.insert(LOG_LEVEL_OPTION.to_string(), LOG_LEVEL_DEBUG.to_string());
@@ -407,7 +410,14 @@ mod tests {
         assert_eq!(kv.get("agent.log").unwrap(), "debug");
         assert_eq!(kv.get("agent.container_pipe_size").unwrap(), "20");
         config.agent.get_mut("kata").unwrap().enable_tracing = true;
-        assert!(config.get_agent_kernel_params().is_err());
+        assert_eq!(
+            config
+                .get_agent_kernel_params()
+                .unwrap()
+                .get("agent.trace")
+                .unwrap(),
+            "true"
+        );
         for config in [
             "cdh_api_timeout_ms = 0",
             "launch_process_timeout = 0",
