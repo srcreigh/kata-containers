@@ -17,9 +17,7 @@ use ttrpc::r#async::TtrpcContext;
 pub fn setup_tracing(name: &'static str, logger: &Logger) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "vsock-tracer"));
 
-    let exporter = vsock_exporter::Exporter::builder()
-        .with_logger(&logger)
-        .init();
+    let exporter = vsock_exporter::Exporter::new(&logger);
 
     let config = Config::default();
 

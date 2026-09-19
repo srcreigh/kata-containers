@@ -48,19 +48,6 @@ impl ShimExecutor {
             .context(Error::FileWrite(format!("{:?}", &file_path)))
     }
 
-    // There may be a multi-container for a Pod, each container has a bundle path, we need to write
-    // the PID to the file for each container in their own bundle path, so we can directly get the
-    // `bundle_path()` and write the PID.
-    // While the real runtime process's PID is stored in the file in the sandbox container's bundle
-    // path, so needs to read from the sandbox container's bundle path.
-    pub(crate) fn read_pid_file(&self, path: &Path) -> Result<u32> {
-        let file_path = path.join(SHIM_PID_FILE);
-        let data = std::fs::read_to_string(&file_path)
-            .context(Error::FileOpen(format!("{file_path:?}")))?;
-
-        data.parse::<u32>().context(Error::ParsePid)
-    }
-
     pub(crate) fn socket_address(&self, id: &str) -> Result<PathBuf> {
         if id.is_empty() {
             return Err(anyhow!(Error::EmptySandboxId));
@@ -117,7 +104,7 @@ mod tests {
         assert_eq!(&buf, "12345");
 
         executor.write_pid_file(&dir, 1267).unwrap();
-        let read_pid = executor.read_pid_file(&dir).unwrap();
-        assert_eq!(read_pid, 1267);
+        let written_pid = std::fs::read_to_string(dir.join(SHIM_PID_FILE)).unwrap();
+        assert_eq!(written_pid, "1267");
     }
 }

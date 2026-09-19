@@ -4,12 +4,9 @@
 //
 
 use std::io::Result;
-use std::path::Path;
 
 use super::default;
 use crate::config::{ConfigOps, TomlConfig};
-use crate::mount::split_bind_mounts;
-use crate::validate_path;
 
 #[path = "shared_mount.rs"]
 pub mod shared_mount;
@@ -20,9 +17,6 @@ pub const RUNTIME_NAME_VIRTCONTAINER: &str = "virt_container";
 
 /// EmptyDir mode: share the emptyDir folder with the guest using shared-fs.
 pub const EMPTYDIR_MODE_SHARED_FS: &str = "shared-fs";
-
-/// EmptyDir mode: plug a block device to be encrypted in the guest.
-pub const EMPTYDIR_MODE_BLOCK_ENCRYPTED: &str = "block-encrypted";
 
 /// EmptyDir mode: plug a block device to be mounted directly in the guest.
 pub const EMPTYDIR_MODE_BLOCK_PLAIN: &str = "block-plain";
@@ -240,20 +234,7 @@ impl ConfigOps for Runtime {
             conf.runtime.emptydir_mode = EMPTYDIR_MODE_SHARED_FS.to_owned();
         }
 
-        for bind in conf.runtime.sandbox_bind_mounts.iter_mut() {
-            // Split the bind mount, canonicalize the path and then append rw mode to it.
-            let (real_path, mode) = split_bind_mounts(bind);
-            match Path::new(real_path).canonicalize() {
-                Err(e) => {
-                    return Err(std::io::Error::other(format!(
-                        "sandbox bind mount `{bind}` is invalid: {e}",
-                    )))
-                }
-                Ok(path) => {
-                    *bind = format!("{}{}", path.display(), mode);
-                }
-            }
-        }
+        reject_shared_mounts(&conf.runtime)?;
 
         Ok(())
     }
@@ -281,37 +262,25 @@ impl ConfigOps for Runtime {
         }
 
         let emptydir_mode = &conf.runtime.emptydir_mode;
-        if emptydir_mode != EMPTYDIR_MODE_SHARED_FS
-            && emptydir_mode != EMPTYDIR_MODE_BLOCK_ENCRYPTED
-            && emptydir_mode != EMPTYDIR_MODE_BLOCK_PLAIN
-        {
+        if emptydir_mode != EMPTYDIR_MODE_SHARED_FS && emptydir_mode != EMPTYDIR_MODE_BLOCK_PLAIN {
             return Err(std::io::Error::other(format!(
                 "Invalid emptydir_mode `{emptydir_mode}` in configuration file",
             )));
         }
 
-        for shared_mount in &conf.runtime.shared_mounts {
-            shared_mount.validate()?;
-        }
-
-        for bind in conf.runtime.sandbox_bind_mounts.iter() {
-            // Just validate the real_path.
-            let (real_path, _mode) = split_bind_mounts(bind);
-            validate_path!(
-                real_path.to_owned(),
-                "sandbox bind mount `{}` is invalid: {}"
-            )?;
-        }
+        reject_shared_mounts(&conf.runtime)?;
 
         Ok(())
     }
 }
 
-impl Runtime {
-    /// Check whether experiment `feature` is enabled or not.
-    pub fn is_experiment_enabled(&self, feature: &str) -> bool {
-        self.experimental.contains(&feature.to_string())
+fn reject_shared_mounts(runtime: &Runtime) -> Result<()> {
+    if !runtime.sandbox_bind_mounts.is_empty() || !runtime.shared_mounts.is_empty() {
+        return Err(std::io::Error::other(
+            "kata-fc: sandbox bind mounts and shared mounts are unsupported",
+        ));
     }
+    Ok(())
 }
 
 fn default_runtime_log_level() -> String {
@@ -338,6 +307,19 @@ pub use vendor::RuntimeVendor;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_shared_mounts_fail_before_path_resolution() {
+        for content in [
+            "[runtime]\nsandbox_bind_mounts = [\"/does/not/exist:ro\"]",
+            "[runtime]\nshared_mounts = [{ name = \"shared\" }]",
+        ] {
+            assert!(TomlConfig::load(content)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported"));
+        }
+    }
 
     #[test]
     fn test_invalid_config() {
@@ -413,8 +395,7 @@ emptydir_mode = "shared-fs"
 emptydir_mode = "block-encrypted"
 "#;
         let config: TomlConfig = TomlConfig::load(content).unwrap();
-        config.validate().unwrap();
-        assert_eq!(&config.runtime.emptydir_mode, "block-encrypted");
+        config.validate().unwrap_err();
 
         let content = r#"
 [runtime]
@@ -469,8 +450,5 @@ field_should_be_ignored = true
         assert!(config.runtime.sandbox_cgroup_only);
         assert!(config.runtime.enable_vcpus_pinning);
         assert!(config.runtime.enable_tracing);
-        assert!(config.runtime.is_experiment_enabled("a"));
-        assert!(config.runtime.is_experiment_enabled("b"));
-        assert!(!config.runtime.is_experiment_enabled("c"));
     }
 }

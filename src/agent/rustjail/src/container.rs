@@ -5,7 +5,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use libc::pid_t;
-use oci::{Linux, LinuxDevice, LinuxIdMapping, LinuxNamespace, LinuxResources, Spec};
+use oci::{Linux, LinuxDevice, LinuxIdMapping, LinuxResources, Spec};
 use oci_spec::runtime as oci;
 use runtime_spec::ContainerState;
 use std::clone::Clone;
@@ -65,7 +65,6 @@ use kata_sys_util::validate::valid_env;
 pub const EXEC_FIFO_FILENAME: &str = "exec.fifo";
 
 const INIT: &str = "INIT";
-const NO_PIVOT: &str = "NO_PIVOT";
 const CRFD_FD: &str = "CRFD_FD";
 const CWFD_FD: &str = "CWFD_FD";
 const CLOG_FD: &str = "CLOG_FD";
@@ -287,7 +286,6 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
 
     let init = std::env::var(INIT)?.eq(format!("{}", true).as_str());
 
-    let no_pivot = std::env::var(NO_PIVOT)?.eq(format!("{}", true).as_str());
     let crfd = std::env::var(CRFD_FD)?.parse::<i32>().unwrap();
     let cfd_log = std::env::var(CLOG_FD)?.parse::<i32>().unwrap();
 
@@ -345,7 +343,7 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     let linux = spec.linux().as_ref().ok_or_else(|| anyhow!(MissingLinux))?;
 
     // get namespace vector to join/new
-    let nses = get_namespaces(linux);
+    let nses = linux.namespaces().clone().unwrap_or_default();
 
     let mut userns = false;
     let mut to_new = CloneFlags::empty();
@@ -411,17 +409,10 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     // could cause processes in namespaces we're joining to access host
     // resources (or potentially execute code).
     //
-    // However, if the number of namespaces we are joining is 0, we are not
-    // going to be switching to a different security context. Thus setting
-    // ourselves to be non-dumpable only breaks things (like rootless
-    // containers), which is the recommendation from the kernel folks.
-    //
-    // Ref: https://github.com/opencontainers/runc/commit/50a19c6ff828c58e5dab13830bd3dacde268afe5
-    //
-    if !nses.is_empty() {
-        capctl::prctl::set_dumpable(false)
-            .map_err(|e| anyhow!(e).context("set process non-dumpable failed"))?;
-    }
+    // Every supported child creates or joins a PID namespace (checked by
+    // get_pid_namespace before spawn), and also creates a cgroup namespace.
+    capctl::prctl::set_dumpable(false)
+        .map_err(|e| anyhow!(e).context("set process non-dumpable failed"))?;
 
     if userns {
         log_child!(cfd_log, "enter new user namespace");
@@ -505,20 +496,12 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     }
 
     if to_new.contains(CloneFlags::CLONE_NEWNS) {
-        // unistd::chroot(rootfs)?;
-        if no_pivot {
-            mount::ms_move_root(rootfs)?;
-        } else {
-            // pivot root
-            mount::pivot_rootfs(rootfs)?;
-        }
+        // The Firecracker guest boots from a block image, so pivot_root is always available.
+        mount::pivot_rootfs(rootfs)?;
 
         // setup sysctl
         set_sysctls(&linux.sysctl().clone().unwrap_or_default())?;
         unistd::chdir("/")?;
-    }
-
-    if to_new.contains(CloneFlags::CLONE_NEWNS) {
         mount::finish_rootfs(cfd_log, &spec, &oci_process)?;
     }
 
@@ -879,7 +862,6 @@ impl BaseContainer for LinuxContainer {
             .stdout(child_stdout)
             .stderr(child_stderr)
             .env(INIT, format!("{}", p.init))
-            .env(NO_PIVOT, format!("{}", self.config.no_pivot_root))
             .env(CRFD_FD, format!("{}", crfd.as_fd().as_raw_fd()))
             .env(CWFD_FD, format!("{}", cwfd.as_fd().as_raw_fd()))
             .env(CLOG_FD, format!("{}", cfd_log.as_fd().as_raw_fd()));
@@ -1192,22 +1174,6 @@ fn is_userns_enabled(linux: &Linux) -> bool {
         .unwrap_or_default()
         .iter()
         .any(|ns| &ns.typ().to_string() == "user" && ns.path().is_none())
-}
-
-fn get_namespaces(linux: &Linux) -> Vec<LinuxNamespace> {
-    linux
-        .namespaces()
-        .clone()
-        .unwrap_or_default()
-        .iter()
-        .map(|ns| {
-            let mut namespace = LinuxNamespace::default();
-            namespace.set_typ(ns.typ());
-            namespace.set_path(ns.path().clone());
-
-            namespace
-        })
-        .collect()
 }
 
 pub fn setup_child_logger(
@@ -1668,10 +1634,7 @@ mod tests {
             .unwrap();
         spec.set_process(None);
 
-        CreateOpts {
-            no_pivot_root: false,
-            spec: Some(spec),
-        }
+        CreateOpts { spec: Some(spec) }
     }
 
     fn new_linux_container() -> (Result<LinuxContainer>, tempfile::TempDir) {

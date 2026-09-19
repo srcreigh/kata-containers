@@ -229,7 +229,6 @@ pub struct SandboxStatus {
     pub sandbox_id: String,
     pub pid: u32,
     pub state: String,
-    pub info: std::collections::HashMap<String, String>,
     pub created_at: Option<std::time::SystemTime>,
 }
 
@@ -282,7 +281,6 @@ pub enum ProcessStatus {
     Running = 2,
     Stopped = 3,
     Paused = 4,
-    Pausing = 5,
 }
 
 #[derive(Debug, Clone)]
@@ -318,14 +316,9 @@ impl ProcessExitStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct StatsInfoValue {
+pub struct StatsInfo {
     pub type_url: String,
     pub value: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StatsInfo {
-    pub value: Option<StatsInfoValue>,
 }
 
 #[derive(Debug, Clone)]

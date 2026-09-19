@@ -17,23 +17,16 @@ pub mod hypervisor_persist;
 pub use device::driver::*;
 use device::DeviceType;
 
-// Firecracker upstream only releases binaries for x86_64 and aarch64
-// (see https://github.com/firecracker-microvm/firecracker/releases), so there
-// is no point compiling the in-tree driver on other architectures. Use the
-// same architecture gate as `ch` (further down in this file) for consistency.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod firecracker;
 mod kernel_param;
 
 pub mod selinux;
 pub use kernel_param::Param;
-pub mod utils;
 use std::collections::HashMap;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use hypervisor_persist::HypervisorState;
-use kata_types::capabilities::Capabilities;
 use kata_types::config::hypervisor::Hypervisor as HypervisorConfig;
 
 // Config which driver to use as vm root dev
@@ -47,39 +40,13 @@ const VM_ROOTFS_ROOT_BLK: &str = "/dev/vda1";
 // mkdir -p /dev/hugepages
 // mount -t hugetlbfs none /dev/hugepages
 pub const HUGETLBFS: &str = "hugetlbfs";
-// Constants required for Dragonball VMM when enabled.
-// Gated on both feature and arch so they activate together with `pub mod
-// dragonball;` above (the dragonball crate only builds on x86_64/aarch64).
-
-pub const HYPERVISOR_DRAGONBALL: &str = "dragonball";
-pub const HYPERVISOR_QEMU: &str = "qemu";
 pub const HYPERVISOR_FIRECRACKER: &str = "firecracker";
-pub const HYPERVISOR_REMOTE: &str = "remote";
 
-pub const DEFAULT_HYBRID_VSOCK_NAME: &str = "kata.hvsock";
-pub const JAILER_ROOT: &str = "root";
-
-/// default hotplug timeout
-#[allow(dead_code)]
-const DEFAULT_HOTPLUG_TIMEOUT: u64 = 250;
-
-// Used only by the dragonball, cloud-hypervisor and firecracker drivers, all
-// of which are gated to `target_arch = "x86_64"|"aarch64"`. Without the gate
-// here, `cargo clippy --all-features -- -D warnings` (i.e. what `make check`
-// runs via utils.mk's `standard_rust_check`) fails on s390x/ppc64le/riscv64gc
-// with `enum VmmState is never used`.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[derive(PartialEq, Debug, Clone)]
 pub(crate) enum VmmState {
     NotReady,
     VmmServerReady,
     VmRunning,
-}
-
-// vcpu mapping from vcpu number to thread number
-#[derive(Debug, Default)]
-pub struct VcpuThreadIds {
-    pub vcpus: HashMap<u32, u32>,
 }
 
 #[async_trait]
@@ -97,17 +64,12 @@ pub trait Hypervisor: std::fmt::Debug + Send + Sync {
     async fn wait_vm(&self) -> Result<i32>;
 
     // device manager
-    async fn add_device(&self, device: DeviceType) -> Result<DeviceType>;
-    async fn remove_device(&self, device: DeviceType) -> Result<()>;
+    async fn add_device(&self, device: DeviceType) -> Result<()>;
 
     // utils
     async fn get_agent_socket(&self) -> Result<String>;
     async fn hypervisor_config(&self) -> HypervisorConfig;
-    async fn get_thread_ids(&self) -> Result<VcpuThreadIds>;
-    async fn get_pids(&self) -> Result<Vec<u32>>;
     async fn get_vmm_master_tid(&self) -> Result<u32>;
     async fn cleanup(&self) -> Result<()>;
-    async fn get_jailer_root(&self) -> Result<String>;
     async fn save_state(&self) -> Result<HypervisorState>;
-    async fn capabilities(&self) -> Result<Capabilities>;
 }

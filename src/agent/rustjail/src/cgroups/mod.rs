@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use core::fmt::Debug;
 use oci_spec::runtime::{LinuxDeviceCgroup, LinuxDeviceType, LinuxResources};
 use protocols::agent::CgroupStats;
@@ -26,34 +26,13 @@ pub struct DevicesCgroupInfo {
 }
 
 pub trait Manager {
-    fn apply(&self, _pid: i32) -> Result<()> {
-        Err(anyhow!("not supported!".to_string()))
-    }
-
-    fn get_pids(&self) -> Result<Vec<i32>> {
-        Err(anyhow!("not supported!"))
-    }
-
-    fn get_stats(&self) -> Result<CgroupStats> {
-        Err(anyhow!("not supported!"))
-    }
-
-    fn freeze(&self, _state: FreezerState) -> Result<()> {
-        Err(anyhow!("not supported!"))
-    }
-
-    fn destroy(&self) -> Result<()> {
-        Err(anyhow!("not supported!"))
-    }
-
-    fn set(&self, _container: &LinuxResources) -> Result<()> {
-        Err(anyhow!("not supported!"))
-    }
-
-    fn get_cgroup_path(&self) -> Result<String> {
-        Err(anyhow!("not supported!"))
-    }
-
+    fn apply(&self, pid: i32) -> Result<()>;
+    fn get_pids(&self) -> Result<Vec<i32>>;
+    fn get_stats(&self) -> Result<CgroupStats>;
+    fn freeze(&self, state: FreezerState) -> Result<()>;
+    fn destroy(&self) -> Result<()>;
+    fn set(&self, resources: &LinuxResources) -> Result<()>;
+    fn get_cgroup_path(&self) -> Result<String>;
     fn name(&self) -> &str;
 }
 

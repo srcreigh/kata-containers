@@ -10,10 +10,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::device::driver::virtio_blk_modern::BlockDeviceModern;
-use crate::{
-    BlockConfigModern, HybridVsockConfig, HybridVsockDevice, Hypervisor as hypervisor,
-    NetworkConfig, NetworkDevice,
-};
+use crate::{BlockConfigModern, Hypervisor as hypervisor, NetworkConfig, NetworkDevice};
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -25,13 +22,11 @@ pub mod util;
 pub enum DeviceConfig {
     BlockCfgModern(BlockConfigModern),
     NetworkCfg(NetworkConfig),
-    HybridVsockCfg(HybridVsockConfig),
 }
 
 #[derive(Debug, Clone)]
 pub enum DeviceType {
     Network(NetworkDevice),
-    HybridVsock(HybridVsockDevice),
     BlockModern(Arc<Mutex<BlockDeviceModern>>),
 }
 
@@ -46,17 +41,7 @@ pub trait Device: std::fmt::Debug + Send + Sync {
     // attach is to plug device into VM
     async fn attach(&mut self, h: &dyn hypervisor) -> Result<()>;
     // detach is to unplug device from VM
-    async fn detach(&mut self, h: &dyn hypervisor) -> Result<Option<u64>>;
+    async fn detach(&mut self) -> Result<Option<u64>>;
     // get_device_info returns device config
     async fn get_device_info(&self) -> DeviceType;
-    // increase_attach_count is used to increase the attach count for a device
-    // return values:
-    // * true: no need to do real attach when current attach count is zero, skip following actions.
-    // * err error: error while do increase attach count
-    async fn increase_attach_count(&mut self) -> Result<bool>;
-    // decrease_attach_count is used to decrease the attach count for a device
-    // return values:
-    // * false: no need to do real dettach when current attach count is not zero, skip following actions.
-    // * err error: error while do decrease attach count
-    async fn decrease_attach_count(&mut self) -> Result<bool>;
 }

@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 #[derive(Debug)]
 pub(crate) struct EphemeralVolume {
     mount: oci::Mount,
-    storage: Option<agent::Storage>,
+    storage: agent::Storage,
 }
 
 impl EphemeralVolume {
@@ -78,7 +78,7 @@ impl EphemeralVolume {
 
         Ok(Self {
             mount,
-            storage: Some(ephemeral_storage),
+            storage: ephemeral_storage,
         })
     }
 }
@@ -90,22 +90,13 @@ impl Volume for EphemeralVolume {
     }
 
     fn get_storage(&self) -> Result<Vec<agent::Storage>> {
-        let s = if let Some(s) = self.storage.as_ref() {
-            vec![s.clone()]
-        } else {
-            vec![]
-        };
-        Ok(s)
+        Ok(vec![self.storage.clone()])
     }
 
     async fn cleanup(&self, _device_manager: &RwLock<DeviceManager>) -> Result<()> {
         // TODO: Clean up EphemeralVolume
         warn!(sl!(), "Cleaning up EphemeralVolume is still unimplemented.");
         Ok(())
-    }
-
-    fn get_device_id(&self) -> Result<Option<String>> {
-        Ok(None)
     }
 }
 

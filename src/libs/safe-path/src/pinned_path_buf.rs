@@ -12,8 +12,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
 
-use crate::scoped_join;
-
 /// A safe version of [`PathBuf`] pinned to an underlying filesystem object to protect from
 /// `TOCTOU` style of attacks.
 ///
@@ -58,14 +56,6 @@ pub struct PinnedPathBuf {
 }
 
 impl PinnedPathBuf {
-    /// Create a [`PinnedPathBuf`] object from `root` and `path`.
-    ///
-    /// The `path` must be a subdirectory of `root`, otherwise error will be returned.
-    pub fn new<R: AsRef<Path>, U: AsRef<Path>>(root: R, path: U) -> Result<Self> {
-        let path = scoped_join(root, path)?;
-        Self::from_path(path)
-    }
-
     /// Create a `PinnedPathBuf` from `path`.
     ///
     /// If the resolved value of `path` doesn't equal to `path`, an error will be returned.
@@ -73,20 +63,6 @@ impl PinnedPathBuf {
         let orig_path = orig_path.as_ref();
         let handle = Self::open_by_path(orig_path)?;
         Self::new_from_file(handle, orig_path)
-    }
-
-    /// Try to clone the [`PinnedPathBuf`] object.
-    pub fn try_clone(&self) -> Result<Self> {
-        let fd = unsafe { libc::dup(self.path_fd()) };
-        if fd < 0 {
-            Err(Error::last_os_error())
-        } else {
-            Ok(Self {
-                handle: unsafe { File::from_raw_fd(fd) },
-                path: Self::get_proc_path(fd),
-                target: self.target.clone(),
-            })
-        }
     }
 
     /// Return the underlying file descriptor representing the pinned path.
@@ -131,17 +107,6 @@ impl PinnedPathBuf {
         } else {
             let handle = unsafe { File::from_raw_fd(res) };
             Self::new_from_file(handle, self.target.join(path_comp))
-        }
-    }
-
-    /// Create or open a child directory if current object is a directory.
-    pub fn mkdir(&self, path_comp: &OsStr, mode: libc::mode_t) -> Result<Self> {
-        let path_name = Self::prepare_path_component(path_comp)?;
-        let res = unsafe { libc::mkdirat(self.handle.as_raw_fd(), path_name.as_ptr(), mode) };
-        if res < 0 {
-            Err(Error::last_os_error())
-        } else {
-            self.open_child(path_comp)
         }
     }
 
@@ -227,6 +192,7 @@ impl AsRef<Path> for PinnedPathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scoped_join;
     use std::ffi::OsString;
     use std::fs::DirBuilder;
     use std::io::Write;
@@ -250,7 +216,9 @@ mod tests {
         fs::write(rootfs_path.join("endpoint"), "test").unwrap();
 
         // Pin the target and validate the path/content.
-        let path = PinnedPathBuf::new(rootfs_path, "symlink_dir/endpoint").unwrap();
+        let path =
+            PinnedPathBuf::from_path(scoped_join(rootfs_path, "symlink_dir/endpoint").unwrap())
+                .unwrap();
         assert!(!path.is_dir());
         let path_ref = path.deref();
         let target = fs::read_link(path_ref).unwrap();
@@ -303,7 +271,7 @@ mod tests {
         assert_eq!(&data, "b");
         PinnedPathBuf::from_path(&path).unwrap_err();
 
-        let pinned_path = PinnedPathBuf::new(root_path, "s").unwrap();
+        let pinned_path = PinnedPathBuf::from_path(scoped_join(root_path, "s").unwrap()).unwrap();
         let data = fs::read_to_string(&pinned_path).unwrap();
         assert_eq!(&data, "b");
 
@@ -326,19 +294,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pinned_path_try_clone() {
-        let rootfs_dir = tempfile::tempdir().expect("failed to create tmpdir");
-        let rootfs_path = rootfs_dir.path();
-        let path = PinnedPathBuf::from_path(rootfs_path).unwrap();
-        let path2 = path.try_clone().unwrap();
-        assert_ne!(path.as_path(), path2.as_path());
-    }
-
-    #[test]
     fn test_new_pinned_path_buf_from_nonexist_file() {
         let rootfs_dir = tempfile::tempdir().expect("failed to create tmpdir");
         let rootfs_path = rootfs_dir.path();
-        PinnedPathBuf::new(rootfs_path, "does_not_exist").unwrap_err();
+        PinnedPathBuf::from_path(scoped_join(rootfs_path, "does_not_exist").unwrap()).unwrap_err();
     }
 
     #[allow(clippy::zero_prefixed_literal)]

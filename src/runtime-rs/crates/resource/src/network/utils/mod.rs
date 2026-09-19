@@ -62,5 +62,4 @@ mod tests {
         assert!(addr.is_some());
         assert_eq!(expected_addr.0, addr.unwrap().0);
     }
-
 }

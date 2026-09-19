@@ -17,11 +17,8 @@ use hypervisor::{
     },
     BlockConfigModern, Hypervisor,
 };
+use kata_types::config::TomlConfig;
 use kata_types::mount::{kata_guest_sandbox_dir, Mount, KATA_EPHEMERAL_VOLUME_TYPE, SHM_DIR};
-use kata_types::{
-    config::TomlConfig,
-    mount::{adjust_rootfs_mounts, KATA_IMAGE_FORCE_GUEST_PULL},
-};
 use libc::NUD_PERMANENT;
 use oci::{Linux, LinuxResources};
 use oci_spec::runtime::{self as oci, LinuxDeviceType};
@@ -31,7 +28,7 @@ use tokio::{runtime, sync::RwLock};
 use crate::{
     cgroups::{CgroupArgs, CgroupsResource},
     manager::ManagerArgs,
-    network::{self, Network, NetworkConfig, NetworkWithNetNsConfig},
+    network::{self, Network, NetworkConfig},
     resource_persist::ResourceState,
     rootfs::{RootFsResource, Rootfs},
     volume::{utils::is_block_device_readonly, Volume, VolumeResource},
@@ -101,11 +98,6 @@ impl ResourceManagerInner {
                     do_handle_device(&self.device_manager, &DeviceConfig::BlockCfgModern(r))
                         .await
                         .context("do handle device failed.")?;
-                }
-                ResourceConfig::HybridVsock(hv) => {
-                    do_handle_device(&self.device_manager, &DeviceConfig::HybridVsockCfg(hv))
-                        .await
-                        .context("do handle hybrid-vsock device failed.")?;
                 }
             };
         }
@@ -226,7 +218,7 @@ impl ResourceManagerInner {
 
     pub async fn setup_after_start_vm(&mut self) -> Result<()> {
         self.cgroups_resource
-            .setup_after_start_vm(self.hypervisor.as_ref())
+            .setup_after_start_vm()
             .await
             .context("setup cgroups after start vm")?;
 
@@ -246,49 +238,6 @@ impl ResourceManagerInner {
             .context("handle neighbors")?;
         self.handle_routes(network).await.context("handle routes")?;
         Ok(())
-    }
-
-    /// Check whether a rescan is needed at all (early-out conditions).
-    pub fn rescan_should_skip(&self, net_cfg: &NetworkWithNetNsConfig) -> bool {
-        self.toml_config.runtime.disable_new_netns
-            || net_cfg.network_model == "none"
-            || net_cfg.netns_path.is_empty()
-    }
-
-    /// Check whether the network already has interfaces configured.
-    pub async fn network_has_interfaces(&self) -> Result<bool> {
-        match self.network.as_ref() {
-            Some(n) => Ok(!n
-                .interfaces()
-                .await
-                .context("check existing interfaces")?
-                .is_empty()),
-            None => Ok(false),
-        }
-    }
-
-    /// Perform a single network scan attempt.  Returns `Some(network)` when
-    /// new interfaces were found and need to be applied to the guest agent,
-    /// `None` when no interfaces were found yet (caller should retry).
-    /// The caller is responsible for calling `apply_network_to_agent` on
-    /// the returned network **after** releasing the write lock.
-    pub async fn rescan_network_once(
-        &mut self,
-        net_cfg: NetworkWithNetNsConfig,
-    ) -> Result<Option<Arc<dyn Network>>> {
-        self.handle_network(NetworkConfig::NetNs(net_cfg))
-            .await
-            .context("rescan handle network")?;
-
-        let n = self
-            .network
-            .as_ref()
-            .ok_or_else(|| anyhow!("network missing after rescan setup"))?;
-        let ifs = n.interfaces().await.context("rescan get interfaces")?;
-        if !ifs.is_empty() {
-            return Ok(Some(Arc::clone(n)));
-        }
-        Ok(None)
     }
 
     pub async fn get_storage_for_sandbox(&self, shm_size: u64) -> Result<Vec<Storage>> {
@@ -325,16 +274,6 @@ impl ResourceManagerInner {
         rootfs_mounts: &[Mount],
         annotations: &HashMap<String, String>,
     ) -> Result<Arc<dyn Rootfs>> {
-        let adjust_rootfs_mounts = if !self
-            .config()
-            .runtime
-            .is_experiment_enabled(KATA_IMAGE_FORCE_GUEST_PULL)
-        {
-            rootfs_mounts.to_vec()
-        } else {
-            adjust_rootfs_mounts()?
-        };
-
         self.rootfs_resource
             .handler_rootfs(
                 self.device_manager.as_ref(),
@@ -343,7 +282,7 @@ impl ResourceManagerInner {
                 cid,
                 root,
                 bundle_path,
-                &adjust_rootfs_mounts,
+                rootfs_mounts,
                 annotations,
             )
             .await
@@ -354,14 +293,11 @@ impl ResourceManagerInner {
         cid: &str,
         spec: &oci::Spec,
     ) -> Result<Vec<Arc<dyn Volume>>> {
-        let capabilities = self.hypervisor.capabilities().await?;
         let ctx = crate::volume::VolumeContext {
             d: self.device_manager.as_ref(),
             sid: &self.sid,
             agent: self.agent.clone(),
             emptydir_mode: &self.toml_config.runtime.emptydir_mode,
-            fs_sharing_supported: capabilities.is_fs_sharing_supported(),
-            block_device_discard_supported: capabilities.is_block_device_discard_supported(),
         };
         self.volume_resource.handler_volumes(&ctx, cid, spec).await
     }
@@ -433,7 +369,7 @@ impl ResourceManagerInner {
     pub async fn cleanup(&self) -> Result<()> {
         // Detach network endpoints.
         if let Some(network) = &self.network {
-            if let Err(err) = network.remove(self.hypervisor.as_ref()).await {
+            if let Err(err) = network.remove().await {
                 warn!(sl!(), "failed to remove network: {}", err);
             }
         }
@@ -470,7 +406,7 @@ impl ResourceManagerInner {
 
         // Update host cgroups while keeping the VM CPU and memory sizes fixed.
         self.cgroups_resource
-            .update(cid, linux_resources, op, self.hypervisor.as_ref())
+            .update(cid, linux_resources, op)
             .await?;
 
         // update the linux resources for agent
@@ -506,15 +442,8 @@ impl Persist for ResourceManagerInner {
 
     /// Save a state of ResourceManagerInner
     async fn save(&self) -> Result<Self::State> {
-        let mut endpoint_state = vec![];
-        if let Some(network) = &self.network {
-            if let Some(ens) = network.save().await {
-                endpoint_state = ens;
-            }
-        }
         let cgroup_state = self.cgroups_resource.save().await?;
         Ok(ResourceState {
-            endpoint: endpoint_state,
             cgroup_state: Some(cgroup_state),
         })
     }

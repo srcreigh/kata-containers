@@ -12,14 +12,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::sync::{DATA_SIZE, MSG_SIZE, SYNC_DATA, SYNC_FAILED, SYNC_SUCCESS};
 
-async fn write_count(pipe_w: &mut PipeStream, buf: &[u8], count: usize) -> Result<usize> {
+async fn write_count(pipe_w: &mut PipeStream, buf: &[u8]) -> Result<()> {
     let mut len = 0;
 
     loop {
         match pipe_w.write(&buf[len..]).await {
             Ok(l) => {
                 len += l;
-                if len == count {
+                if len == buf.len() {
                     break;
                 }
             }
@@ -32,7 +32,7 @@ async fn write_count(pipe_w: &mut PipeStream, buf: &[u8], count: usize) -> Resul
         }
     }
 
-    Ok(len)
+    Ok(())
 }
 
 async fn read_count(pipe_r: &mut PipeStream, count: usize) -> Result<Vec<u8>> {
@@ -109,32 +109,57 @@ pub async fn read_async(pipe_r: &mut PipeStream) -> Result<Vec<u8>> {
     }
 }
 
+/// Send parent-to-child setup data or an acknowledgement.
 pub async fn write_async(pipe_w: &mut PipeStream, msg_type: i32, data_str: &str) -> Result<()> {
-    let buf = msg_type.to_be_bytes();
-    let count = write_count(pipe_w, &buf, MSG_SIZE).await?;
-    if count != MSG_SIZE {
-        return Err(anyhow!("error in send sync message"));
+    if !matches!(msg_type, SYNC_SUCCESS | SYNC_DATA) {
+        return Err(anyhow!("unsupported parent-to-child sync message"));
+    }
+    write_count(pipe_w, &msg_type.to_be_bytes()).await?;
+
+    if msg_type == SYNC_DATA {
+        let length: i32 = data_str.len() as i32;
+        write_count(pipe_w, &length.to_be_bytes())
+            .await
+            .map_err(|e| anyhow!(e).context("error in send message to process"))?;
+
+        write_count(pipe_w, data_str.as_bytes())
+            .await
+            .map_err(|e| anyhow!(e).context("error in send message to process"))?;
     }
 
-    match msg_type {
-        SYNC_FAILED => {
-            if let Err(e) = write_count(pipe_w, data_str.as_bytes(), data_str.len()).await {
-                return Err(anyhow!(e).context("error in send message to process"));
-            }
-        }
-        SYNC_DATA => {
-            let length: i32 = data_str.len() as i32;
-            write_count(pipe_w, &length.to_be_bytes(), MSG_SIZE)
-                .await
-                .map_err(|e| anyhow!(e).context("error in send message to process"))?;
-
-            write_count(pipe_w, data_str.as_bytes(), data_str.len())
-                .await
-                .map_err(|e| anyhow!(e).context("error in send message to process"))?;
-        }
-
-        _ => (),
-    };
-
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::{read_sync, write_sync};
+    use nix::unistd;
+    use std::os::fd::{AsRawFd, IntoRawFd};
+
+    #[tokio::test]
+    async fn parent_data_and_acknowledgements_reach_child() {
+        let (reader, writer) = unistd::pipe().unwrap();
+        let mut writer = PipeStream::new(writer.into_raw_fd()).unwrap();
+        for (kind, payload) in [(SYNC_DATA, "setup data"), (SYNC_SUCCESS, "")] {
+            write_async(&mut writer, kind, payload).await.unwrap();
+            assert_eq!(read_sync(reader.as_raw_fd()).unwrap(), payload.as_bytes());
+        }
+        assert!(write_async(&mut writer, SYNC_FAILED, "unsupported")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn child_errors_still_reach_parent() {
+        let (reader, writer) = unistd::pipe().unwrap();
+        let mut reader = PipeStream::new(reader.into_raw_fd()).unwrap();
+        // More than one error-read chunk, with EOF terminating the last chunk.
+        let error = "child setup failed ".repeat(10);
+        write_sync(writer.into_raw_fd(), SYNC_FAILED, &error).unwrap();
+        assert_eq!(
+            read_async(&mut reader).await.unwrap_err().to_string(),
+            error
+        );
+    }
 }

@@ -12,11 +12,10 @@ use std::{
     },
 };
 
-use super::endpoint::endpoint_persist::EndpointState;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
-use hypervisor::{device::device_manager::DeviceManager, Hypervisor};
+use hypervisor::device::device_manager::DeviceManager;
 use kata_sys_util::netns;
 use netns_rs::get_from_path;
 use scopeguard::defer;
@@ -49,12 +48,6 @@ impl NetworkWithNetnsInner {
     async fn new(config: &NetworkWithNetNsConfig, d: Arc<RwLock<DeviceManager>>) -> Result<Self> {
         let entity_list = if config.netns_path.is_empty() {
             warn!(sl!(), "Skip to scan network for empty netns");
-            vec![]
-        } else if config.network_model.as_str() == "none" {
-            warn!(
-                sl!(),
-                "Skip to scan network from netns due to the none network model"
-            );
             vec![]
         } else {
             // get endpoint
@@ -126,18 +119,7 @@ impl Network for NetworkWithNetns {
         Ok(neighs)
     }
 
-    async fn save(&self) -> Option<Vec<EndpointState>> {
-        let inner = self.inner.read().await;
-        let mut endpoint = vec![];
-        for e in &inner.entity_list {
-            if let Some(state) = e.endpoint.save().await {
-                endpoint.push(state);
-            }
-        }
-        Some(endpoint)
-    }
-
-    async fn remove(&self, h: &dyn Hypervisor) -> Result<()> {
+    async fn remove(&self) -> Result<()> {
         let inner = self.inner.read().await;
 
         // Always detach endpoints regardless of whether kata created the netns.
@@ -145,7 +127,7 @@ impl Network for NetworkWithNetns {
             let _netns_guard =
                 netns::NetnsGuard::new(&inner.netns_path).context("net netns guard")?;
             for e in &inner.entity_list {
-                if let Err(err) = e.endpoint.detach(h).await {
+                if let Err(err) = e.endpoint.detach().await {
                     warn!(sl!(), "failed to detach endpoint: {}", err);
                 }
             }
@@ -161,43 +143,6 @@ impl Network for NetworkWithNetns {
         fs::remove_dir_all(inner.netns_path.clone()).context("failed to remove netns path")?;
         Ok(())
     }
-
-    async fn endpoints(&self) -> Vec<std::sync::Arc<dyn crate::network::endpoint::Endpoint>> {
-        let inner = self.inner.read().await;
-        inner
-            .entity_list
-            .iter()
-            .map(|e| e.endpoint.clone())
-            .collect()
-    }
-}
-
-/// Lightweight probe: enter the netns and check whether any non-loopback
-/// interface with at least one IP address exists.  Does NOT create endpoints
-/// or attach anything to the hypervisor.
-pub(crate) async fn netns_has_interfaces(netns_path: &str) -> Result<bool> {
-    let _netns_guard = netns::NetnsGuard::new(netns_path).context("netns guard for scan")?;
-    let (connection, handle, _) = rtnetlink::new_connection().context("new connection")?;
-    let thread_handler = tokio::spawn(connection);
-    defer!({
-        thread_handler.abort();
-    });
-
-    let mut links = handle.link().get().execute();
-    while let Some(msg) = links.try_next().await? {
-        let link = link::get_link_from_message(msg);
-        let attrs = link.attrs();
-        if (attrs.flags & libc::IFF_LOOPBACK as u32) != 0 {
-            continue;
-        }
-        let addrs = handle_addresses(&handle, attrs)
-            .await
-            .context("handle addresses")?;
-        if !addrs.is_empty() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 async fn get_entity_from_netns(
@@ -247,16 +192,6 @@ async fn get_entity_from_netns(
                 .context("create endpoint")?;
 
         entity_list.push(NetworkEntity::new(endpoint, network_info));
-    }
-
-    // Currently, l3forwarding configures the host netns for a single pod interface.
-    if config.network_model == crate::network::network_model::L3_FORWARDING_NET_MODEL_STR
-        && entity_list.len() > 1
-    {
-        return Err(anyhow!(
-            "l3forwarding supports only a single interface per network namespace, found {}",
-            entity_list.len()
-        ));
     }
 
     Ok(entity_list)

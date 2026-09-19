@@ -4,12 +4,9 @@
 //SPDX-License-Identifier: Apache-2.0
 
 use crate::firecracker::{sl, FcInner};
-use crate::{selinux, VcpuThreadIds, VmmState, HYPERVISOR_FIRECRACKER};
+use crate::{selinux, VmmState, HYPERVISOR_FIRECRACKER};
 use anyhow::{anyhow, Context, Result};
-use kata_types::capabilities::Capabilities;
 use kata_types::config::KATA_PATH;
-use std::collections::HashSet;
-use std::iter::FromIterator;
 use tokio::fs;
 
 pub const FC_API_SOCKET_NAME: &str = "fc.sock";
@@ -117,21 +114,6 @@ impl FcInner {
         Ok(format!("{HYBRID_VSOCK_SCHEME}://{vsock_path}"))
     }
 
-    pub(crate) async fn get_thread_ids(&self) -> Result<VcpuThreadIds> {
-        debug!(sl(), "Get Thread IDs");
-        Ok(VcpuThreadIds::default())
-    }
-
-    pub(crate) async fn get_pids(&self) -> Result<Vec<u32>> {
-        debug!(sl(), "Get PIDs");
-        let mut pids = HashSet::new();
-        // get shim thread ids
-        pids.insert(self.pid.unwrap());
-
-        debug!(sl(), "PIDs: {:?}", pids);
-        Ok(Vec::from_iter(pids))
-    }
-
     pub(crate) async fn get_vmm_master_tid(&self) -> Result<u32> {
         debug!(sl(), "Get VMM master TID");
         if let Some(pid) = self.pid {
@@ -145,15 +127,5 @@ impl FcInner {
         self.cleanup_resource();
 
         Ok(())
-    }
-
-    pub(crate) async fn get_jailer_root(&self) -> Result<String> {
-        debug!(sl(), "Get Jailer Root");
-        Ok(self.jailer_root.clone())
-    }
-
-    pub(crate) async fn capabilities(&self) -> Result<Capabilities> {
-        debug!(sl(), "Capabilities");
-        Ok(self.capabilities.clone())
     }
 }

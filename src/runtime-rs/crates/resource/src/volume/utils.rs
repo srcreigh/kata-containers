@@ -20,7 +20,6 @@ use oci_spec::runtime as oci;
 
 use hypervisor::device::DeviceType;
 
-pub const DEFAULT_VOLUME_FS_TYPE: &str = "ext4";
 pub const KATA_MOUNT_BIND_TYPE: &str = "bind";
 pub const KATA_MOUNT_RBIND_TYPE: &str = "rbind";
 
@@ -124,6 +123,7 @@ pub async fn handle_block_volume(
     }
 
     let mut storage = agent::Storage {
+        fs_type: fstype.to_owned(),
         options: storage_options,
         ..Default::default()
     };
@@ -147,18 +147,10 @@ pub async fn handle_block_volume(
         .context("generate host-guest shared path failed")?;
     storage.mount_point = guest_path.clone();
 
-    // In some case, dest is device /dev/xxx
-    if m.destination()
-        .clone()
-        .display()
-        .to_string()
-        .starts_with("/dev")
-    {
-        storage.fs_type = "bind".to_string();
+    // Raw block-node bind mounts retain their OCI bind flags. Filesystem
+    // volumes use their declared type regardless of the container path.
+    if fstype == KATA_MOUNT_BIND_TYPE {
         storage.options.append(&mut get_mount_options(m.options()));
-    } else {
-        // usually, the dest is directory.
-        storage.fs_type = fstype.to_owned();
     }
 
     // The Storage object already mounts the block device at `guest_path`
@@ -188,6 +180,76 @@ pub async fn handle_block_volume(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_block_device() -> DeviceType {
+        DeviceType::BlockModern(std::sync::Arc::new(tokio::sync::Mutex::new(
+            hypervisor::BlockDeviceModern {
+                device_id: "device".into(),
+                config: hypervisor::BlockConfigModern {
+                    driver_option: hypervisor::KATA_MMIO_BLK_DEV_TYPE.into(),
+                    virt_path: "/dev/vdb".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )))
+    }
+
+    #[tokio::test]
+    async fn filesystem_volume_type_does_not_depend_on_destination() {
+        for destination in ["/dev/data", "/development", "/mnt/data"] {
+            let mut mount = oci::Mount::default();
+            mount.set_destination(destination.into());
+            mount.set_typ(Some(KATA_MOUNT_BIND_TYPE.into()));
+            mount.set_options(Some(vec!["rbind".into(), "ro".into()]));
+            let options = vec!["nosuid".into()];
+            let (storage, container_mount, _) = handle_block_volume(
+                test_block_device(),
+                &mount,
+                true,
+                "sandbox",
+                "ext4",
+                Some(&options),
+            )
+            .await
+            .unwrap();
+            assert_eq!(storage.fs_type, "ext4");
+            assert_eq!(storage.source, "/dev/vdb");
+            assert_eq!(storage.options, ["nosuid", "ro"]);
+            assert_eq!(container_mount.destination(), Path::new(destination));
+            assert_eq!(container_mount.typ().as_deref(), Some("bind"));
+            assert_eq!(
+                container_mount.source().as_deref(),
+                Some(Path::new(&storage.mount_point))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_raw_block_bind_preserves_bind_flags_at_any_destination() {
+        for destination in ["/dev/raw-disk", "/mnt/raw-disk"] {
+            let mut mount = oci::Mount::default();
+            mount.set_destination(destination.into());
+            mount.set_typ(Some(KATA_MOUNT_BIND_TYPE.into()));
+            mount.set_options(Some(vec!["rbind".into(), "nodev".into()]));
+            let (storage, container_mount, _) = handle_block_volume(
+                test_block_device(),
+                &mount,
+                false,
+                "sandbox",
+                KATA_MOUNT_BIND_TYPE,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(storage.fs_type, "bind");
+            assert_eq!(storage.source, "/dev/vdb");
+            assert!(storage.options.iter().any(|option| option == "rbind"));
+            assert!(storage.options.iter().any(|option| option == "nodev"));
+            assert_eq!(container_mount.destination(), Path::new(destination));
+            assert_eq!(container_mount.typ().as_deref(), Some("bind"));
+        }
+    }
 
     #[test]
     fn test_build_bind_mount_options_merges_volume_options() {

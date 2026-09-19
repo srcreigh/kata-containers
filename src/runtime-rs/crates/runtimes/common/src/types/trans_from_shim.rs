@@ -62,7 +62,6 @@ impl TryFrom<sandbox_api::CreateSandboxRequest> for SandboxRequest {
         let mut dns: Vec<String> = vec![];
         config.dns_config.map(|mut dns_config| {
             dns.append(&mut dns_config.servers);
-            dns.append(&mut dns_config.servers);
             dns.append(&mut dns_config.options);
         });
 

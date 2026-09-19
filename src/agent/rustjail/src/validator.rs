@@ -461,10 +461,7 @@ mod tests {
     #[test]
     fn test_validate() {
         let spec = Spec::default();
-        let mut config = Config {
-            no_pivot_root: true,
-            spec: Some(spec),
-        };
+        let mut config = Config { spec: Some(spec) };
 
         validate(&config).unwrap_err();
 

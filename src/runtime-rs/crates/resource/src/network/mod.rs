@@ -7,7 +7,6 @@
 use std::sync::Arc;
 
 mod endpoint;
-pub use endpoint::endpoint_persist::EndpointState;
 pub use endpoint::Endpoint;
 mod network_entity;
 mod network_info;
@@ -15,7 +14,6 @@ pub use network_info::NetworkInfo;
 mod network_model;
 pub use network_model::NetworkModel;
 mod network_with_netns;
-pub(crate) use network_with_netns::netns_has_interfaces;
 pub use network_with_netns::NetworkWithNetNsConfig;
 use network_with_netns::NetworkWithNetns;
 mod network_pair;
@@ -26,7 +24,7 @@ use tokio::sync::RwLock;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use hypervisor::{device::device_manager::DeviceManager, Hypervisor};
+use hypervisor::device::device_manager::DeviceManager;
 
 #[derive(Debug)]
 pub enum NetworkConfig {
@@ -39,13 +37,7 @@ pub trait Network: Send + Sync {
     async fn interfaces(&self) -> Result<Vec<agent::Interface>>;
     async fn routes(&self) -> Result<Vec<agent::Route>>;
     async fn neighs(&self) -> Result<Vec<agent::ARPNeighbor>>;
-    async fn save(&self) -> Option<Vec<EndpointState>>;
-    async fn remove(&self, h: &dyn Hypervisor) -> Result<()>;
-    /// Returns the list of network endpoints. Used to resolve PCI paths
-    /// via QMP before sending update_interface to the agent.
-    async fn endpoints(&self) -> Vec<std::sync::Arc<dyn endpoint::Endpoint>> {
-        vec![]
-    }
+    async fn remove(&self) -> Result<()>;
 }
 
 pub async fn new(

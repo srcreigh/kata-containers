@@ -28,8 +28,6 @@ pub struct Uevent {
     pub devpath: String,
     pub devname: String,
     pub subsystem: String,
-    seqnum: String,
-    pub interface: String,
 }
 
 pub trait UeventMatcher: Sync + Send + Debug + 'static {
@@ -50,8 +48,6 @@ impl Uevent {
                     U_EVENT_DEV_NAME => event.devname = String::from(key_val[1]),
                     U_EVENT_SUB_SYSTEM => event.subsystem = String::from(key_val[1]),
                     U_EVENT_DEV_PATH => event.devpath = String::from(key_val[1]),
-                    U_EVENT_SEQ_NUM => event.seqnum = String::from(key_val[1]),
-                    U_EVENT_INTERFACE => event.interface = String::from(key_val[1]),
                     _ => (),
                 }
             }

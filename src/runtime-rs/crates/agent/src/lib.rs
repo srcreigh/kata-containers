@@ -24,7 +24,7 @@ pub use types::{
     ContainerProcessID, CopyFileRequest, CreateContainerRequest, CreateSandboxRequest, Empty,
     ExecProcessRequest, FSGroup, FSGroupChangePolicy, GetDiagnosticDataRequest, IPAddress,
     IPFamily, Interface, ReadStreamRequest, RemoveContainerRequest, Route, Routes,
-    SignalProcessRequest, Storage, StringUser, TtyWinResizeRequest, UpdateContainerRequest,
+    SignalProcessRequest, Storage, TtyWinResizeRequest, UpdateContainerRequest,
     UpdateInterfaceRequest, UpdateRoutesRequest, VolumeStatsRequest, WaitProcessRequest,
     WriteStreamRequest,
 };

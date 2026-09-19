@@ -12,12 +12,9 @@ ttrpc.workspace = true
 protobuf.workspace = true
 libc.workspace = true
 nix.workspace = true
-capctl.workspace = true
 serde_json.workspace = true
-scan_fmt.workspace = true
 scopeguard.workspace = true
 thiserror.workspace = true
-regex.workspace = true
 serial_test.workspace = true
 derivative.workspace = true
 

@@ -42,18 +42,18 @@ fn read_count(conn: &PipeConnection, count: usize) -> Result<Vec<u8>> {
     Ok(v[0..len].to_vec())
 }
 
-fn write_count(conn: &PipeConnection, buf: &[u8], count: usize) -> Result<usize> {
+fn write_all(conn: &PipeConnection, buf: &[u8]) -> Result<()> {
     let mut len = 0;
 
-    if count == 0 {
-        return Ok(0);
+    if buf.is_empty() {
+        return Ok(());
     }
 
     loop {
         match conn.write(&buf[len..]) {
             Ok(l) => {
                 len += l;
-                if len == count {
+                if len == buf.len() {
                     break;
                 }
             }
@@ -63,7 +63,7 @@ fn write_count(conn: &PipeConnection, buf: &[u8], count: usize) -> Result<usize>
         }
     }
 
-    Ok(len)
+    Ok(())
 }
 
 fn discard_count(conn: &PipeConnection, count: usize) -> Result<()> {
@@ -119,27 +119,11 @@ pub fn read_message(conn: &PipeConnection) -> Result<(MessageHeader, Result<Vec<
 fn write_message_header(conn: &PipeConnection, mh: MessageHeader) -> Result<()> {
     let buf: Vec<u8> = mh.into();
 
-    let size = write_count(conn, &buf, MESSAGE_HEADER_LENGTH)?;
-    if size != MESSAGE_HEADER_LENGTH {
-        return Err(sock_error_msg(
-            size,
-            format!("Send Message header length size {size} is not right"),
-        ));
-    }
-
-    Ok(())
+    write_all(conn, &buf)
 }
 
 pub fn write_message(conn: &PipeConnection, mh: MessageHeader, buf: Vec<u8>) -> Result<()> {
     write_message_header(conn, mh)?;
 
-    let size = write_count(conn, &buf, buf.len())?;
-    if size != buf.len() {
-        return Err(sock_error_msg(
-            size,
-            format!("Send Message length size {size} is not right"),
-        ));
-    }
-
-    Ok(())
+    write_all(conn, &buf)
 }

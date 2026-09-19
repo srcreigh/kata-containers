@@ -9,8 +9,6 @@
 // or further shim functions want the information corresponding to this, it can just
 // send a GET request to the url, and the info will be in the response
 
-#![allow(dead_code)] // some url's handler are *to be* developed
-
 use std::{fs, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};

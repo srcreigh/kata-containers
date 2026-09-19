@@ -21,7 +21,6 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
-use crate::mount::{get_mount_fs_type, TYPE_ROOTFS};
 use crate::namespace::Namespace;
 use crate::netlink::Handle;
 use crate::storage::StorageDevice;
@@ -100,9 +99,8 @@ pub struct Sandbox {
     pub uevent_watchers: Vec<Option<UeventWatcher>>,
     pub shared_utsns: Namespace,
     pub shared_ipcns: Namespace,
-    pub sandbox_pidns: Option<Namespace>,
+    pub sandbox_pidns: Option<String>,
     pub storages: HashMap<String, StorageState>,
-    pub no_pivot_root: bool,
     pub sender: Option<tokio::sync::oneshot::Sender<i32>>,
     pub rtnl: Handle,
     pub event_rx: Arc<Mutex<Receiver<String>>>,
@@ -113,7 +111,6 @@ pub struct Sandbox {
 impl Sandbox {
     #[tracing::instrument(skip_all)]
     pub fn new(logger: &Logger) -> Result<Self> {
-        let fs_type = get_mount_fs_type("/")?;
         let logger = logger.new(o!("subsystem" => "sandbox"));
         let (tx, rx) = channel::<String>(100);
         let event_rx = Arc::new(Mutex::new(rx));
@@ -130,7 +127,6 @@ impl Sandbox {
             shared_ipcns: Namespace::new(&logger),
             sandbox_pidns: None,
             storages: HashMap::new(),
-            no_pivot_root: fs_type.eq(TYPE_ROOTFS),
             sender: None,
             rtnl: Handle::new()?,
             event_rx,
@@ -212,7 +208,7 @@ impl Sandbox {
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn setup_shared_namespaces(&mut self) -> Result<bool> {
+    pub async fn setup_shared_namespaces(&mut self) -> Result<()> {
         // Set up shared IPC namespace
         self.shared_ipcns = Namespace::new(&self.logger)
             .get_ipc()
@@ -227,16 +223,13 @@ impl Sandbox {
             .await
             .context("setup persistent UTS namespace")?;
 
-        Ok(true)
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
     pub fn update_shared_pidns(&mut self, c: &LinuxContainer) -> Result<()> {
-        // Populate the shared pid path only if this is an infra container and
-        // sandbox_pidns has not been passed in the create_sandbox request.
-        // This means a separate pause process has not been created. We treat the
-        // first container created as the infra container in that case
-        // and use its pid namespace in case pid namespace needs to be shared.
+        // The first container is the infra container. Keep its PID namespace
+        // path for containers requesting the pod's shared process namespace.
         if self.sandbox_pidns.is_none() && self.containers.is_empty() {
             let init_pid = c.init_process_pid;
             if init_pid == -1 {
@@ -245,10 +238,7 @@ impl Sandbox {
                 ));
             }
 
-            let mut pid_ns = Namespace::new(&self.logger).get_pid();
-            pid_ns.path = format!("/proc/{init_pid}/ns/pid");
-
-            self.sandbox_pidns = Some(pid_ns);
+            self.sandbox_pidns = Some(format!("/proc/{init_pid}/ns/pid"));
         }
 
         Ok(())
@@ -539,10 +529,7 @@ mod tests {
             .build()
             .unwrap();
 
-        CreateOpts {
-            no_pivot_root: false,
-            spec: Some(spec),
-        }
+        CreateOpts { spec: Some(spec) }
     }
 
     fn create_linuxcontainer() -> (LinuxContainer, TempDir) {
@@ -621,7 +608,7 @@ mod tests {
         assert!(s.sandbox_pidns.is_some());
 
         let ns_path = format!("/proc/{test_pid}/ns/pid");
-        assert_eq!(s.sandbox_pidns.unwrap().path, ns_path);
+        assert_eq!(s.sandbox_pidns.unwrap(), ns_path);
     }
 
     #[tokio::test]

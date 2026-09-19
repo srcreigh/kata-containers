@@ -27,10 +27,6 @@ use containerd_shim_protos::events::task::{TaskExit, TaskOOM};
 use hypervisor::{firecracker::Firecracker, HYPERVISOR_FIRECRACKER};
 use hypervisor::{BlockConfigModern, Hypervisor};
 
-use hypervisor::{
-    utils::{get_hvsock_path, remove_vmm_user_runtime_dir, vmm_user_runtime_dir},
-    HybridVsockConfig, DEFAULT_GUEST_VSOCK_CID,
-};
 use kata_sys_util::spec::load_oci_spec;
 
 use kata_types::config::TomlConfig;
@@ -46,7 +42,7 @@ use tokio::sync::{mpsc::Sender, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
-pub(crate) const VIRTCONTAINER: &str = "virt_container";
+pub const VIRTCONTAINER: &str = "virt_container";
 
 pub struct SandboxRestoreArgs {
     pub sid: String,
@@ -144,25 +140,13 @@ impl VirtSandbox {
             agent,
             hypervisor,
             resource_manager,
-            monitor: Arc::new(HealthCheck::new(true, keep_abnormal)),
+            monitor: Arc::new(HealthCheck::new(keep_abnormal)),
             exit_notify_tx,
             shm_size: sandbox_config.shm_size,
             sandbox_config: Some(sandbox_config),
             cancel_token,
             oom_registry: Default::default(),
         })
-    }
-
-    pub fn get_agent(&self) -> Arc<dyn Agent> {
-        self.agent.clone()
-    }
-
-    pub fn get_sid(&self) -> String {
-        self.sid.clone()
-    }
-
-    pub fn get_hypervisor(&self) -> Arc<dyn Hypervisor> {
-        self.hypervisor.clone()
     }
 
     async fn record_stop(&self, exit_status: u32, exited_at: std::time::SystemTime) {
@@ -182,19 +166,11 @@ impl VirtSandbox {
     #[instrument]
     async fn prepare_for_start_sandbox(
         &self,
-        id: &str,
         sandbox_config: &SandboxConfig,
     ) -> Result<Vec<ResourceConfig>> {
         let config = self.resource_manager.config().await;
         resource::network::reject_dan(&config, &self.sid)?;
         let mut resource_configs = vec![];
-
-        info!(sl!(), "prepare vm socket config for sandbox.");
-        let vm_socket_config = self
-            .prepare_vm_socket_config()
-            .await
-            .context("failed to prepare vm socket config")?;
-        resource_configs.push(vm_socket_config);
 
         let network_env: SandboxNetworkEnv = sandbox_config.network_env.clone();
         // prepare network config
@@ -205,14 +181,11 @@ impl VirtSandbox {
         }
 
         // prepare VM rootfs device config
-        if let Some(block_config) = self
+        let block_config = self
             .prepare_rootfs_config()
             .await
-            .context("failed to prepare rootfs device config")?
-        {
-            let vm_rootfs = ResourceConfig::VmRootfs(block_config);
-            resource_configs.push(vm_rootfs);
-        }
+            .context("failed to prepare rootfs device config")?;
+        resource_configs.push(ResourceConfig::VmRootfs(block_config));
 
         Ok(resource_configs)
     }
@@ -241,68 +214,18 @@ impl VirtSandbox {
         }
     }
 
-    async fn prepare_rootfs_config(&self) -> Result<Option<BlockConfigModern>> {
+    async fn prepare_rootfs_config(&self) -> Result<BlockConfigModern> {
         let boot_info = self.hypervisor.hypervisor_config().await.boot_info;
 
-        if !boot_info.initrd.is_empty() {
-            return Ok(None);
-        }
-
         if boot_info.image.is_empty() {
-            return Err(anyhow!("both image and initrd are unset"));
+            return Err(anyhow!("Firecracker image is unset"));
         }
 
-        Ok(Some(BlockConfigModern {
+        Ok(BlockConfigModern {
             path_on_host: boot_info.image.clone(),
             is_readonly: true,
             driver_option: boot_info.vm_rootfs_driver,
             ..Default::default()
-        }))
-    }
-
-    async fn prepare_vm_socket_config(&self) -> Result<ResourceConfig> {
-        // This fork has exactly one VMM and one agent transport.
-        Ok(ResourceConfig::HybridVsock(HybridVsockConfig {
-            guest_cid: DEFAULT_GUEST_VSOCK_CID,
-            uds_path: get_hvsock_path(&self.sid),
-        }))
-    }
-
-    /// Build a network rescan config targeting the hypervisor's network
-    /// namespace.  Docker 26+ bind-mounts `/proc/<vmm_pid>/ns/net` and
-    /// configures veth pairs there between Create and Start, so the
-    /// hypervisor netns is where the interfaces will appear — regardless
-    /// of whether we earlier created a placeholder netns (network_created)
-    /// or not.  This mirrors the Go shim's `detectHypervisorNetns` logic
-    /// inside `addAllEndpoints` (commit f7878cc).
-    async fn netns_rescan_config(&self) -> Option<NetworkWithNetNsConfig> {
-        let toml = self.resource_manager.config().await;
-        if toml.runtime.disable_new_netns {
-            return None;
-        }
-
-        self.sandbox_config.as_ref()?;
-
-        let vmm_pid = match self.hypervisor.get_vmm_master_tid().await {
-            Ok(pid) => pid,
-            Err(e) => {
-                warn!(sl!(), "netns_rescan_config: cannot get VMM PID: {:?}", e);
-                return None;
-            }
-        };
-        let netns_path = format!("/proc/{}/ns/net", vmm_pid);
-
-        let queues = self
-            .hypervisor
-            .hypervisor_config()
-            .await
-            .network_info
-            .network_queues as usize;
-        Some(NetworkWithNetNsConfig {
-            network_model: toml.runtime.internetworking_model.clone(),
-            netns_path,
-            queues,
-            network_created: false,
         })
     }
 }
@@ -344,7 +267,7 @@ impl Sandbox for VirtSandbox {
 
         // generate device and setup before start vm
         // should after hypervisor.prepare_vm
-        let resources = self.prepare_for_start_sandbox(id, sandbox_config).await?;
+        let resources = self.prepare_for_start_sandbox(sandbox_config).await?;
 
         self.resource_manager
             .prepare_before_start_vm(resources)
@@ -472,74 +395,6 @@ impl Sandbox for VirtSandbox {
         Ok(())
     }
 
-    /// Core function for starting a VM from a template
-    ///
-    /// This function is responsible for creating and starting a VM sandbox from a predefined template,
-    /// serving as the core implementation of the template mechanism.
-    async fn start_template(&self) -> Result<()> {
-        info!(sl!(), "sandbox::start_template()"; "sandbox:" => format!("{:?}", self));
-        let id = &self.sid;
-
-        let sandbox_config = self.sandbox_config.as_ref().unwrap();
-
-        // if sandbox is not in SandboxState::Init then return,
-        // otherwise try to create sandbox
-        let inner = self.inner.write().await;
-        if inner.state != SandboxState::Init {
-            return Ok(());
-        }
-        let selinux_label = load_oci_spec().ok().and_then(|spec| {
-            spec.process()
-                .as_ref()
-                .and_then(|process| process.selinux_label().clone())
-        });
-
-        self.hypervisor
-            .prepare_vm(
-                id,
-                sandbox_config.network_env.netns.clone(),
-                &sandbox_config.annotations,
-                selinux_label,
-            )
-            .await
-            .context("prepare vm")?;
-
-        // generate device and setup before start vm
-        // should after hypervisor.prepare_vm
-        let resources = self
-            .prepare_for_start_sandbox(id, sandbox_config)
-            .await
-            .context("prepare resources before start vm")?;
-
-        self.resource_manager
-            .prepare_before_start_vm(resources)
-            .await
-            .context("set up device before start vm")?;
-
-        self.hypervisor
-            .start_vm(10_000)
-            .await
-            .context("start template vm")?;
-        info!(sl!(), "vm started from template");
-
-        let sandbox = self.clone();
-        tokio::spawn(async move {
-            match sandbox.hypervisor.wait_vm().await {
-                Ok(exit_code) => {
-                    sandbox
-                        .record_stop(exit_code as u32, SystemTime::now())
-                        .await;
-                }
-                Err(err) => {
-                    warn!(sl!(), "failed waiting for sandbox VM exit: {:?}", err);
-                    sandbox.record_stop(255, SystemTime::now()).await;
-                }
-            }
-        });
-
-        Ok(())
-    }
-
     async fn status(&self) -> Result<SandboxStatus> {
         let inner = self.inner.read().await;
         let state = inner.state.to_cri_state().to_string();
@@ -548,7 +403,6 @@ impl Sandbox for VirtSandbox {
             sandbox_id: self.sid.clone(),
             pid: std::process::id(),
             state,
-            info: std::collections::HashMap::new(),
             created_at: inner.created_at,
         })
     }
@@ -636,14 +490,6 @@ impl Sandbox for VirtSandbox {
             inner.cleaned = true;
         }
 
-        let rootless_uid = self
-            .hypervisor
-            .hypervisor_config()
-            .await
-            .security_info
-            .rootless_user
-            .map(|user| user.uid);
-
         info!(sl!(), "delete hypervisor");
         self.hypervisor
             .cleanup()
@@ -656,33 +502,7 @@ impl Sandbox for VirtSandbox {
             .await
             .context("resource clean up")?;
 
-        if let Some(uid) = rootless_uid {
-            let path = vmm_user_runtime_dir(uid);
-            if let Err(err) = remove_vmm_user_runtime_dir(uid) {
-                warn!(
-                    sl!(),
-                    "failed to remove rootless runtime directory {}: {}",
-                    path.display(),
-                    err
-                );
-            }
-        }
-
         // TODO: cleanup other sandbox resource
-        Ok(())
-    }
-
-    async fn rescan_network(&self) -> Result<()> {
-        if let Some(net_cfg) = self.netns_rescan_config().await {
-            info!(
-                sl!(),
-                "rescan_network: scanning netns={}", net_cfg.netns_path
-            );
-            self.resource_manager
-                .rescan_network_if_unconfigured(net_cfg)
-                .await
-                .context("network rescan during start")?;
-        }
         Ok(())
     }
 
@@ -774,20 +594,8 @@ impl Persist for VirtSandbox {
                 )),
             }?,
         };
-        // FIXME: properly handle jailed case
-        // eg: Determine if we are running jailed:
-        // let h = sandbox_state.hypervisor.clone().unwrap_or_default();
-        // Figure out the jailed path:
-        // jailed_path = h.<>
-        // and somehow store the sandbox state into the jail:
-        // persist::to_disk(&sandbox_state, &self.sid, jailed_path)?;
-        // Issue is, how to handle restore.
         let h = sandbox_state.hypervisor.as_ref().unwrap();
-        let vmpath = match h.jailed {
-            true => h.vm_path.clone(),
-            false => "".to_string(),
-        };
-        persist::to_disk(&sandbox_state, &self.sid, vmpath.as_str())?;
+        persist::to_disk(&sandbox_state, &self.sid, &h.vm_path)?;
         Ok(sandbox_state)
     }
     /// Restore Sandbox
@@ -825,7 +633,7 @@ impl Persist for VirtSandbox {
             agent,
             hypervisor,
             resource_manager,
-            monitor: Arc::new(HealthCheck::new(true, keep_abnormal)),
+            monitor: Arc::new(HealthCheck::new(keep_abnormal)),
             exit_notify_tx: watch::channel(false).0,
             sandbox_config: None,
             shm_size: DEFAULT_SHM_SIZE,

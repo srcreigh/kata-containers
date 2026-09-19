@@ -15,7 +15,7 @@ pub mod manager;
 mod manager_inner;
 pub mod network;
 pub mod resource_persist;
-use hypervisor::{BlockConfigModern, HybridVsockConfig};
+use hypervisor::BlockConfigModern;
 use network::NetworkConfig;
 mod guest_paths;
 pub mod rootfs;
@@ -27,7 +27,6 @@ pub mod cpu_mem;
 pub enum ResourceConfig {
     Network(NetworkConfig),
     VmRootfs(BlockConfigModern),
-    HybridVsock(HybridVsockConfig),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -151,9 +151,7 @@ impl Container {
         );
 
         let mut storages = vec![];
-        if let Some(mut storage_list) = rootfs.get_storage().await {
-            storages.append(&mut storage_list);
-        }
+        storages.extend(rootfs.get_storage().await);
         inner.rootfs.push(rootfs);
 
         // handler volumes
@@ -244,7 +242,7 @@ impl Container {
                 let res: Result<()> = async {
                     inner.start_container(&process.container_id).await?;
 
-                    let container_io = inner.new_container_io(process).await?;
+                    let container_io = inner.new_container_io(process);
                     inner
                         .init_process
                         .start_io_and_wait(containers, self.agent.clone(), container_io)
@@ -256,7 +254,7 @@ impl Container {
 
                 if let Err(err) = res {
                     let device_manager = self.resource_manager.get_device_manager().await;
-                    let _ = inner.stop_process(process, true, &device_manager).await;
+                    let _ = inner.stop_process(process, &device_manager).await;
 
                     if let Err(e) = self
                         .resource_manager
@@ -278,7 +276,7 @@ impl Container {
             ProcessType::Exec => {
                 if let Err(e) = inner.start_exec_process(process).await {
                     let device_manager = self.resource_manager.get_device_manager().await;
-                    let _ = inner.stop_process(process, true, &device_manager).await;
+                    let _ = inner.stop_process(process, &device_manager).await;
                     return Err(e).context("enter process");
                 }
 
@@ -298,7 +296,7 @@ impl Container {
                 // Transfer IO through the agent RPC streams.
                 // When IO is done, we send `WaitProcessRequest` to agent
                 // to get the exit status.
-                let container_io = inner.new_container_io(process).await.context("io stream")?;
+                let container_io = inner.new_container_io(process);
 
                 let exec = inner
                     .exec_processes
@@ -445,7 +443,7 @@ impl Container {
         let mut inner = self.inner.write().await;
         let device_manager = self.resource_manager.get_device_manager().await;
         inner
-            .stop_process(container_process, true, &device_manager)
+            .stop_process(container_process, &device_manager)
             .await
             .context("stop process")?;
 
@@ -569,13 +567,13 @@ impl Container {
         inner.win_resize_process(process, height, width).await
     }
 
-    pub async fn stats(&self) -> Result<Option<agent::StatsContainerResponse>> {
+    pub async fn stats(&self) -> Result<agent::StatsContainerResponse> {
         let stats_resp = self
             .agent
             .stats_container(self.container_id.clone().into())
             .await
             .context("agent stats container")?;
-        Ok(Some(stats_resp))
+        Ok(stats_resp)
     }
 
     pub async fn update(&self, resources: &LinuxResources) -> Result<()> {
@@ -594,7 +592,6 @@ impl Container {
         let req = agent::UpdateContainerRequest {
             container_id: self.container_id.container_id.clone(),
             resources: agent_resources,
-            mounts: Vec::new(),
         };
         self.agent
             .update_container(req)
@@ -607,11 +604,7 @@ impl Container {
         let mut inner = self.inner.write().await;
         let device_manager = self.resource_manager.get_device_manager().await;
         let res = inner
-            .cleanup_container(
-                self.container_id.container_id.as_str(),
-                true,
-                &device_manager,
-            )
+            .cleanup_container(self.container_id.container_id.as_str(), &device_manager)
             .await;
 
         if let Err(e) = self

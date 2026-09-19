@@ -23,7 +23,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::RawFd;
 use std::path::{Component, Path, PathBuf};
 
-use path_absolutize::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind};
 
@@ -41,7 +40,6 @@ use safe_path::scoped_join;
 pub struct Info {
     pub mount_point: String,
     optional: String,
-    fstype: String,
 }
 
 const MOUNTINFO_FORMAT: &str = "{d} {d} {d}:{d} {} {} {} {}";
@@ -53,12 +51,10 @@ const ERR_FAILED_PARSE_MOUNTINFO_FINAL_FIELDS: &str =
     "failed to parse final fields in mountinfo file";
 
 // since libc didn't defined this const for musl, thus redefined it here.
-#[cfg(all(target_os = "linux", target_env = "gnu", not(target_arch = "s390x")))]
+#[cfg(target_env = "gnu")]
 const PROC_SUPER_MAGIC: libc::c_long = 0x00009fa0;
-#[cfg(all(target_os = "linux", target_env = "musl"))]
+#[cfg(target_env = "musl")]
 const PROC_SUPER_MAGIC: libc::c_ulong = 0x00009fa0;
-#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "s390x"))]
-const PROC_SUPER_MAGIC: libc::c_uint = 0x00009fa0;
 
 lazy_static! {
     static ref PROPAGATION: HashMap<&'static str, MsFlags> = {
@@ -521,7 +517,6 @@ pub fn parse_mount_table(mountinfo_path: &str) -> Result<Vec<Info>> {
             if final_fields.len() != 3 {
                 return Err(anyhow!(ERR_FAILED_PARSE_MOUNTINFO_FINAL_FIELDS));
             }
-            let fstype = final_fields[0].to_string();
 
             let mut optional_new = String::new();
             if optional != "-" {
@@ -531,7 +526,6 @@ pub fn parse_mount_table(mountinfo_path: &str) -> Result<Vec<Info>> {
             let info = Info {
                 mount_point,
                 optional: optional_new,
-                fstype,
             };
 
             infos.push(info);
@@ -541,83 +535,6 @@ pub fn parse_mount_table(mountinfo_path: &str) -> Result<Vec<Info>> {
     }
 
     Ok(infos)
-}
-
-#[inline(always)]
-#[cfg(not(test))]
-fn chroot<P: ?Sized + NixPath>(path: &P) -> Result<(), nix::Error> {
-    unistd::chroot(path)
-}
-
-#[inline(always)]
-#[cfg(test)]
-fn chroot<P: ?Sized + NixPath>(_path: &P) -> Result<(), nix::Error> {
-    Ok(())
-}
-
-pub fn ms_move_root(rootfs: &str) -> Result<bool> {
-    unistd::chdir(rootfs)?;
-    let mount_infos = parse_mount_table(MOUNTINFO_PATH)?;
-
-    let root_path = Path::new(rootfs);
-    let abs_root_buf = root_path.absolutize()?;
-    let abs_root = abs_root_buf
-        .to_str()
-        .ok_or_else(|| anyhow!("failed to parse {} to absolute path", rootfs))?;
-
-    for info in mount_infos.iter() {
-        let mount_point = Path::new(&info.mount_point);
-        let abs_mount_buf = mount_point.absolutize()?;
-        let abs_mount_point = abs_mount_buf
-            .to_str()
-            .ok_or_else(|| anyhow!("failed to parse {} to absolute path", info.mount_point))?;
-        let abs_mount_point_string = String::from(abs_mount_point);
-
-        // Umount every syfs and proc file systems, except those under the container rootfs
-        if (info.fstype != "proc" && info.fstype != "sysfs")
-            || abs_mount_point_string.starts_with(abs_root)
-        {
-            continue;
-        }
-
-        // Be sure umount events are not propagated to the host.
-        mount(
-            None::<&str>,
-            abs_mount_point,
-            None::<&str>,
-            MsFlags::MS_SLAVE | MsFlags::MS_REC,
-            None::<&str>,
-        )?;
-        umount2(abs_mount_point, MntFlags::MNT_DETACH).or_else(|e| {
-            if e.ne(&nix::Error::EINVAL) && e.ne(&nix::Error::EPERM) {
-                return Err(anyhow!(e));
-            }
-
-            // If we have not privileges for umounting (e.g. rootless), then
-            // cover the path.
-            mount(
-                Some("tmpfs"),
-                abs_mount_point,
-                Some("tmpfs"),
-                MsFlags::empty(),
-                None::<&str>,
-            )?;
-
-            Ok(())
-        })?;
-    }
-
-    mount(
-        Some(abs_root),
-        "/",
-        None::<&str>,
-        MsFlags::MS_MOVE,
-        None::<&str>,
-    )?;
-    chroot(".")?;
-    unistd::chdir("/")?;
-
-    Ok(true)
 }
 
 fn parse_mount(m: &Mount) -> (MsFlags, MsFlags, String) {
@@ -754,7 +671,7 @@ fn mount_from(
     )
     .inspect_err(|e| log_child!(cfd_log, "mount error: {:?}", e))?;
 
-    if !label.is_empty() && selinux::is_enabled()? && use_xattr {
+    if use_xattr {
         xattr::set(dest.as_str(), "security.selinux", label.as_bytes())?;
     }
 
@@ -1139,20 +1056,6 @@ mod tests {
     }
 
     #[test]
-    #[serial(chdir)]
-    fn test_ms_move_rootfs() {
-        let ret = ms_move_root("/abc");
-        assert!(
-            ret.is_err(),
-            "Should fail. path doesn't exist. Got: {:?}",
-            ret
-        );
-
-        let ret = ms_move_root("/tmp");
-        assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
-    }
-
-    #[test]
     fn test_mask_path() {
         let ret = mask_path("abc");
         assert!(
@@ -1484,7 +1387,6 @@ mod tests {
                 result: Ok(vec![Info {
                     mount_point: "/sys".to_string(),
                     optional: "shared:2".to_string(),
-                    fstype: "sysfs".to_string(),
                 }]),
             },
             TestData {
@@ -1496,12 +1398,10 @@ mod tests {
                     Info {
                         mount_point: "/sys".to_string(),
                         optional: "".to_string(),
-                        fstype: "sysfs".to_string(),
                     },
                     Info {
                         mount_point: "/tmp/dir".to_string(),
                         optional: "shared:2".to_string(),
-                        fstype: "tmpfs".to_string(),
                     },
                 ]),
             },
@@ -1512,7 +1412,6 @@ mod tests {
                 result: Ok(vec![Info {
                     mount_point: "/sys".to_string(),
                     optional: "shared:2".to_string(),
-                    fstype: "sysfs".to_string(),
                 }]),
             },
             TestData {

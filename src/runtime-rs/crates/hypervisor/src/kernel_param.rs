@@ -13,8 +13,7 @@ use kata_types::fs::{
     VM_ROOTFS_FILESYSTEM_EROFS, VM_ROOTFS_FILESYSTEM_EXT4, VM_ROOTFS_FILESYSTEM_XFS,
 };
 
-// Port where the agent will send the logs. Logs are sent through the vsock in cases
-// where the hypervisor has no console.sock, i.e dragonball
+// Port where the agent sends logs through vsock.
 const VSOCK_LOGS_PORT: &str = "1025";
 
 const KERNEL_KV_DELIMITER: &str = "=";
@@ -75,13 +74,7 @@ fn new_kernel_verity_params(params_string: &str) -> Result<Option<KernelVerityCo
 }
 
 fn kernel_verity_root_flags(rootfs_type: &str) -> Result<String> {
-    let normalized = if rootfs_type.is_empty() {
-        VM_ROOTFS_FILESYSTEM_EXT4
-    } else {
-        rootfs_type
-    };
-
-    match normalized {
+    match rootfs_type {
         VM_ROOTFS_FILESYSTEM_EXT4 => Ok("data=ordered,errors=remount-ro ro".to_string()),
         VM_ROOTFS_FILESYSTEM_XFS | VM_ROOTFS_FILESYSTEM_EROFS => Ok("ro".to_string()),
         _ => Err(anyhow!("Unsupported rootfs type {}", rootfs_type)),
@@ -123,13 +116,7 @@ pub(crate) struct KernelParams {
 impl KernelParams {
     pub(crate) fn new(debug: bool) -> Self {
         // default kernel params
-        let mut params = vec![
-            Param::new("reboot", "k"),
-            Param::new("panic", "1"),
-            Param::new("systemd.unit", "kata-containers.target"),
-            Param::new("systemd.mask", "systemd-networkd.service"),
-            Param::new("systemd.mask", "systemd-networkd.socket"),
-        ];
+        let mut params = vec![Param::new("reboot", "k"), Param::new("panic", "1")];
 
         if debug {
             params.push(Param::new(LOG_VPORT_OPTION, VSOCK_LOGS_PORT));
@@ -203,11 +190,7 @@ impl KernelParams {
         });
         params.push(Param::new("root", "/dev/dm-0"));
         params.push(Param::new("rootflags", &root_flags));
-        if rootfs_type.is_empty() {
-            params.push(Param::new("rootfstype", VM_ROOTFS_FILESYSTEM_EXT4));
-        } else {
-            params.push(Param::new("rootfstype", rootfs_type));
-        }
+        params.push(Param::new("rootfstype", rootfs_type));
 
         Ok(params)
     }
@@ -231,10 +214,6 @@ impl KernelParams {
         let parameters_vec = split_kernel_params(params_string);
 
         for param in parameters_vec.iter() {
-            if param.is_empty() {
-                continue;
-            }
-
             let ps: Vec<&str> = param.splitn::<_>(2, KERNEL_KV_DELIMITER).collect();
 
             if ps.len() == 2 {

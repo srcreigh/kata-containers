@@ -56,6 +56,10 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
             && h.boot_info.vm_rootfs_driver == "virtio-blk-mmio",
         "{fail}: only virtio-blk-mmio storage is supported"
     );
+    ensure!(
+        h.boot_info.initrd.is_empty(),
+        "{fail}: Firecracker initrd boot"
+    );
     ensure!(!h.memory_info.enable_guest_swap, "{fail}: guest swap");
     let b = &h.blockdev_info;
     ensure!(
@@ -97,6 +101,11 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
         "{fail}: only tcfilter networking is supported"
     );
     ensure!(!c.runtime.disable_new_netns, "{fail}: host networking");
+    ensure!(!c.runtime.enable_vcpus_pinning, "{fail}: vCPU pinning");
+    ensure!(
+        c.runtime.sandbox_cgroup_only,
+        "{fail}: per-container host cgroups"
+    );
     ensure!(
         c.runtime.experimental.is_empty(),
         "{fail}: experimental features"
@@ -104,6 +113,10 @@ pub fn validate(c: &TomlConfig) -> Result<()> {
     ensure!(
         c.runtime.sandbox_bind_mounts.is_empty() && c.runtime.shared_mounts.is_empty(),
         "{fail}: sandbox/shared host mounts"
+    );
+    ensure!(
+        c.runtime.emptydir_mode != "block-encrypted",
+        "{fail}: encrypted emptyDir"
     );
     ensure!(!c.runtime.use_passfd_io, "{fail}: passfd IO");
     ensure!(
@@ -133,6 +146,7 @@ mod tests {
         c.runtime.name = "virt_container".into();
         c.runtime.internetworking_model = "tcfilter".into();
         c.runtime.static_sandbox_resource_mgmt = true;
+        c.runtime.sandbox_cgroup_only = true;
         let mut h = kata_types::config::Hypervisor::default();
         h.jailer_path = "/opt/kata/bin/jailer".into();
         h.blockdev_info.block_device_driver = "virtio-blk-mmio".into();
@@ -266,9 +280,26 @@ mod tests {
             },
             |c| c.runtime.static_sandbox_resource_mgmt = false,
             |c| c.runtime.disable_new_netns = true,
+            |c| c.runtime.enable_vcpus_pinning = true,
+            |c| c.runtime.sandbox_cgroup_only = false,
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .boot_info
+                    .initrd = "/initrd".into()
+            },
+            |c| {
+                c.hypervisor
+                    .get_mut("firecracker")
+                    .unwrap()
+                    .security_info
+                    .rootless = true
+            },
             |c| c.runtime.experimental.push("force_guest_pull".into()),
             |c| c.runtime.sandbox_bind_mounts.push("/host".into()),
             |c| c.runtime.use_passfd_io = true,
+            |c| c.runtime.emptydir_mode = "block-encrypted".into(),
             |c| c.runtime.enable_pprof = true,
             |c| {
                 c.hypervisor
@@ -363,21 +394,7 @@ mod tests {
 
 /// Kubernetes resource sizing annotations are separate and still handled by CRI.
 pub fn validate_annotations(annotations: &std::collections::HashMap<String, String>) -> Result<()> {
-    for key in annotations
-        .keys()
-        .filter(|k| k.starts_with("io.katacontainers.config."))
-    {
-        ensure!(
-            matches!(
-                key.as_str(),
-                "io.katacontainers.config.hypervisor.default_vcpus"
-                    | "io.katacontainers.config.runtime.enable_tracing"
-                    | "io.katacontainers.config.agent.enable_tracing"
-                    | "io.katacontainers.config.hypervisor.default_memory"
-            ),
-            "kata-fc-minimal: unsupported configuration annotation {key}"
-        );
-    }
+    kata_types::annotations::validate_config_annotations(annotations)?;
     Ok(())
 }
 

@@ -19,3 +19,17 @@ Windows named pipes/dependencies, and macOS/Android compatibility branches.
 Unsupported transport schemes fail before socket creation. Rejection tests cover
 TCP (IPv4/IPv6), Windows named pipes and unknown schemes. The frame hardening and
 its existing regression tests are unchanged.
+
+Removed the obsolete async recoverable-frame-error dispatch and its private
+client/server handlers. The hardened frame reader already reports every framing
+failure as a fatal `InternalError`; it never produces the removed `ReturnError`
+variant. Generic request/status errors and unary/stream handling are unchanged.
+The `GenMessageError` type and frame-reader return signature remain; the locked
+containerd 0.11 consumers use neither the removed variant nor these private
+handlers.
+
+Removed redundant sync successful-write length checks. Its private write helper
+already loops over short writes until the complete header/body is written or a
+socket error occurs; it now returns `Result<()>` and derives the target length
+from the supplied slice. Read-side EOF/length checks and the sync framing-error
+contract are unchanged.

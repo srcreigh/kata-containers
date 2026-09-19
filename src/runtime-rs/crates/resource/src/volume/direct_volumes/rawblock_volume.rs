@@ -26,7 +26,7 @@ use crate::volume::{
 
 #[derive(Clone)]
 pub(crate) struct RawblockVolume {
-    storage: Option<agent::Storage>,
+    storage: agent::Storage,
     mount: oci::Mount,
     device_id: String,
 }
@@ -105,7 +105,7 @@ impl RawblockVolume {
         block_volume.0.fs_group = fs_group;
 
         Ok(Self {
-            storage: Some(block_volume.0),
+            storage: block_volume.0,
             mount: block_volume.1,
             device_id: block_volume.2,
         })
@@ -119,13 +119,7 @@ impl Volume for RawblockVolume {
     }
 
     fn get_storage(&self) -> Result<Vec<agent::Storage>> {
-        let s = if let Some(s) = self.storage.as_ref() {
-            vec![s.clone()]
-        } else {
-            vec![]
-        };
-
-        Ok(s)
+        Ok(vec![self.storage.clone()])
     }
 
     async fn cleanup(&self, device_manager: &RwLock<DeviceManager>) -> Result<()> {
@@ -134,10 +128,6 @@ impl Volume for RawblockVolume {
             .await
             .try_remove_device(&self.device_id)
             .await
-    }
-
-    fn get_device_id(&self) -> Result<Option<String>> {
-        Ok(Some(self.device_id.clone()))
     }
 }
 

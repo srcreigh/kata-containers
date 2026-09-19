@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use rtnetlink::Handle;
 use scopeguard::defer;
 
-use super::{NetworkModel, NetworkModelType};
+use super::NetworkModel;
 use crate::network::NetworkPair;
 
 const QDISC_ADD_ATTEMPTS: u64 = 5; // Number of attempts when adding an ingress qdisc
@@ -28,10 +28,6 @@ impl TcFilterModel {
 
 #[async_trait]
 impl NetworkModel for TcFilterModel {
-    fn model_type(&self) -> NetworkModelType {
-        NetworkModelType::TcFilter
-    }
-
     async fn add(&self, pair: &NetworkPair) -> Result<()> {
         let (connection, handle, _) = rtnetlink::new_connection().context("new connection")?;
         let thread_handler = tokio::spawn(connection);

@@ -5,7 +5,7 @@
 //
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     fs::File,
     io::Read,
     os::unix::fs::MetadataExt,
@@ -23,12 +23,7 @@ use kata_sys_util::mount::{get_mount_path, get_mount_type};
 use nix::sys::stat::SFlag;
 use rand::rng;
 use rand::Rng;
-use tokio::{
-    io::AsyncReadExt,
-    sync::{Mutex, RwLock},
-    task::JoinHandle,
-    time::Instant,
-};
+use tokio::{io::AsyncReadExt, sync::RwLock, task::JoinHandle, time::Instant};
 use walkdir::WalkDir;
 
 use super::Volume;
@@ -43,11 +38,6 @@ const SYS_MOUNT_PREFIX: [&str; 2] = ["/proc", "/sys"];
 const MONITOR_INTERVAL: Duration = Duration::from_millis(100);
 const DEBOUNCE_TIME: Duration = Duration::from_millis(500);
 
-// Corresponds to os.FileMode(0750) | os.ModeDir in Go
-// So, it's (permission bits 0o750) ORed with (file type bit S_IFDIR).
-// We use u32 here because `file_mode` in CopyFileRequest is u32
-const DIR_MODE_PERMS: u32 = SFlag::S_IFDIR.bits() | 0o750;
-
 // Copy host files into the guest and bind the guest copy into the container.
 // Ignore /dev, directories and all other device files. We handle
 // only regular files in /dev. It does not make sense to pass the host
@@ -55,144 +45,62 @@ const DIR_MODE_PERMS: u32 = SFlag::S_IFDIR.bits() | 0o750;
 // skip the volumes whose source had already set to guest share dir.
 pub(crate) struct CopyVolume {
     mounts: Vec<oci::Mount>,
-    storages: Vec<agent::Storage>,
-
-    // Add volume manager reference
-    volume_manager: Option<Arc<VolumeManager>>,
-    // Record the source path for cleanup
-    source_path: Option<String>,
-    // Record the container ID
-    container_id: String,
+    // Each copy has a distinct guest destination, even when host sources match.
+    monitor_task: Option<JoinHandle<()>>,
 }
 
-/// Directory Monitor Config
-/// path: the to be watched target directory
-/// recursive: recursively monitor sub-dirs or not,
-/// follow_symlinks: track symlinks or not,
-/// exclude_hidden: exclude hidden files or not,
-/// watch_events: Watcher Event types with CREATE/DELETE/MODIFY/MOVED_FROM/MOVED_TO
-#[derive(Clone, Debug)]
-struct MonitorConfig {
-    path: PathBuf,
-    recursive: bool,
-    follow_symlinks: bool,
-    exclude_hidden: bool,
-    watch_events: WatchMask,
-}
-
-impl MonitorConfig {
-    fn new(path: &Path) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            recursive: true,
-            follow_symlinks: false,
-            exclude_hidden: true,
-            watch_events: WatchMask::CREATE
-                | WatchMask::DELETE
-                | WatchMask::MODIFY
-                | WatchMask::MOVED_FROM
-                | WatchMask::MOVED_TO
-                | WatchMask::CLOSE_WRITE,
-        }
-    }
-}
-
-#[derive(Clone)]
 struct FsWatcher {
-    config: MonitorConfig,
-    inotify: Arc<Mutex<Inotify>>,
-    watch_dirs: Arc<Mutex<HashSet<PathBuf>>>,
-    pending_events: Arc<Mutex<HashSet<PathBuf>>>,
-    need_sync: Arc<Mutex<bool>>,
+    inotify: Inotify,
 }
 
 impl FsWatcher {
-    async fn new(source_path: &Path) -> Result<Self> {
+    fn new(source_path: &Path) -> Result<Self> {
         let inotify = Inotify::init()?;
-        let mon_cfg = MonitorConfig::new(source_path);
-        let mut watcher = Self {
-            config: mon_cfg,
-            inotify: Arc::new(Mutex::new(inotify)),
-            pending_events: Arc::new(Mutex::new(HashSet::new())),
-            watch_dirs: Arc::new(Mutex::new(HashSet::new())),
-            need_sync: Arc::new(Mutex::new(false)),
-        };
-
-        watcher.add_watchers().await?;
-
-        Ok(watcher)
-    }
-
-    /// add watched directory recursively
-    async fn add_watchers(&mut self) -> Result<()> {
-        let mut watched_dirs = self.watch_dirs.lock().await;
-        let config: &MonitorConfig = &self.config;
-        let walker = WalkDir::new(&config.path)
-            .follow_links(config.follow_symlinks)
-            .min_depth(0)
-            .max_depth(if config.recursive { usize::MAX } else { 1 })
+        let walker = WalkDir::new(source_path)
+            .follow_links(false)
             .into_iter()
-            .filter_entry(|e| {
-                !(config.exclude_hidden
-                    && e.file_name()
-                        .to_str()
-                        .map(|s| s.starts_with('.'))
-                        .unwrap_or(false))
+            .filter_entry(|entry| {
+                !entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.starts_with('.'))
+                    .unwrap_or(false)
             });
 
-        for entry in walker.filter_map(|e| e.ok()) {
+        for entry in walker.filter_map(|entry| entry.ok()) {
             if entry.file_type().is_dir() {
-                let path = entry.path();
-                if watched_dirs.insert(path.to_path_buf()) {
-                    self.inotify
-                        .lock()
-                        .await
-                        .watches()
-                        .add(path, config.watch_events)?; // we don't use WatchMask::ALL_EVENTS
-                }
+                inotify.watches().add(
+                    entry.path(),
+                    WatchMask::CREATE
+                        | WatchMask::DELETE
+                        | WatchMask::MODIFY
+                        | WatchMask::MOVED_FROM
+                        | WatchMask::MOVED_TO
+                        | WatchMask::CLOSE_WRITE,
+                )?;
             }
         }
 
-        Ok(())
+        Ok(Self { inotify })
     }
 
-    /// start monitor
-    pub async fn start_monitor(
-        &self,
+    fn start_monitor(
+        mut self,
         agent: Arc<dyn Agent>,
         src: PathBuf,
         dst: PathBuf,
     ) -> JoinHandle<()> {
-        let need_sync = self.need_sync.clone();
-        let pending_events = self.pending_events.clone();
-        let inotify = self.inotify.clone();
-        let monitor_config = self.config.clone();
-
-        // Perform a full sync before starting monitoring to ensure that files which exist before monitoring starts are also synced.
-        let agent_sync = agent.clone();
-        let src_sync = src.clone();
-        let dst_sync = dst.clone();
-
         tokio::spawn(async move {
             let mut buffer = [0u8; 4096];
             let mut last_event_time = None;
 
-            // Initial sync: ensure existing contents in the directory are synchronized
-            {
-                info!(
-                    sl!(),
-                    "Initial sync from {:?} to {:?}", &src_sync, &dst_sync
-                );
-                if let Err(e) =
-                    copy_dir_recursively(&src_sync, &dst_sync.to_string_lossy(), &agent_sync).await
-                {
-                    error!(sl!(), "Initial sync failed: {:?}", e);
-                }
+            // Cover changes between the initial copy and watcher installation.
+            if let Err(err) = copy_dir_recursively(&src, &dst.to_string_lossy(), &agent).await {
+                error!(sl!(), "Initial sync failed: {:?}", err);
             }
 
             loop {
-                // use cloned inotify instance
-                match inotify.lock().await.read_events(&mut buffer) {
+                match self.inotify.read_events(&mut buffer) {
                     Ok(events) => {
                         for event in events {
                             if !event.mask.intersects(
@@ -205,222 +113,38 @@ impl FsWatcher {
                             ) {
                                 continue;
                             }
-
-                            if let Some(file_name) = event.name {
-                                let full_path = &monitor_config.path.join(file_name);
-                                let event_types: Vec<&str> = event
-                                    .mask
-                                    .iter()
-                                    .map(|m| match m {
-                                        EventMask::CREATE => "CREATE",
-                                        EventMask::DELETE => "DELETE",
-                                        EventMask::MODIFY => "MODIFY",
-                                        EventMask::MOVED_FROM => "MOVED_FROM",
-                                        EventMask::MOVED_TO => "MOVED_TO",
-                                        EventMask::CLOSE_WRITE => "CLOSE_WRITE",
-                                        _ => "OTHER",
-                                    })
-                                    .collect();
-
-                                info!(
-                                    sl!(),
-                                    "handle events [{}] {:?} -> {:?}",
-                                    event_types.join("|"),
-                                    event.mask,
-                                    full_path
-                                );
-                                pending_events.lock().await.insert(full_path.clone());
+                            if let Some(name) = event.name {
+                                info!(sl!(), "volume event {:?}: {:?}", event.mask, src.join(name));
+                                last_event_time = Some(Instant::now());
                             }
                         }
                     }
-                    Err(e) => eprintln!("inotify error: {e}"),
+                    Err(err) => eprintln!("inotify error: {err}"),
                 }
 
-                // handle events to be synchronized
-                let events_paths = {
-                    let mut pending = pending_events.lock().await;
-                    pending.drain().collect::<Vec<_>>()
-                };
-                if !events_paths.is_empty() {
-                    *need_sync.lock().await = true;
-                    last_event_time = Some(Instant::now());
-                }
-
-                // Debounce handling
-                // It is used to prevent unnecessary repeated copies when file changes are triggered
-                // multiple times in a short period; we only execute the last one.
-                if let Some(t) = last_event_time {
-                    if Instant::now().duration_since(t) > DEBOUNCE_TIME && *need_sync.lock().await {
-                        info!(sl!(), "debounce handle copyfile {:?} -> {:?}", &src, &dst);
-                        if let Err(e) =
+                // Every event triggers a full copy, so no per-path event state is needed.
+                if let Some(last_event) = last_event_time {
+                    if last_event.elapsed() > DEBOUNCE_TIME {
+                        if let Err(err) =
                             copy_dir_recursively(&src, &dst.to_string_lossy(), &agent).await
                         {
-                            error!(
-                                sl!(),
-                                "debounce handle copyfile {:?} -> {:?} failed with error: {:?}",
-                                &src,
-                                &dst,
-                                e
-                            );
-                            eprintln!("sync host/guest files failed: {e}");
+                            error!(sl!(), "copyfile {:?} -> {:?} failed: {:?}", &src, &dst, err);
                         }
-                        *need_sync.lock().await = false;
                         last_event_time = None;
                     }
                 }
-
                 tokio::time::sleep(MONITOR_INTERVAL).await;
             }
         })
     }
 }
 
-//==========volume manager==============
-/// Sandbox-level volume state manager
-/// Tracks which paths have been copied to the guest on the runtime side
-#[derive(Clone, Default)]
-pub struct VolumeManager {
-    // Mapping of source path -> volume state
-    volume_states: Arc<RwLock<HashMap<String, VolumeState>>>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct VolumeState {
-    // Source path (on the host)
-    source_path: String,
-    // Guest path
-    guest_path: String,
-    // Reference count (how many containers are using it)
-    ref_count: usize,
-    // List of container IDs using this volume
-    containers: HashSet<String>,
-    // Monitor task handle (if any)
-    monitor_task: Option<Arc<JoinHandle<()>>>,
-}
-
-#[allow(dead_code)]
-impl VolumeManager {
-    pub fn new() -> Self {
-        Self {
-            volume_states: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    /// Gets or creates the volume's guest path
-    pub async fn get_or_create_volume(
-        &self,
-        canonical_source: &str,
-        container_id: &str,
-        mount_destination: &Path,
-    ) -> Result<String> {
-        let mut states = self.volume_states.write().await;
-
-        if let Some(state) = states.get_mut(canonical_source) {
-            // Existing volume and update reference
-            state.ref_count += 1;
-            state.containers.insert(container_id.to_string());
-
-            info!(
-                sl!(),
-                "Existing volume: source={:?}, guest={:?}, ref_count={}",
-                canonical_source,
-                state.guest_path,
-                state.ref_count,
-            );
-        }
-
-        // Create a new volume state
-        let guest_path = generate_copy_file_guest_path(container_id, mount_destination)
-            .context("generate path failed")?;
-
-        let mut containers = HashSet::new();
-        containers.insert(container_id.to_string());
-
-        let state = VolumeState {
-            source_path: canonical_source.to_string(),
-            guest_path: guest_path.clone(),
-            ref_count: 1,
-            containers,
-            monitor_task: None,
-        };
-
-        states.insert(state.source_path.clone(), state.clone());
-
-        info!(
-            sl!(),
-            "Created new volume state: source={:?}, guest={:?}",
-            state.source_path,
-            state.guest_path,
-        );
-
-        // Return guest path
-        Ok(guest_path)
-    }
-
-    /// Register monitor task into the volume manager
-    pub async fn register_monitor(
-        &self,
-        canonical_source: &str,
-        monitor_task: Option<JoinHandle<()>>,
-    ) -> Result<()> {
-        let mut states = self.volume_states.write().await;
-
-        if let Some(state) = states.get_mut(canonical_source) {
-            if let Some(handle) = monitor_task {
-                state.monitor_task = Some(Arc::new(handle));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Releases a volume reference
-    pub async fn release_volume(&self, source_path: &str, container_id: &str) -> Result<bool> {
-        let mut states = self.volume_states.write().await;
-
-        let canonical_source = std::fs::canonicalize(source_path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| source_path.to_string());
-
-        if let Some(state) = states.get_mut(&canonical_source) {
-            state.containers.remove(container_id);
-            state.ref_count = state.ref_count.saturating_sub(1);
-
-            if state.ref_count == 0 {
-                // Abort the monitor task
-                if let Some(handle) = &state.monitor_task {
-                    handle.abort();
-                }
-
-                info!(
-                    sl!(),
-                    "Volume has no more references, source={:?}, guest={:?}",
-                    canonical_source,
-                    state.guest_path
-                );
-
-                return Ok(true); // Can be cleaned up
-            }
-        }
-
-        Ok(false)
-    }
-}
-
 impl CopyVolume {
-    pub(crate) async fn new(
-        m: &oci::Mount,
-        cid: &str,
-        agent: Arc<dyn Agent>,
-        volume_manager: Arc<VolumeManager>,
-    ) -> Result<Self> {
+    pub(crate) async fn new(m: &oci::Mount, cid: &str, agent: Arc<dyn Agent>) -> Result<Self> {
         let source_path = get_mount_path(m.source());
         let mut volume = Self {
             mounts: vec![],
-            storages: vec![],
-            volume_manager: Some(volume_manager.clone()),
-            source_path: Some(source_path.clone()),
-            container_id: cid.to_string(),
+            monitor_task: None,
         };
 
         let src = match std::fs::canonicalize(&source_path) {
@@ -456,11 +180,8 @@ impl CopyVolume {
             // source path: "/var/lib/kubelet/pods/6dad7281-57ff-49e4-b844-c588ceabec16/volumes/kubernetes.io~projected/kube-api-access-8s2nl"
             info!(sl!(), "copying directory {:?} to guest", &src);
 
-            // Get or create the guest path
-            let guest_path = volume_manager
-                .get_or_create_volume(&src.to_string_lossy(), cid, m.destination())
-                .await
-                .context("get or create volume")?;
+            let guest_path = generate_copy_file_guest_path(cid, m.destination())
+                .context("generate path failed")?;
 
             // Create directory
             Self::copy_directory_to_guest(&src, &guest_path, &agent)
@@ -470,20 +191,13 @@ impl CopyVolume {
             oci_mount.set_source(Some(PathBuf::from(&guest_path)));
             volume.mounts.push(oci_mount);
 
-            // Start monitoring (only for watchable volumes)
-            let mut monitor_task = None;
             if is_watchable_volume(&src) {
-                let watcher = FsWatcher::new(&src).await?;
-                let handle = watcher
-                    .start_monitor(agent.clone(), src.clone(), PathBuf::from(&guest_path))
-                    .await;
-                monitor_task = Some(handle);
+                volume.monitor_task = Some(FsWatcher::new(&src)?.start_monitor(
+                    agent,
+                    src,
+                    PathBuf::from(&guest_path),
+                ));
             }
-
-            // Register monitor into Volume Manager
-            volume_manager
-                .register_monitor(&src.to_string_lossy(), monitor_task)
-                .await?;
         } else {
             // If not, we can ignore it. Let's issue a warning so that the user knows.
             warn!(
@@ -547,7 +261,6 @@ impl CopyVolume {
             file_size: 0, // useless for dir
             uid: dir_metadata.uid() as i32,
             gid: dir_metadata.gid() as i32,
-            dir_mode: DIR_MODE_PERMS,
             file_mode: dir_metadata.mode(),
             data: vec![], // no files
             ..Default::default()
@@ -583,23 +296,30 @@ impl Volume for CopyVolume {
     }
 
     fn get_storage(&self) -> Result<Vec<agent::Storage>> {
-        Ok(self.storages.clone())
+        Ok(vec![])
     }
 
     async fn cleanup(&self, _device_manager: &RwLock<DeviceManager>) -> Result<()> {
-        if let (Some(manager), Some(source)) = (&self.volume_manager, &self.source_path) {
-            manager.release_volume(source, &self.container_id).await?;
-        }
+        self.stop_monitor();
         // Copied files live until sandbox teardown; no host mount to unmount.
         Ok(())
     }
+}
 
-    fn get_device_id(&self) -> Result<Option<String>> {
-        Ok(None)
+impl CopyVolume {
+    fn stop_monitor(&self) {
+        if let Some(task) = &self.monitor_task {
+            task.abort();
+        }
     }
 }
 
-#[allow(dead_code)]
+impl Drop for CopyVolume {
+    fn drop(&mut self) {
+        self.stop_monitor();
+    }
+}
+
 async fn copy_dir_recursively<P: AsRef<Path>>(
     src_dir: P,
     dest_dir: &str,
@@ -670,7 +390,6 @@ async fn copy_dir_recursively<P: AsRef<Path>>(
                     file_size: 0,
                     uid: metadata.uid() as i32,
                     gid: metadata.gid() as i32,
-                    dir_mode: metadata.mode(),
                     file_mode: metadata.mode(),
                     data: vec![],
                     ..Default::default()
@@ -763,7 +482,7 @@ fn is_system_mount(src: &str) -> bool {
     false
 }
 
-// Note, don't generate random name, attaching rafs depends on the predictable name.
+// Keep the device ID prefix in the generated mount name.
 pub fn generate_mount_path(id: &str, file_name: &str) -> String {
     let mut nid = String::from(id);
     if nid.len() > 10 {
@@ -816,6 +535,58 @@ fn generate_copy_file_guest_path(cid: &str, mount_destination: &Path) -> Result<
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[tokio::test]
+    async fn cleanup_only_stops_the_owned_volume_monitor() {
+        fn monitored_volume() -> (
+            CopyVolume,
+            tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
+        ) {
+            let (sender, mut receiver) =
+                tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(1);
+            let task = tokio::spawn(async move {
+                while let Some(reply) = receiver.recv().await {
+                    let _ = reply.send(());
+                }
+            });
+            (
+                CopyVolume {
+                    mounts: vec![],
+                    monitor_task: Some(task),
+                },
+                sender,
+            )
+        }
+
+        // Two mounts of the same host source still own separate guest copies.
+        let (first, first_monitor) = monitored_volume();
+        let (second, second_monitor) = monitored_volume();
+        let devices = RwLock::new(
+            DeviceManager::new(Arc::new(hypervisor::firecracker::Firecracker::new()))
+                .await
+                .unwrap(),
+        );
+
+        first.cleanup(&devices).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), first_monitor.closed())
+            .await
+            .expect("first monitor must stop");
+        first.cleanup(&devices).await.unwrap();
+        drop(first);
+
+        let (reply, received) = tokio::sync::oneshot::channel();
+        second_monitor.send(reply).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), received)
+            .await
+            .expect("second monitor must keep running")
+            .unwrap();
+
+        // Also cancel if setup fails before the normal volume cleanup path.
+        drop(second);
+        tokio::time::timeout(Duration::from_secs(1), second_monitor.closed())
+            .await
+            .expect("dropping a volume must stop its monitor");
+    }
 
     #[test]
     fn test_is_system_mount() {

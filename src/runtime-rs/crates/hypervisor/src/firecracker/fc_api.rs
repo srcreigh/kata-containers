@@ -355,8 +355,7 @@ mod error_tests {
             stream.write_all(header.as_bytes()).await.unwrap();
             let _ = stream.write_all(&body).await;
         });
-        let (tx, _) = tokio::sync::mpsc::channel(1);
-        let fc = FcInner::new(tx);
+        let fc = FcInner::new();
         let request = Request::builder()
             .uri(hyper::Uri::from(Uri::new(&path, "/")))
             .body(Full::new(Bytes::new()))
@@ -391,8 +390,7 @@ mod error_tests {
                 stream.write_all(response.as_bytes()).await.unwrap();
             }
         });
-        let (tx, _) = tokio::sync::mpsc::channel(1);
-        let fc = FcInner::new(tx);
+        let fc = FcInner::new();
         let uri = Uri::new(&path, "/drives/test").into();
         let error = fc
             .send_request_with_retry(Method::GET, uri, String::new())
@@ -411,8 +409,7 @@ mod cleanup_tests {
 
     #[tokio::test]
     async fn unprepared_cleanup_has_no_host_targets() {
-        let (tx, _) = tokio::sync::mpsc::channel(1);
-        let mut fc = FcInner::new(tx);
+        let mut fc = FcInner::new();
         assert_eq!(fc.cleanup_resource_paths(), None);
         fc.cleanup().await.unwrap();
 
@@ -423,8 +420,7 @@ mod cleanup_tests {
 
     #[test]
     fn prepared_cleanup_targets_stay_inside_the_jail() {
-        let (tx, _) = tokio::sync::mpsc::channel(1);
-        let mut fc = FcInner::new(tx);
+        let mut fc = FcInner::new();
         fc.vm_path = "/run/kata/firecracker/test".into();
         assert_eq!(
             fc.cleanup_resource_paths().unwrap(),

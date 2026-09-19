@@ -11,12 +11,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use kata_sys_util::mount::{get_linux_mount_info, parse_mount_options};
 use nix::mount::MsFlags;
-use regex::Regex;
 use slog::Logger;
-
-use crate::linux_abi::*;
-
-pub const TYPE_ROOTFS: &str = "rootfs";
 
 #[derive(Debug, PartialEq)]
 pub struct InitMount<'a> {
@@ -113,17 +108,7 @@ fn mount_to_rootfs(logger: &Logger, m: &InitMount) -> Result<()> {
     let source = Path::new(m.src);
     let dest = Path::new(m.dest);
 
-    baremount(source, dest, m.fstype, flags, &options, logger).or_else(|e| {
-        if m.src == "dev" {
-            error!(
-                logger,
-                "Could not mount filesystem from {} to {}", m.src, m.dest
-            );
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })
+    baremount(source, dest, m.fstype, flags, &options, logger)
 }
 
 #[tracing::instrument(skip_all)]
@@ -135,41 +120,6 @@ pub fn general_mount(logger: &Logger) -> Result<()> {
     }
 
     Ok(())
-}
-
-#[inline]
-pub fn get_mount_fs_type(mount_point: &str) -> Result<String> {
-    get_mount_fs_type_from_file(PROC_MOUNTSTATS, mount_point)
-}
-
-// get_mount_fs_type_from_file returns the FS type corresponding to the passed mount point and
-// any error encountered.
-
-#[tracing::instrument(skip_all)]
-pub fn get_mount_fs_type_from_file(mount_file: &str, mount_point: &str) -> Result<String> {
-    if mount_point.is_empty() {
-        return Err(anyhow!("Invalid mount point {}", mount_point));
-    }
-
-    let content = fs::read_to_string(mount_file)
-        .map_err(|e| anyhow!("read mount file {}: {}", mount_file, e))?;
-
-    let re = Regex::new(format!("device .+ mounted on {mount_point} with fstype (.+)").as_str())?;
-
-    // Read the file line by line using the lines() iterator from std::io::BufRead.
-    for line in content.lines() {
-        if let Some(capes) = re.captures(line) {
-            if capes.len() > 1 {
-                return Ok(capes[1].to_string());
-            }
-        }
-    }
-
-    Err(anyhow!(
-        "failed to find FS type for mount point {}, mount file content: {:?}",
-        mount_point,
-        content
-    ))
 }
 
 #[tracing::instrument(skip_all)]
@@ -197,9 +147,7 @@ pub fn remove_mounts<P: AsRef<str> + std::fmt::Debug>(mounts: &[P]) -> Result<()
 mod tests {
     use super::*;
     use slog::Drain;
-    use std::fs::File;
     use std::fs::OpenOptions;
-    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -215,9 +163,15 @@ mod tests {
 
         // Detect actual filesystem types mounted in this environment
         // Z runners mount /dev as tmpfs, while normal systems use devtmpfs
-        let dev_fs_type = get_mount_fs_type("/dev").unwrap_or_else(|_| String::from("devtmpfs"));
-        let proc_fs_type = get_mount_fs_type("/proc").unwrap_or_else(|_| String::from("proc"));
-        let sys_fs_type = get_mount_fs_type("/sys").unwrap_or_else(|_| String::from("sysfs"));
+        let dev_fs_type = get_linux_mount_info("/dev")
+            .map(|info| info.fs_type)
+            .unwrap_or_else(|_| String::from("devtmpfs"));
+        let proc_fs_type = get_linux_mount_info("/proc")
+            .map(|info| info.fs_type)
+            .unwrap_or_else(|_| String::from("proc"));
+        let sys_fs_type = get_linux_mount_info("/sys")
+            .map(|info| info.fs_type)
+            .unwrap_or_else(|_| String::from("sysfs"));
 
         let test_cases = [
             ("dev", "/dev", dev_fs_type.as_str()),
@@ -264,7 +218,9 @@ mod tests {
         let logger = slog::Logger::root(drain, o!());
 
         // Detect filesystem type of root directory
-        let tmp_fs_type = get_mount_fs_type("/").unwrap_or_else(|_| String::from("unknown"));
+        let tmp_fs_type = get_linux_mount_info("/")
+            .map(|info| info.fs_type)
+            .unwrap_or_else(|_| String::from("unknown"));
 
         // Error messages that vary based on filesystem type
         const DEFAULT_ERROR_EPERM: &str = "Operation not permitted";
@@ -513,114 +469,16 @@ mod tests {
     }
 
     #[test]
-    fn test_get_mount_fs_type_from_file() {
-        #[derive(Debug)]
-        struct TestData<'a> {
-            // Create file with the specified contents
-            // (even if a nul string is specified).
-            contents: &'a str,
-            mount_point: &'a str,
-
-            // If set, assume an error will be generated,
-            // else assume no error.
-            error_contains: &'a str,
-
-            // successful return value
-            fs_type: &'a str,
-        }
-
-        let dir = tempdir().expect("failed to create tmpdir");
-
-        let tests = &[
-            TestData {
-                contents: "",
-                mount_point: "",
-                error_contains: "Invalid mount point",
-                fs_type: "",
-            },
-            TestData {
-                contents: "foo",
-                mount_point: "",
-                error_contains: "Invalid mount point",
-                fs_type: "",
-            },
-            TestData {
-                contents: "foo",
-                mount_point: "/",
-                error_contains: "failed to find FS type for mount point /",
-                fs_type: "",
-            },
-            TestData {
-                // contents missing fields
-                contents: "device /dev/mapper/root mounted on /",
-                mount_point: "/",
-                error_contains: "failed to find FS type for mount point /",
-                fs_type: "",
-            },
-            TestData {
-                contents: "device /dev/mapper/root mounted on / with fstype ext4",
-                mount_point: "/",
-                error_contains: "",
-                fs_type: "ext4",
-            },
-        ];
-
-        let enoent_file_path = dir.path().join("enoent");
-        let enoent_filename = enoent_file_path
-            .to_str()
-            .expect("failed to create enoent filename");
-
-        // First, test that an empty mount file is handled
-        for (i, mp) in ["/", "/somewhere", "/tmp", enoent_filename]
-            .iter()
-            .enumerate()
-        {
-            let msg = format!("missing mount file test[{i}] with mountpoint: {mp}");
-
-            let result = get_mount_fs_type_from_file("", mp);
-            let err = result.unwrap_err();
-
-            let msg = format!("{msg}: error: {err}");
-
-            assert!(
-                format!("{err}").contains("No such file or directory"),
-                "{}",
-                msg
-            );
-        }
-
-        // Now, test various combinations of file contents
-        for (i, d) in tests.iter().enumerate() {
-            let msg = format!("test[{i}]: {d:?}");
-
-            let file_path = dir.path().join("mount_stats");
-
-            let filename = file_path
-                .to_str()
-                .unwrap_or_else(|| panic!("{}: failed to create filename", msg));
-
-            let mut file =
-                File::create(filename).unwrap_or_else(|_| panic!("{}: failed to create file", msg));
-
-            file.write_all(d.contents.as_bytes())
-                .unwrap_or_else(|_| panic!("{}: failed to write file contents", msg));
-
-            let result = get_mount_fs_type_from_file(filename, d.mount_point);
-
-            // add more details if an assertion fails
-            let msg = format!("{msg}: result: {result:?}");
-
-            if d.error_contains.is_empty() {
-                let fs_type = result.unwrap();
-
-                assert!(d.fs_type == fs_type, "{}", msg);
-
-                continue;
-            }
-
-            let error_msg = format!("{}", result.unwrap_err());
-            assert!(error_msg.contains(d.error_contains), "{}", msg);
-        }
+    fn initial_device_mount_failure_is_not_ignored() {
+        let directory = tempdir().unwrap();
+        let logger = Logger::root(slog::Discard, o!());
+        let mount = InitMount {
+            fstype: "kata-fc-unsupported-fs",
+            src: "dev",
+            dest: directory.path().to_str().unwrap(),
+            options: vec![],
+        };
+        assert!(mount_to_rootfs(&logger, &mount).is_err());
     }
 
     #[test]
@@ -659,6 +517,7 @@ mod tests {
                 test_user: TestUserType::NonRootOnly,
                 src: "dev",
                 mask_src: false,
+                error_contains: "EPERM: Operation not permitted",
                 ..Default::default()
             },
             TestData {

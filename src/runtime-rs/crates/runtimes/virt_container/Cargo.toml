@@ -13,7 +13,6 @@ containerd-shim-protos = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true }
 protobuf = { workspace = true }
-sendfd = { version = "0.4.3", features = ["tokio"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 slog = { workspace = true }
@@ -24,7 +23,6 @@ url = { workspace = true }
 tracing = { workspace = true }
 oci-spec = { workspace = true }
 strum = { workspace = true }
-uuid = { version = "1", features = ["v4"] }
 
 # Local dependencies
 agent = { workspace = true }
@@ -39,15 +37,6 @@ resource = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-
-[features]
-default = []
-
-# Enable the Cloud Hypervisor driver
-
-# Enable the build-in VMM Dragtonball
-
-# Enable the OpenVMM driver
 
 [package.metadata.cargo-machete]
 ignored = ["slog-scope"]

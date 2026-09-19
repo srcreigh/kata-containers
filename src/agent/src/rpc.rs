@@ -10,7 +10,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
-use std::convert::TryFrom;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::os::unix::ffi::OsStrExt;
@@ -53,7 +52,6 @@ use std::os::fd::AsRawFd;
 
 use crate::metrics::get_metrics;
 use crate::mount::baremount;
-use crate::namespace::{NSTYPEIPC, NSTYPEPID, NSTYPEUTS};
 use crate::network::setup_guest_dns;
 use crate::sandbox::{Sandbox, SandboxError};
 use crate::storage::add_storages;
@@ -288,13 +286,12 @@ impl AgentService {
 
         update_container_namespaces(&s, &mut oci, use_sandbox_pidns)?;
 
-        // Write the OCI spec to the container bundle.
+        // Prepare the rootfs mount inside the container bundle.
         let olddir = setup_bundle(&cid, &mut oci)?;
         // restore the cwd for kata-agent process.
         defer!(unistd::chdir(&olddir).unwrap());
 
         let opts = CreateOpts {
-            no_pivot_root: s.no_pivot_root,
             spec: Some(oci.clone()),
         };
 
@@ -450,7 +447,7 @@ impl AgentService {
             // it will ignore the "SIGTERM" signal sent to it, thus send it "SIGKILL" signal
             // instead of "SIGTERM" to terminate it.
             let proc_status_file = format!("/proc/{}/status", p.pid);
-            if p.init && sig == libc::SIGTERM && !is_signal_handled(&proc_status_file, sig as u32) {
+            if p.init && sig == libc::SIGTERM && !is_sigterm_handled(&proc_status_file) {
                 sig = libc::SIGKILL;
             }
 
@@ -1406,7 +1403,7 @@ fn update_container_namespaces(
 
     if let Some(namespaces) = linux.namespaces_mut() {
         for namespace in namespaces.iter_mut() {
-            if namespace.typ().to_string() == NSTYPEIPC {
+            if namespace.typ() == oci::LinuxNamespaceType::Ipc {
                 namespace.set_path(if !sandbox.shared_ipcns.path.is_empty() {
                     Some(PathBuf::from(&sandbox.shared_ipcns.path))
                 } else {
@@ -1414,7 +1411,7 @@ fn update_container_namespaces(
                 });
                 continue;
             }
-            if namespace.typ().to_string() == NSTYPEUTS {
+            if namespace.typ() == oci::LinuxNamespaceType::Uts {
                 namespace.set_path(if !sandbox.shared_utsns.path.is_empty() {
                     Some(PathBuf::from(&sandbox.shared_utsns.path))
                 } else {
@@ -1426,7 +1423,7 @@ fn update_container_namespaces(
 
         // update pid namespace
         let mut pid_ns = LinuxNamespace::default();
-        pid_ns.set_typ(oci::LinuxNamespaceType::try_from(NSTYPEPID).unwrap());
+        pid_ns.set_typ(oci::LinuxNamespaceType::Pid);
 
         // Use shared pid ns if useSandboxPidns has been set in either
         // the create_sandbox request or create_container request.
@@ -1434,8 +1431,8 @@ fn update_container_namespaces(
         // created for the container.
         if sandbox_pidns {
             if let Some(ref pidns) = &sandbox.sandbox_pidns {
-                if !pidns.path.is_empty() {
-                    pid_ns.set_path(Some(PathBuf::from(&pidns.path)));
+                if !pidns.is_empty() {
+                    pid_ns.set_path(Some(PathBuf::from(pidns)));
                 }
             } else if !sandbox.containers.is_empty() {
                 return Err(anyhow!(ERR_NO_SANDBOX_PIDNS));
@@ -1477,23 +1474,8 @@ async fn remove_container_resources(sandbox: &mut Sandbox, cid: &str) -> Result<
     Ok(())
 }
 
-// Check if the container process installed the
-// handler for specific signal.
-fn is_signal_handled(proc_status_file: &str, signum: u32) -> bool {
-    let shift_count: u64 = if signum == 0 {
-        // signum 0 is used to check for process liveness.
-        // Since that signal is not part of the mask in the file, we only need
-        // to know if the file (and therefore) process exists to handle
-        // that signal.
-        return fs::metadata(proc_status_file).is_ok();
-    } else if signum > 64 {
-        // Ensure invalid signum won't break bit shift logic
-        warn!(sl(), "received invalid signum {}", signum);
-        return false;
-    } else {
-        (signum - 1).into()
-    };
-
+// Only the init-process SIGTERM fallback needs to inspect these masks.
+fn is_sigterm_handled(proc_status_file: &str) -> bool {
     // Open the file in read-only mode (ignoring errors).
     let file = match File::open(proc_status_file) {
         Ok(f) => f,
@@ -1503,7 +1485,7 @@ fn is_signal_handled(proc_status_file: &str, signum: u32) -> bool {
         }
     };
 
-    let sig_mask: u64 = 1 << shift_count;
+    const SIGTERM_MASK: u64 = 1 << (libc::SIGTERM - 1);
     let reader = BufReader::new(file);
 
     // read lines start with SigBlk/SigIgn/SigCgt and check any match the signal mask
@@ -1520,7 +1502,7 @@ fn is_signal_handled(proc_status_file: &str, signum: u32) -> bool {
             if mask_vec.len() == 2 {
                 let sig_str = mask_vec[1].trim();
                 if let Ok(sig) = u64::from_str_radix(sig_str, 16) {
-                    return sig & sig_mask == sig_mask;
+                    return sig & SIGTERM_MASK == SIGTERM_MASK;
                 }
             }
             false
@@ -1683,7 +1665,6 @@ fn do_copy_file(req: &CopyFileRequest, shared_dir: &PathBuf) -> Result<()> {
 // Setup container bundle under CONTAINER_BASE, which is cleaned up
 // before removing a container.
 // - bundle path is /<CONTAINER_BASE>/<cid>/
-// - config.json at /<CONTAINER_BASE>/<cid>/config.json
 // - container rootfs bind mounted at /<CONTAINER_BASE>/<cid>/rootfs
 // - modify container spec root to point to /<CONTAINER_BASE>/<cid>/rootfs
 pub fn setup_bundle(cid: &str, spec: &mut Spec) -> Result<PathBuf> {
@@ -1694,7 +1675,6 @@ pub fn setup_bundle(cid: &str, spec: &mut Spec) -> Result<PathBuf> {
     };
 
     let bundle_path = Path::new(CONTAINER_BASE).join(cid);
-    let config_path = bundle_path.join("config.json");
     let rootfs_path = bundle_path.join("rootfs");
     let spec_root_path = spec_root.path();
 
@@ -1721,12 +1701,6 @@ pub fn setup_bundle(cid: &str, spec: &mut Spec) -> Result<PathBuf> {
     oci_root.set_readonly(spec_root.readonly());
     spec.set_root(Some(oci_root));
 
-    let _ = spec.save(
-        config_path
-            .to_str()
-            .ok_or_else(|| anyhow!("cannot convert path to unicode"))?,
-    );
-
     let olddir = unistd::getcwd().context("cannot getcwd")?;
     unistd::chdir(
         bundle_path
@@ -1743,7 +1717,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::{namespace::Namespace, protocols::agent_ttrpc_async::AgentService as _};
+    use crate::protocols::agent_ttrpc_async::AgentService as _;
     use anyhow::{bail, ensure};
     use nix::mount;
     use oci::{
@@ -2155,10 +2129,7 @@ mod tests {
             .build()
             .unwrap();
 
-        CreateOpts {
-            no_pivot_root: false,
-            spec: Some(spec),
-        }
+        CreateOpts { spec: Some(spec) }
     }
 
     fn create_linuxcontainer() -> (LinuxContainer, TempDir) {
@@ -2476,9 +2447,7 @@ mod tests {
             let logger = slog::Logger::root(slog::Discard, o!());
             let mut sandbox = Sandbox::new(&logger).unwrap();
             if let Some(pidns_path) = d.sandbox_pidns_path {
-                let mut sandbox_pidns = Namespace::new(&logger);
-                sandbox_pidns.path = pidns_path.to_string();
-                sandbox.sandbox_pidns = Some(sandbox_pidns);
+                sandbox.sandbox_pidns = Some(pidns_path.to_string());
             }
 
             let mut oci = Spec::default();
@@ -2504,124 +2473,28 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_is_signal_handled() {
-        #[derive(Debug)]
-        struct TestData<'a> {
-            status_file_data: Option<&'a str>,
-            signum: u32,
-            result: bool,
-        }
-
-        let tests = &[
-            TestData {
-                status_file_data: Some(
-                    r#"
-SigBlk:0000000000010000
-SigCgt:0000000000000001
-OtherField:other
-                "#,
-                ),
-                signum: 1,
-                result: true,
-            },
-            TestData {
-                status_file_data: Some("SigCgt:000000004b813efb"),
-                signum: 4,
-                result: true,
-            },
-            TestData {
-                status_file_data: Some("SigCgt:\t000000004b813efb"),
-                signum: 4,
-                result: true,
-            },
-            TestData {
-                status_file_data: Some("SigCgt: 000000004b813efb"),
-                signum: 4,
-                result: true,
-            },
-            TestData {
-                status_file_data: Some("SigCgt:000000004b813efb "),
-                signum: 4,
-                result: true,
-            },
-            TestData {
-                status_file_data: Some("SigCgt:\t000000004b813efb "),
-                signum: 4,
-                result: true,
-            },
-            TestData {
-                status_file_data: Some("SigCgt:000000004b813efb"),
-                signum: 3,
-                result: false,
-            },
-            TestData {
-                status_file_data: Some("SigCgt:000000004b813efb"),
-                signum: 65,
-                result: false,
-            },
-            TestData {
-                status_file_data: Some("SigCgt:000000004b813efb"),
-                signum: 0,
-                result: true,
-            },
-            TestData {
-                status_file_data: Some("SigCgt:ZZZZZZZZ"),
-                signum: 1,
-                result: false,
-            },
-            TestData {
-                status_file_data: Some("SigCgt:-1"),
-                signum: 1,
-                result: false,
-            },
-            TestData {
-                status_file_data: Some("SigCgt"),
-                signum: 1,
-                result: false,
-            },
-            TestData {
-                status_file_data: Some("any data"),
-                signum: 0,
-                result: true,
-            },
-            TestData {
-                status_file_data: Some("SigBlk:0000000000000001"),
-                signum: 1,
-                result: true,
-            },
-            TestData {
-                status_file_data: Some("SigIgn:0000000000000001"),
-                signum: 1,
-                result: true,
-            },
-            TestData {
-                status_file_data: None,
-                signum: 1,
-                result: false,
-            },
-            TestData {
-                status_file_data: None,
-                signum: 0,
-                result: false,
-            },
-        ];
-
-        for (i, d) in tests.iter().enumerate() {
-            let msg = format!("test[{i}]: {d:?}");
-
-            let dir = tempdir().expect("failed to make tempdir");
-            let proc_status_file_path = dir.path().join("status");
-
-            if let Some(file_data) = d.status_file_data {
-                fs::write(&proc_status_file_path, file_data).unwrap();
-            }
-
-            let result = is_signal_handled(proc_status_file_path.to_str().unwrap(), d.signum);
-
-            let msg = format!("{msg}, result: {result:?}");
-
-            assert_eq!(d.result, result, "{msg}");
+    #[test]
+    fn test_is_sigterm_handled() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("status");
+        assert!(!is_sigterm_handled(path.to_str().unwrap()));
+        for (contents, expected) in [
+            ("SigBlk:0000000000004000", true),
+            ("SigIgn:0000000000004000", true),
+            ("SigCgt:\t0000000000004000 ", true),
+            ("Other:0000000000004000\nSigCgt:0000000000000001", false),
+            ("SigBlk:0\nSigIgn:0\nSigCgt:0000000000004000", true),
+            ("SigCgt:ZZZZ", false),
+            ("SigCgt:-1", false),
+            ("SigCgt", false),
+            ("", false),
+        ] {
+            fs::write(&path, contents).unwrap();
+            assert_eq!(
+                is_sigterm_handled(path.to_str().unwrap()),
+                expected,
+                "{contents}"
+            );
         }
     }
 
@@ -3239,6 +3112,30 @@ OtherField:other
     }
 
     impl rustjail::cgroups::Manager for BlockingStatsManager {
+        fn apply(&self, _: i32) -> anyhow::Result<()> {
+            bail!("not supported!")
+        }
+
+        fn get_pids(&self) -> anyhow::Result<Vec<i32>> {
+            bail!("not supported!")
+        }
+
+        fn freeze(&self, _: FreezerState) -> anyhow::Result<()> {
+            bail!("not supported!")
+        }
+
+        fn destroy(&self) -> anyhow::Result<()> {
+            bail!("not supported!")
+        }
+
+        fn set(&self, _: &oci::LinuxResources) -> anyhow::Result<()> {
+            bail!("not supported!")
+        }
+
+        fn get_cgroup_path(&self) -> anyhow::Result<String> {
+            bail!("not supported!")
+        }
+
         fn get_stats(&self) -> anyhow::Result<protocols::agent::CgroupStats> {
             self.started
                 .store(true, std::sync::atomic::Ordering::SeqCst);

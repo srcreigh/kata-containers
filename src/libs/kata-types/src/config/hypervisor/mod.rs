@@ -56,9 +56,6 @@ mod firecracker;
 pub use self::firecracker::{FirecrackerConfig, HYPERVISOR_NAME_FIRECRACKER};
 
 const NO_VIRTIO_FS: &str = "none";
-const VIRTIO_FS: &str = "virtio-fs";
-const VIRTIO_FS_INLINE: &str = "inline-virtio-fs";
-const VIRTIO_FS_NYDUS: &str = "virtio-fs-nydus";
 const MAX_BRIDGE_SIZE: u32 = 5;
 const MAX_NETWORK_QUEUES: u32 = 256;
 
@@ -394,11 +391,6 @@ impl BlockDeviceInfo {
 
         Ok(())
     }
-
-    /// Validate path of vhost-user storage backend.
-    pub fn validate_vhost_user_store_path<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        validate_path_pattern(&self.valid_vhost_user_store_paths, path)
-    }
 }
 
 /// Validate that a block device sector size is 0 or a power of 2 in [512, 65536].
@@ -528,88 +520,6 @@ impl BootInfo {
             p.push(self.kernel_params.clone());
         }
         self.kernel_params = p.join(KERNEL_PARAM_DELIMITER);
-    }
-
-    /// Replace kernel parameters with the same key.
-    ///
-    /// For each parameter in the new_params string, if a parameter with the same key
-    /// already exists in kernel_params, it will be removed before adding the new one.
-    /// This allows selective parameter override from annotations without replacing
-    /// the entire kernel command line.
-    pub fn replace_kernel_params(&mut self, new_params: &str) {
-        if new_params.is_empty() {
-            return;
-        }
-
-        // Parse existing kernel parameters into a map
-        let mut existing_params: Vec<(String, String)> = Vec::new();
-        for param in self.kernel_params.split(KERNEL_PARAM_DELIMITER) {
-            let param = param.trim();
-            if param.is_empty() {
-                continue;
-            }
-            // Split by '=' to get key and value
-            if let Some(eq_pos) = param.find('=') {
-                let key = param[..eq_pos].to_string();
-                let value = param[eq_pos + 1..].to_string();
-                existing_params.push((key, value));
-            } else {
-                // Parameter without value (like "quiet")
-                existing_params.push((param.to_string(), String::new()));
-            }
-        }
-
-        // Parse new parameters and collect keys to replace
-        let mut new_param_keys: Vec<String> = Vec::new();
-        let mut new_param_list: Vec<String> = Vec::new();
-        for param in new_params.split(KERNEL_PARAM_DELIMITER) {
-            let param = param.trim();
-            if param.is_empty() {
-                continue;
-            }
-            if let Some(eq_pos) = param.find('=') {
-                let key = param[..eq_pos].to_string();
-                new_param_keys.push(key);
-            } else {
-                new_param_keys.push(param.to_string());
-            }
-            new_param_list.push(param.to_string());
-        }
-
-        // Remove existing parameters that will be replaced
-        existing_params.retain(|(key, _)| !new_param_keys.contains(key));
-
-        // Reconstruct kernel_params: existing params + new params
-        let mut all_params: Vec<String> = existing_params
-            .iter()
-            .map(|(key, value)| {
-                if value.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{key}={value}")
-                }
-            })
-            .collect();
-        all_params.extend(new_param_list);
-
-        self.kernel_params = all_params.join(KERNEL_PARAM_DELIMITER);
-    }
-
-    /// Replace kernel dm-verity parameters after validation.
-    pub fn replace_kernel_verity_params(&mut self, new_params: &str) -> Result<()> {
-        if new_params.trim().is_empty() {
-            return Ok(());
-        }
-
-        parse_kernel_verity_params(new_params)?;
-        self.kernel_verity_params = new_params.to_string();
-        Ok(())
-    }
-
-    /// Validate guest kernel image annotation.
-    pub fn validate_boot_path(&self, path: &str) -> Result<()> {
-        validate_path!(path, "path {} is invalid{}")?;
-        Ok(())
     }
 }
 
@@ -909,11 +819,6 @@ impl MachineInfo {
         validate_path!(self.entropy_source, "Entropy source {} is invalid: {}")?;
         Ok(())
     }
-
-    /// Validate path of entropy source.
-    pub fn validate_entropy_source<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        validate_path_pattern(&self.valid_entropy_sources, path)
-    }
 }
 
 /// Huge page type for VM RAM backend
@@ -1027,80 +932,6 @@ impl MemoryInfo {
         if self.default_maxmemory == 0 || u64::from(self.default_maxmemory) > host_memory {
             self.default_maxmemory = host_memory as u32;
         }
-
-        // Apply PowerPC64 memory alignment
-        #[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
-        self.adjust_ppc64_memory_alignment()?;
-
-        Ok(())
-    }
-
-    /// Adjusts memory values for PowerPC64 little-endian systems to meet
-    /// QEMU's 256MB block size alignment requirement.
-    ///
-    /// Ensures default_memory is at least 1024MB and both default_memory
-    /// and default_maxmemory are aligned to 256MB boundaries.
-    /// Returns an error if aligned values would be equal.
-    #[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
-    fn adjust_ppc64_memory_alignment(&mut self) -> Result<()> {
-        const PPC64_MEM_BLOCK_SIZE: u64 = 256;
-        const MIN_MEMORY_MB: u64 = 1024;
-
-        fn align_memory(value: u64) -> u64 {
-            (value / PPC64_MEM_BLOCK_SIZE) * PPC64_MEM_BLOCK_SIZE
-        }
-
-        let mut mem_size = u64::from(self.default_memory);
-        let max_mem_size = u64::from(self.default_maxmemory);
-
-        // Ensure minimum memory size
-        if mem_size < MIN_MEMORY_MB {
-            info!(
-                sl!(),
-                "PowerPC: Increasing default_memory from {}MB to minimum {}MB",
-                mem_size,
-                MIN_MEMORY_MB
-            );
-            mem_size = MIN_MEMORY_MB;
-        }
-
-        // Align both values to 256MB boundaries
-        let aligned_mem = align_memory(mem_size);
-        let aligned_max_mem = align_memory(max_mem_size);
-
-        if aligned_mem != mem_size {
-            info!(
-                sl!(),
-                "PowerPC: Aligned default_memory from {}MB to {}MB", mem_size, aligned_mem
-            );
-        }
-
-        if aligned_max_mem != max_mem_size {
-            info!(
-                sl!(),
-                "PowerPC: Aligned default_maxmemory from {}MB to {}MB",
-                max_mem_size,
-                aligned_max_mem
-            );
-        }
-
-        // Check if aligned values are equal
-        if aligned_max_mem != 0 && aligned_max_mem <= aligned_mem {
-            return Err(std::io::Error::other(format!(
-                "PowerPC: default_maxmemory ({}MB) <= default_memory ({}MB) after alignment. \
-                Requires maxmemory > memory. Please increase default_maxmemory.",
-                aligned_max_mem, aligned_mem
-            )));
-        }
-        info!(
-            sl!(),
-            "PowerPC: Memory alignment applied - memory: {}MB, max_memory: {}MB",
-            aligned_mem,
-            aligned_max_mem
-        );
-
-        self.default_memory = aligned_mem as u32;
-        self.default_maxmemory = aligned_max_mem as u32;
 
         Ok(())
     }
@@ -1350,12 +1181,6 @@ impl SecurityInfo {
         }
         false
     }
-
-    /// Validates a given file system path.
-    pub fn validate_path(&self, path: &str) -> Result<()> {
-        validate_path!(path, "path {} is invalid{}")?;
-        Ok(())
-    }
 }
 
 /// Configuration information for shared filesystems, such as virtio-fs-nydus and virtio-fs.
@@ -1409,102 +1234,19 @@ pub struct SharedFsInfo {
 }
 
 impl SharedFsInfo {
-    /// Adjusts the shared filesystem configuration after loading from a configuration file.
-    ///
-    /// Handles default values for `shared_fs` type, `virtio-fs` specific settings
-    /// (daemon path, cache mode, DAX) or `inline-virtio-fs` settings.
+    /// Normalize the disabled shared-filesystem setting.
     pub fn adjust_config(&mut self) -> Result<()> {
         if self.shared_fs.as_deref() == Some(NO_VIRTIO_FS) {
             self.shared_fs = None;
-            return Ok(());
         }
-
-        if self.shared_fs.as_deref() == Some("") {
-            self.shared_fs = Some(default::DEFAULT_SHARED_FS_TYPE.to_string());
-        }
-        match self.shared_fs.as_deref() {
-            Some(VIRTIO_FS) => self.adjust_virtio_fs(false)?,
-            Some(VIRTIO_FS_INLINE) => self.adjust_virtio_fs(true)?,
-            Some(VIRTIO_FS_NYDUS) => self.adjust_virtio_fs(false)?,
-            _ => {}
-        }
-
-        Ok(())
+        self.validate()
     }
 
-    /// Validates the shared filesystem configuration.
-    ///
-    /// Checks the validity of the selected `shared_fs` type and
-    /// performs specific validations for `virtio-fs` and `inline-virtio-fs` settings.
+    /// Firecracker uses block and copied volumes, without a shared-filesystem device.
     pub fn validate(&self) -> Result<()> {
-        match self.shared_fs.as_deref() {
-            None => Ok(()),
-            Some(VIRTIO_FS) => self.validate_virtio_fs(false),
-            Some(VIRTIO_FS_INLINE) => self.validate_virtio_fs(true),
-            Some(VIRTIO_FS_NYDUS) => self.validate_virtio_fs(false),
-            Some(v) => Err(std::io::Error::other(format!("Invalid shared_fs type {v}"))),
-        }
-    }
-
-    /// Validates the path of the virtio-fs daemon, especially for annotations.
-    pub fn validate_virtiofs_daemon_path<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        validate_path_pattern(&self.valid_virtio_fs_daemon_paths, path)
-    }
-
-    /// Adjusts virtio-fs specific configuration settings.
-    ///
-    /// Handles `virtio_fs_daemon` path resolution (unless in inline mode),
-    /// default `virtio_fs_cache` mode, and `virtio_fs_is_dax` with `virtio_fs_cache_size`.
-    fn adjust_virtio_fs(&mut self, inline: bool) -> Result<()> {
-        // inline mode doesn't need external virtiofsd daemon
-        if !inline {
-            resolve_path!(
-                self.virtio_fs_daemon,
-                "Virtio-fs daemon path {} is invalid: {}"
-            )?;
-        }
-
-        if self.virtio_fs_cache.is_empty() {
-            self.virtio_fs_cache = default::DEFAULT_VIRTIO_FS_CACHE_MODE.to_string();
-        }
-        if self.virtio_fs_cache == *"none" {
-            warn!(sl!(), "virtio-fs cache mode `none` is deprecated since Kata Containers 2.5.0 and will be removed in the future release, please use `never` instead. For more details please refer to https://github.com/kata-containers/kata-containers/issues/4234.");
-            self.virtio_fs_cache = default::DEFAULT_VIRTIO_FS_CACHE_MODE.to_string();
-        }
-        if self.virtio_fs_is_dax && self.virtio_fs_cache_size == 0 {
-            self.virtio_fs_cache_size = default::DEFAULT_VIRTIO_FS_DAX_SIZE_MB;
-        }
-        if !self.virtio_fs_is_dax && self.virtio_fs_cache_size != 0 {
-            self.virtio_fs_is_dax = true;
-        }
-        Ok(())
-    }
-
-    /// Validates virtio-fs specific configuration settings.
-    ///
-    /// Checks the validity of the `virtio_fs_daemon` path (unless in inline mode),
-    /// `virtio_fs_cache` mode, and `virtio_fs_is_dax` with `virtio_fs_cache_size`.
-    fn validate_virtio_fs(&self, inline: bool) -> Result<()> {
-        // inline mode doesn't need external virtiofsd daemon
-        if !inline {
-            validate_path!(
-                self.virtio_fs_daemon,
-                "Virtio-fs daemon path {} is invalid: {}"
-            )?;
-        }
-
-        let l = ["never", "auto", "always"];
-
-        if !l.contains(&self.virtio_fs_cache.as_str()) {
-            return Err(std::io::Error::other(format!(
-                "Invalid virtio-fs cache mode: {}",
-                &self.virtio_fs_cache,
-            )));
-        }
-        if self.virtio_fs_is_dax && self.virtio_fs_cache_size == 0 {
-            return Err(std::io::Error::other(format!(
-                "Invalid virtio-fs DAX window size: {}",
-                &self.virtio_fs_cache_size,
+        if let Some(kind) = &self.shared_fs {
+            return Err(io::Error::other(format!(
+                "kata-fc: shared filesystem {kind:?} is unsupported"
             )));
         }
         Ok(())
@@ -1715,23 +1457,6 @@ fn yes() -> bool {
     true
 }
 
-impl Hypervisor {
-    /// Validates the path of the hypervisor executable against configured patterns.
-    pub fn validate_hypervisor_path<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        validate_path_pattern(&self.valid_hypervisor_paths, path)
-    }
-
-    /// Validates the path of the hypervisor control executable against configured patterns.
-    pub fn validate_hypervisor_ctlpath<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        validate_path_pattern(&self.valid_ctlpaths, path)
-    }
-
-    /// Validates the path of the jailer executable against configured patterns.
-    pub fn validate_jailer_path<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        validate_path_pattern(&self.valid_jailer_paths, path)
-    }
-}
-
 fn reject_unsupported_hypervisor(conf: &TomlConfig) -> Result<()> {
     if !conf.runtime.hypervisor_name.is_empty()
         && conf.runtime.hypervisor_name != HYPERVISOR_NAME_FIRECRACKER
@@ -1773,8 +1498,10 @@ impl ConfigOps for Hypervisor {
                 })?;
                 hv.blockdev_info.adjust_config()?;
                 hv.boot_info.adjust_config()?;
-                for extra in &mut hv.guest_extension_images {
-                    resolve_path!(extra.path, "extra image file {} is invalid: {}")?;
+                if !hv.guest_extension_images.is_empty() {
+                    return Err(io::Error::other(
+                        "kata-fc: guest extension images are unsupported",
+                    ));
                 }
                 hv.cpu_info.adjust_config()?;
                 hv.debug_info.adjust_config()?;
@@ -1822,34 +1549,10 @@ impl ConfigOps for Hypervisor {
                 let hv = conf.hypervisor.get(hypervisor).unwrap();
                 hv.blockdev_info.validate()?;
                 hv.boot_info.validate()?;
-                for extra in &hv.guest_extension_images {
-                    validate_path!(extra.path, "extra image file {} is invalid: {}")?;
-                    if extra.name.is_empty() {
-                        return Err(std::io::Error::other(
-                            "guest_extension_images entry is missing required 'name' field",
-                        ));
-                    }
-                    if !extra
-                        .name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                    {
-                        return Err(std::io::Error::other(format!(
-                            "guest_extension_images '{}' has an invalid name: only ASCII \
-                             alphanumerics, '-' and '_' are allowed (the name is used in the \
-                             virtio-blk serial and in the kata.extension.<name>.verity_params \
-                             kernel parameter)",
-                            extra.name
-                        )));
-                    }
-                    if !extra.verity_params.trim().is_empty() {
-                        parse_kernel_verity_params(&extra.verity_params).map_err(|e| {
-                            std::io::Error::other(format!(
-                                "guest_extension_images '{}' has invalid verity_params: {}",
-                                extra.name, e
-                            ))
-                        })?;
-                    }
+                if !hv.guest_extension_images.is_empty() {
+                    return Err(io::Error::other(
+                        "kata-fc: guest extension images are unsupported",
+                    ));
                 }
                 hv.cpu_info.validate()?;
                 hv.debug_info.validate()?;
@@ -1897,10 +1600,45 @@ mod vendor {
 mod vendor;
 
 pub use self::vendor::HypervisorVendor;
-use crate::config::validate_path_pattern;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_filesystems_are_rejected_without_daemon_resolution() {
+        for kind in ["", "virtio-fs", "inline-virtio-fs", "virtio-fs-nydus"] {
+            let mut shared = SharedFsInfo {
+                shared_fs: Some(kind.into()),
+                ..Default::default()
+            };
+            assert!(shared
+                .adjust_config()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported"));
+        }
+        let mut disabled = SharedFsInfo {
+            shared_fs: Some("none".into()),
+            ..Default::default()
+        };
+        disabled.adjust_config().unwrap();
+        assert!(disabled.shared_fs.is_none());
+        SharedFsInfo::default().validate().unwrap();
+    }
+
+    #[test]
+    fn extension_images_are_rejected_before_resolving_their_paths() {
+        FirecrackerConfig::new().register();
+        let result = TomlConfig::load(
+            r#"
+            [hypervisor.firecracker]
+            kernel = "/dev/null"
+            image = "/dev/null"
+            guest_extension_images = [{ name = "extra", path = "/does/not/exist" }]
+        "#,
+        );
+        assert!(result.unwrap_err().to_string().contains("unsupported"));
+    }
 
     #[test]
     fn test_register_plugin() {
@@ -2065,74 +1803,6 @@ mod tests {
         assert_eq!(mem.overhead_memory, 512);
         assert_eq!(mem.default_memory, 1024);
         assert_eq!(mem.default_maxmemory, 4096);
-    }
-
-    #[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
-    use rstest::rstest;
-
-    #[rstest]
-    #[case::memory_below_minimum(512, 2048, 1024, 2048)]
-    #[case::already_aligned(1024, 2048, 1024, 2048)]
-    #[case::unaligned_rounds_down(1100, 2100, 1024, 2048)]
-    #[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
-    fn test_adjust_ppc64_memory_alignment_success(
-        #[case] input_memory: u32,
-        #[case] input_maxmemory: u32,
-        #[case] expected_memory: u32,
-        #[case] expected_maxmemory: u32,
-    ) {
-        let mut mem = MemoryInfo {
-            default_memory: input_memory,
-            default_maxmemory: input_maxmemory,
-            ..Default::default()
-        };
-
-        let result = mem.adjust_ppc64_memory_alignment();
-        assert!(
-            result.is_ok(),
-            "Expected success but got error: {:?}",
-            result.err()
-        );
-        assert_eq!(
-            mem.default_memory, expected_memory,
-            "Memory not aligned correctly"
-        );
-        assert_eq!(
-            mem.default_maxmemory, expected_maxmemory,
-            "Max memory not aligned correctly"
-        );
-    }
-
-    #[rstest]
-    #[case::equal_after_alignment(1024, 1100, "Requires maxmemory > memory")]
-    #[case::maxmemory_less_than_memory(2048, 1500, "Requires maxmemory > memory")]
-    #[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
-    fn test_adjust_ppc64_memory_alignment_errors(
-        #[case] input_memory: u32,
-        #[case] input_maxmemory: u32,
-        #[case] expected_error_msg: &str,
-    ) {
-        let mut mem = MemoryInfo {
-            default_memory: input_memory,
-            default_maxmemory: input_maxmemory,
-            ..Default::default()
-        };
-
-        let result = mem.adjust_ppc64_memory_alignment();
-        assert!(
-            result.is_err(),
-            "Expected error but got success for memory={}, maxmemory={}",
-            input_memory,
-            input_maxmemory
-        );
-
-        let error_msg = result.unwrap_err().to_string();
-        assert!(
-            error_msg.contains(expected_error_msg),
-            "Error message '{}' does not contain expected text '{}'",
-            error_msg,
-            expected_error_msg
-        );
     }
 
     #[test]

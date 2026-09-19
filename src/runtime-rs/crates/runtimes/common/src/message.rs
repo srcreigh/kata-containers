@@ -8,15 +8,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use containerd_shim_protos::events::task::{TaskCreate, TaskDelete, TaskExit, TaskOOM, TaskStart};
 use containerd_shim_protos::protobuf::Message as ProtobufMessage;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-
-/// message receiver buffer size
-const MESSAGE_RECEIVER_BUFFER_SIZE: usize = 1;
 
 #[derive(Debug)]
 pub enum Action {
-    Start,
-    Stop,
     Shutdown,
     Event(Arc<dyn Event + Send + Sync>),
 }
@@ -24,26 +18,11 @@ pub enum Action {
 #[derive(Debug)]
 pub struct Message {
     pub action: Action,
-    pub resp_sender: Option<Sender<Result<()>>>,
 }
 
 impl Message {
     pub fn new(action: Action) -> Self {
-        Message {
-            action,
-            resp_sender: None,
-        }
-    }
-
-    pub fn new_with_receiver(action: Action) -> (Receiver<Result<()>>, Self) {
-        let (resp_sender, receiver) = channel(MESSAGE_RECEIVER_BUFFER_SIZE);
-        (
-            receiver,
-            Message {
-                action,
-                resp_sender: Some(resp_sender),
-            },
-        )
+        Self { action }
     }
 }
 

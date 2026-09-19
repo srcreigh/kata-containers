@@ -9,19 +9,12 @@ use std::convert::From;
 use containerd_shim_protos::cgroups::metrics;
 use protobuf::Message;
 
-use super::{StatsInfo, StatsInfoValue};
+use super::StatsInfo;
 
 // TODO: trans from agent proto?
-impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
-    fn from(c_stats: Option<agent::StatsContainerResponse>) -> Self {
+impl From<agent::StatsContainerResponse> for StatsInfo {
+    fn from(stats: agent::StatsContainerResponse) -> Self {
         let mut metric = metrics::Metrics::new();
-        let stats = match c_stats {
-            None => {
-                return StatsInfo { value: None };
-            }
-            Some(stats) => stats,
-        };
-
         if let Some(cg_stats) = stats.cgroup_stats.into_option() {
             if let Some(cpu) = cg_stats.cpu_stats.into_option() {
                 // set protobuf cpu stat
@@ -115,10 +108,8 @@ impl From<Option<agent::StatsContainerResponse>> for StatsInfo {
         }
 
         StatsInfo {
-            value: Some(StatsInfoValue {
-                type_url: "io.containerd.cgroups.v1.Metrics".to_string(),
-                value: metric.write_to_bytes().unwrap(),
-            }),
+            type_url: "io.containerd.cgroups.v1.Metrics".to_string(),
+            value: metric.write_to_bytes().unwrap(),
         }
     }
 }
@@ -192,7 +183,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let info = StatsInfo::from(Some(stats)).value.unwrap();
+        let info = StatsInfo::from(stats);
         assert_eq!(info.type_url, "io.containerd.cgroups.v1.Metrics");
         let result = metrics::Metrics::parse_from_bytes(&info.value).unwrap();
         assert_eq!(result.cpu().usage().total(), 123);
@@ -203,6 +194,5 @@ mod tests {
         assert_eq!(result.blkio().io_service_bytes_recursive()[0].value(), 512);
         assert_eq!(result.hugetlb()[0].pagesize(), "2MB");
         assert!(result.network().is_empty());
-        assert!(StatsInfo::from(None).value.is_none());
     }
 }

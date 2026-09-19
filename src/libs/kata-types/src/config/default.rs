@@ -6,9 +6,6 @@
 //! Default configuration values.
 #![allow(missing_docs)]
 
-use crate::config::agent::AGENT_NAME_KATA;
-use crate::config::hypervisor::HYPERVISOR_NAME_FIRECRACKER;
-use crate::config::runtime::RUNTIME_NAME_VIRTCONTAINER;
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -21,16 +18,10 @@ lazy_static! {
     ];
 }
 
-pub const DEFAULT_AGENT_NAME: &str = "kata-agent";
 pub const DEFAULT_AGENT_VSOCK_PORT: u32 = 1024;
 pub const DEFAULT_AGENT_LOG_PORT: u32 = 1025;
-pub const DEFAULT_AGENT_DBG_CONSOLE_PORT: u32 = 1026;
 pub const DEFAULT_PASSFD_LISTENER_PORT: u32 = 1027;
-pub const DEFAULT_AGENT_TYPE_NAME: &str = AGENT_NAME_KATA;
 pub const DEFAULT_AGENT_DIAL_TIMEOUT_MS: u32 = 10;
-
-pub const DEFAULT_RUNTIME_NAME: &str = RUNTIME_NAME_VIRTCONTAINER;
-pub const DEFAULT_HYPERVISOR: &str = HYPERVISOR_NAME_FIRECRACKER;
 
 pub const DEFAULT_INTERNETWORKING_MODEL: &str = "tcfilter";
 
@@ -43,11 +34,6 @@ pub const DEFAULT_BLOCK_DEVICE_AIO: &str = "io_uring";
 pub const DEFAULT_BLOCK_DEVICE_NUM_QUEUES: u32 = 1;
 pub const DEFAULT_BLOCK_DEVICE_QUEUE_SIZE: u32 = 128;
 
-pub const DEFAULT_SHARED_FS_TYPE: &str = "virtio-fs";
-pub const DEFAULT_VIRTIO_FS_CACHE_MODE: &str = "never";
-pub const DEFAULT_VIRTIO_FS_DAX_SIZE_MB: u32 = 1024;
-
-pub const DEFAULT_GUEST_HOOK_PATH: &str = "/opt/kata/hooks";
 pub const DEFAULT_GUEST_DNS_FILE: &str = "/etc/resolv.conf";
 
 pub const DEFAULT_GUEST_VCPUS: u32 = 1;
@@ -55,12 +41,7 @@ pub const DEFAULT_GUEST_VCPUS: u32 = 1;
 //Default configuration for firecracker
 pub const DEFAULT_FIRECRACKER_ENTROPY_SOURCE: &str = "/dev/urandom";
 pub const DEFAULT_FIRECRACKER_MEMORY_SIZE_MB: u32 = 128;
-pub const DEFAULT_FIRECRACKER_MEMORY_SLOTS: u32 = 128;
-pub const DEFAULT_FIRECRACKER_VCPUS: u32 = 1;
 pub const DEFAULT_FIRECRACKER_GUEST_KERNEL_IMAGE: &str = "vmlinux";
 pub const DEFAULT_FIRECRACKER_GUEST_KERNEL_PARAMS: &str = "";
 pub const MAX_FIRECRACKER_VCPUS: u32 = 32;
 pub const MIN_FIRECRACKER_MEMORY_SIZE_MB: u32 = 128;
-
-// Default configuration for factory/templating
-pub const DEFAULT_TEMPLATE_PATH: &str = "/run/vc/vm/template";

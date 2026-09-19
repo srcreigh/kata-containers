@@ -37,7 +37,6 @@ bytes = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
-serde_json = { workspace = true }
 nix = { workspace = true }
 url = { workspace = true }
 procfs = "0.12.0"
@@ -59,11 +58,7 @@ hypervisor = { workspace = true }
 resource = { workspace = true }
 
 # Local dependencies: runtime handler
-virt_container = { workspace = true, optional = true }
-
-[features]
-default = ["virt"]
-virt = ["virt_container"]
+virt_container = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = ["hyper-jaeger"]

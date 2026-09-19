@@ -16,9 +16,6 @@ use std::path::{Path, PathBuf};
 use crate::mount::baremount;
 
 const PERSISTENT_NS_DIR: &str = "/var/run/sandbox-ns";
-pub const NSTYPEIPC: &str = "ipc";
-pub const NSTYPEUTS: &str = "uts";
-pub const NSTYPEPID: &str = "pid";
 
 #[tracing::instrument(skip_all)]
 pub fn get_current_thread_ns_path(ns_type: &str) -> String {
@@ -62,20 +59,13 @@ impl Namespace {
         self
     }
 
-    #[tracing::instrument(skip_all)]
-    pub fn get_pid(mut self) -> Self {
-        self.ns_type = NamespaceType::Pid;
-        self
-    }
-
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn set_root_dir(mut self, dir: &str) -> Self {
         self.persistent_ns_dir = dir.to_string();
         self
     }
 
-    // setup creates persistent namespace without switching to it.
-    // Note, pid namespaces cannot be persisted.
+    // setup creates a persistent IPC or UTS namespace without switching to it.
 
     #[allow(clippy::question_mark)]
     pub async fn setup(mut self) -> Result<Self> {
@@ -83,9 +73,6 @@ impl Namespace {
 
         let ns_path = PathBuf::from(&self.persistent_ns_dir);
         let ns_type = self.ns_type;
-        if ns_type == NamespaceType::Pid {
-            return Err(anyhow!("Cannot persist namespace of PID type"));
-        }
         let logger = self.logger.clone();
 
         let new_ns_path = ns_path.join(ns_type.get());
@@ -149,7 +136,6 @@ impl Namespace {
 enum NamespaceType {
     Ipc,
     Uts,
-    Pid,
 }
 
 impl NamespaceType {
@@ -158,7 +144,6 @@ impl NamespaceType {
         match *self {
             Self::Ipc => "ipc",
             Self::Uts => "uts",
-            Self::Pid => "pid",
         }
     }
 
@@ -167,7 +152,6 @@ impl NamespaceType {
         match *self {
             Self::Ipc => CloneFlags::CLONE_NEWIPC,
             Self::Uts => CloneFlags::CLONE_NEWUTS,
-            Self::Pid => CloneFlags::CLONE_NEWPID,
         }
     }
 }
@@ -214,24 +198,11 @@ mod tests {
 
         assert!(ns_uts.is_ok());
         assert!(remove_mounts(&[ns_uts.unwrap().path]).is_ok());
-
-        // Check it cannot persist pid namespaces.
-        let logger = slog::Logger::root(slog::Discard, o!());
-        let tmpdir = Builder::new().prefix("pid").tempdir().unwrap();
-
-        let ns_pid = Namespace::new(&logger)
-            .get_pid()
-            .set_root_dir(tmpdir.path().to_str().unwrap())
-            .setup()
-            .await;
-
-        assert!(ns_pid.is_err());
     }
 
     #[rstest]
     #[case::ipc(NamespaceType::Ipc, "ipc", CloneFlags::CLONE_NEWIPC)]
     #[case::uts(NamespaceType::Uts, "uts", CloneFlags::CLONE_NEWUTS)]
-    #[case::pid(NamespaceType::Pid, "pid", CloneFlags::CLONE_NEWPID)]
     fn test_namespace_type(
         #[case] ns_type: NamespaceType,
         #[case] ns_name: &str,
@@ -281,15 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_pid() {
-        // Create dummy logger and temp folder.
-        let logger = slog::Logger::root(slog::Discard, o!());
-
-        let ns_pid = Namespace::new(&logger).get_pid();
-        assert_eq!(NamespaceType::Pid, ns_pid.ns_type);
-    }
-
-    #[test]
     fn test_set_root_dir() {
         // Create dummy logger and temp folder.
         let logger = slog::Logger::root(slog::Discard, o!());
@@ -303,7 +265,6 @@ mod tests {
     #[rstest]
     #[case::namespace_type_get_ipc(NamespaceType::Ipc, "ipc")]
     #[case::namespace_type_get_uts(NamespaceType::Uts, "uts")]
-    #[case::namespace_type_get_pid(NamespaceType::Pid, "pid")]
     fn test_namespace_type_get(#[case] ns_type: NamespaceType, #[case] ns_name: &str) {
         assert_eq!(ns_name, ns_type.get())
     }
@@ -311,7 +272,6 @@ mod tests {
     #[rstest]
     #[case::namespace_type_get_flags_ipc(NamespaceType::Ipc, CloneFlags::CLONE_NEWIPC)]
     #[case::namespace_type_get_flags_uts(NamespaceType::Uts, CloneFlags::CLONE_NEWUTS)]
-    #[case::namespace_type_get_flags_pid(NamespaceType::Pid, CloneFlags::CLONE_NEWPID)]
     fn test_namespace_type_get_flags(#[case] ns_type: NamespaceType, #[case] ns_flag: CloneFlags) {
         // Run the tests
         assert_eq!(ns_flag, ns_type.get_flags())

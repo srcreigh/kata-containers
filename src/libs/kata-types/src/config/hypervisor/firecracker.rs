@@ -169,7 +169,7 @@ default_vcpus = 1
 default_maxvcpus = 2
 default_memory = 256
 memory_slots = 1
-enable_annotations = ["default_memory", "default_vcpus", "kernel"]
+enable_annotations = ["default_memory", "default_vcpus"]
 [agent.kata]
 [runtime]
 name = "virt_container"
@@ -190,10 +190,6 @@ disable_guest_seccomp = true
                 crate::annotations::KATA_ANNO_CFG_HYPERVISOR_DEFAULT_VCPUS.into(),
                 "2".into(),
             ),
-            (
-                crate::annotations::KATA_ANNO_CFG_HYPERVISOR_KERNEL_PATH.into(),
-                "/dev/null".into(),
-            ),
         ]));
         annotations.update_config_by_annotation(&mut conf).unwrap();
         conf.validate().unwrap();
@@ -211,7 +207,11 @@ disable_guest_seccomp = true
                 format!("[runtime]\nhypervisor_name='{name}'"),
             ] {
                 let err = TomlConfig::load(&content).unwrap_err();
-                assert!(err.to_string().contains("unsupported hypervisor"), "{err}");
+                assert!(
+                    err.to_string().contains("unsupported hypervisor"),
+                    "{}",
+                    err
+                );
             }
         }
     }
@@ -237,7 +237,10 @@ disable_guest_seccomp = true
             let err = annotations
                 .update_config_by_annotation(&mut TomlConfig::default())
                 .unwrap_err();
-            assert!(err.to_string().contains("initdata is unsupported"));
+            assert_eq!(
+                err.to_string(),
+                "kata-fc-minimal: unsupported configuration annotation io.katacontainers.config.hypervisor.cc_init_data"
+            );
         }
     }
 }

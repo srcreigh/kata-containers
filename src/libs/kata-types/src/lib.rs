@@ -35,18 +35,8 @@ pub mod mount;
 
 pub(crate) mod utils;
 
-/// hypervisor capabilities
-pub mod capabilities;
-
 /// Filesystem-related constants
 pub mod fs;
-
-/// rootless vmm
-pub mod rootless;
-
-use std::path::Path;
-
-use crate::rootless::{is_rootless, rootless_dir};
 
 /// Common error codes.
 #[derive(thiserror::Error, Debug)]
@@ -95,24 +85,4 @@ macro_rules! validate_path {
             Ok(())
         }
     }};
-}
-
-/// Prefix a path with the VMM's rootless runtime directory.
-///
-/// The path is returned unchanged when the VMM is not running rootless.
-pub fn prefix_with_rootless_dir(path: &str) -> String {
-    if is_rootless() {
-        let path = Path::new(path);
-        let path = if path.is_absolute() {
-            path.strip_prefix("/").unwrap_or(path)
-        } else {
-            path
-        };
-        Path::new(&rootless_dir())
-            .join(path)
-            .to_string_lossy()
-            .to_string()
-    } else {
-        path.to_string()
-    }
 }

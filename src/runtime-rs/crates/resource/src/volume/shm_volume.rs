@@ -47,10 +47,6 @@ impl Volume for ShmVolume {
         // does not require explicit unmounting or deletion in host side.
         Ok(())
     }
-
-    fn get_device_id(&self) -> Result<Option<String>> {
-        Ok(None)
-    }
 }
 
 pub(crate) fn is_shm_volume(m: &oci::Mount) -> bool {

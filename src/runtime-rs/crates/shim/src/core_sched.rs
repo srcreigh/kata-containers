@@ -23,32 +23,14 @@
 use anyhow::Result;
 use nix::{self, errno::Errno};
 
-#[allow(dead_code)]
-pub const PID_GROUP: usize = 0;
-#[allow(dead_code)]
-pub const THREAD_GROUP: usize = 1;
 pub const PROCESS_GROUP: usize = 2;
 
-#[allow(dead_code)]
 pub const PR_SCHED_CORE: i32 = 62;
 pub const PR_SCHED_CORE_CREATE: usize = 1;
-pub const PR_SCHED_CORE_SHARE_FROM: usize = 3;
 
 // create a new core sched domain, this will NOT succeed if kernel version < 5.14
 pub fn core_sched_create(pidtype: usize) -> Result<(), Errno> {
     let errno = unsafe { nix::libc::prctl(PR_SCHED_CORE, PR_SCHED_CORE_CREATE, 0, pidtype, 0) };
-    if errno != 0 {
-        Err(nix::errno::Errno::from_raw(-errno))
-    } else {
-        Ok(())
-    }
-}
-
-// shares the domain with *pid*
-#[allow(dead_code)]
-pub fn core_sched_share_from(pid: usize, pidtype: usize) -> Result<(), Errno> {
-    let errno =
-        unsafe { nix::libc::prctl(PR_SCHED_CORE, PR_SCHED_CORE_SHARE_FROM, pid, pidtype, 0) };
     if errno != 0 {
         Err(nix::errno::Errno::from_raw(-errno))
     } else {

@@ -5,9 +5,7 @@
 //
 
 use super::Volume;
-use crate::volume::utils::{
-    handle_block_volume, is_block_device_readonly, DEFAULT_VOLUME_FS_TYPE, KATA_MOUNT_BIND_TYPE,
-};
+use crate::volume::utils::{handle_block_volume, is_block_device_readonly, KATA_MOUNT_BIND_TYPE};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use hypervisor::{
@@ -24,7 +22,7 @@ use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub(crate) struct BlockVolume {
-    storage: Option<agent::Storage>,
+    storage: agent::Storage,
     mount: oci::Mount,
     device_id: String,
 }
@@ -76,13 +74,16 @@ impl BlockVolume {
         .await
         .context("do handle device failed.")?;
 
+        // This caller receives OCI bind mounts whose source is a block node
+        // (for example Kubernetes hostPath.type=BlockDevice). Preserve the
+        // raw node rather than guessing a filesystem from its destination.
         let block_volume =
-            handle_block_volume(device_info, m, read_only, sid, DEFAULT_VOLUME_FS_TYPE, None)
+            handle_block_volume(device_info, m, read_only, sid, KATA_MOUNT_BIND_TYPE, None)
                 .await
                 .context("do handle block volume failed")?;
 
         Ok(Self {
-            storage: Some(block_volume.0),
+            storage: block_volume.0,
             mount: block_volume.1,
             device_id: block_volume.2,
         })
@@ -96,13 +97,7 @@ impl Volume for BlockVolume {
     }
 
     fn get_storage(&self) -> Result<Vec<agent::Storage>> {
-        let s = if let Some(s) = self.storage.as_ref() {
-            vec![s.clone()]
-        } else {
-            vec![]
-        };
-
-        Ok(s)
+        Ok(vec![self.storage.clone()])
     }
 
     async fn cleanup(&self, device_manager: &RwLock<DeviceManager>) -> Result<()> {
@@ -111,10 +106,6 @@ impl Volume for BlockVolume {
             .await
             .try_remove_device(&self.device_id)
             .await
-    }
-
-    fn get_device_id(&self) -> Result<Option<String>> {
-        Ok(Some(self.device_id.clone()))
     }
 }
 

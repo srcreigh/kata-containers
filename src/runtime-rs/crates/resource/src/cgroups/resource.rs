@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use hypervisor::Hypervisor;
 use kata_types::config::TomlConfig;
 use oci_spec::runtime::LinuxResources;
 use persist::sandbox_persist::Persist;
@@ -19,14 +18,8 @@ use crate::cgroups::resource_inner::CgroupsResourceInner;
 use crate::cgroups::{CgroupArgs, CgroupConfig};
 use crate::ResourceUpdateOp;
 
-/// CgroupsResource manages sandbox cgroup and overhead cgroup.
-///
-/// Putting the processes under the cgroup from OCI spec (a.k.a sandbox
-/// cgroup) by default. The container runtime (e.g. containerd) imposes
-/// limits on the parent of that cgroup. In case of disabling
-/// `sandbox_cgroup_only`, the runtime and other components except for VMM
-/// (e.g. virtiofsd) are put under the overhead cgroup, which no resource
-/// limits are imposed on it.
+/// CgroupsResource places the runtime and Firecracker in the sandbox cgroup,
+/// preserving the orchestrator's whole-sandbox CPU and memory accounting.
 pub struct CgroupsResource {
     cgroup_config: CgroupConfig,
     inner: Arc<RwLock<CgroupsResourceInner>>,
@@ -56,15 +49,14 @@ impl CgroupsResource {
         cid: &str,
         resources: Option<&LinuxResources>,
         op: ResourceUpdateOp,
-        hypervisor: &dyn Hypervisor,
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
-        inner.update(cid, resources, op, hypervisor).await
+        inner.update(cid, resources, op).await
     }
 
-    pub async fn setup_after_start_vm(&self, hypervisor: &dyn Hypervisor) -> Result<()> {
+    pub async fn setup_after_start_vm(&self) -> Result<()> {
         let mut inner = self.inner.write().await;
-        inner.setup_after_start_vm(hypervisor).await
+        inner.setup_after_start_vm().await
     }
 }
 
@@ -76,9 +68,8 @@ impl Persist for CgroupsResource {
     async fn save(&self) -> Result<Self::State> {
         Ok(CgroupState {
             path: Some(self.cgroup_config.path.clone()),
-            overhead_path: Some(self.cgroup_config.overhead_path.clone()),
-            sandbox_cgroup_only: self.cgroup_config.sandbox_cgroup_only,
-            enable_vcpus_pinning: self.cgroup_config.enable_vcpus_pinning,
+            sandbox_cgroup_only: true,
+            enable_vcpus_pinning: false,
         })
     }
 

@@ -24,11 +24,11 @@ macro_rules! log_child {
         let mut log_str = format_args!($($arg)+).to_string();
         log_str.push('\n');
         // Ignore error writing to the logger, not much we can do
-        let _ = write_count(lfd, log_str.as_bytes(), log_str.len());
+        let _ = write_count(lfd, log_str.as_bytes());
     })
 }
 
-pub fn write_count(fd: RawFd, buf: &[u8], count: usize) -> Result<usize> {
+pub fn write_count(fd: RawFd, buf: &[u8]) -> Result<()> {
     let mut len = 0;
 
     loop {
@@ -36,7 +36,7 @@ pub fn write_count(fd: RawFd, buf: &[u8], count: usize) -> Result<usize> {
         match unistd::write(borrowed_fd, &buf[len..]) {
             Ok(l) => {
                 len += l;
-                if len == count {
+                if len == buf.len() {
                     break;
                 }
             }
@@ -49,7 +49,7 @@ pub fn write_count(fd: RawFd, buf: &[u8], count: usize) -> Result<usize> {
         }
     }
 
-    Ok(len)
+    Ok(())
 }
 
 fn read_count(fd: RawFd, count: usize) -> Result<Vec<u8>> {
@@ -81,20 +81,12 @@ fn read_count(fd: RawFd, count: usize) -> Result<Vec<u8>> {
             len
         ))
     } else {
-        Ok(v[0..len].to_vec())
+        Ok(v)
     }
 }
 
 pub fn read_sync(fd: RawFd) -> Result<Vec<u8>> {
     let buf = read_count(fd, MSG_SIZE)?;
-    if buf.len() != MSG_SIZE {
-        return Err(anyhow!(
-            "process: {} failed to receive sync message from peer: got msg length: {}, expected: {}",
-            std::process::id(),
-            buf.len(),
-            MSG_SIZE
-        ));
-    }
     let buf_array: [u8; MSG_SIZE] = [buf[0], buf[1], buf[2], buf[3]];
     let msg: i32 = i32::from_be_bytes(buf_array);
     match msg {
@@ -107,30 +99,8 @@ pub fn read_sync(fd: RawFd) -> Result<Vec<u8>> {
 
             Ok(data_buf)
         }
-        SYNC_FAILED => {
-            let mut error_buf = vec![];
-            loop {
-                let buf = read_count(fd, DATA_SIZE)?;
-
-                error_buf.extend(&buf);
-                if DATA_SIZE == buf.len() {
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
-            let error_str = match std::str::from_utf8(&error_buf) {
-                Ok(v) => String::from(v),
-                Err(e) => {
-                    return Err(
-                        anyhow!(e).context("receive error message from child process failed")
-                    );
-                }
-            };
-
-            Err(anyhow!(error_str))
-        }
+        // The parent sends only data and acknowledgements. Errors flow from
+        // this child to read_async in the parent.
         _ => Err(anyhow!("error in receive sync message")),
     }
 }
@@ -138,14 +108,11 @@ pub fn read_sync(fd: RawFd) -> Result<Vec<u8>> {
 pub fn write_sync(fd: RawFd, msg_type: i32, data_str: &str) -> Result<()> {
     let buf = msg_type.to_be_bytes();
 
-    let count = write_count(fd, &buf, MSG_SIZE)?;
-    if count != MSG_SIZE {
-        return Err(anyhow!("error in send sync message"));
-    }
+    write_count(fd, &buf)?;
 
     match msg_type {
-        SYNC_FAILED => match write_count(fd, data_str.as_bytes(), data_str.len()) {
-            Ok(_count) => unistd::close(fd)?,
+        SYNC_FAILED => match write_count(fd, data_str.as_bytes()) {
+            Ok(()) => unistd::close(fd)?,
             Err(e) => {
                 unistd::close(fd)?;
                 return Err(anyhow!(e).context("error in send message to process"));
@@ -153,12 +120,12 @@ pub fn write_sync(fd: RawFd, msg_type: i32, data_str: &str) -> Result<()> {
         },
         SYNC_DATA => {
             let length: i32 = data_str.len() as i32;
-            write_count(fd, &length.to_be_bytes(), MSG_SIZE).or_else(|e| {
+            write_count(fd, &length.to_be_bytes()).or_else(|e| {
                 unistd::close(fd)?;
                 Err(anyhow!(e).context("error in send message to process"))
             })?;
 
-            write_count(fd, data_str.as_bytes(), data_str.len()).or_else(|e| {
+            write_count(fd, data_str.as_bytes()).or_else(|e| {
                 unistd::close(fd)?;
                 Err(anyhow!(e).context("error in send message to process"))
             })?;
@@ -168,4 +135,20 @@ pub fn write_sync(fd: RawFd, msg_type: i32, data_str: &str) -> Result<()> {
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    #[test]
+    fn child_rejects_parent_error_and_short_header() {
+        for bytes in [SYNC_FAILED.to_be_bytes().to_vec(), vec![0, 0]] {
+            let (reader, writer) = unistd::pipe().unwrap();
+            unistd::write(&writer, &bytes).unwrap();
+            drop(writer);
+            assert!(read_sync(reader.as_raw_fd()).is_err());
+        }
+    }
 }

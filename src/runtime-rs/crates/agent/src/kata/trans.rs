@@ -12,8 +12,8 @@ use crate::{
     CreateContainerRequest, CreateSandboxRequest, Empty, ExecProcessRequest, FSGroup,
     FSGroupChangePolicy, GetDiagnosticDataRequest, IPAddress, IPFamily, Interface,
     ReadStreamRequest, RemoveContainerRequest, Route, Routes, SignalProcessRequest, Storage,
-    StringUser, TtyWinResizeRequest, UpdateContainerRequest, UpdateInterfaceRequest,
-    UpdateRoutesRequest, VolumeStatsRequest, WaitProcessRequest, WriteStreamRequest,
+    TtyWinResizeRequest, UpdateContainerRequest, UpdateInterfaceRequest, UpdateRoutesRequest,
+    VolumeStatsRequest, WaitProcessRequest, WriteStreamRequest,
 };
 use protocols::{agent, health, types};
 
@@ -38,17 +38,6 @@ impl From<FSGroup> for agent::FSGroup {
         Self {
             group_id: from.group_id,
             group_change_policy: policy.into(),
-            ..Default::default()
-        }
-    }
-}
-
-impl From<StringUser> for agent::StringUser {
-    fn from(from: StringUser) -> Self {
-        Self {
-            uid: from.uid,
-            gid: from.gid,
-            additionalGids: from.additional_gids,
             ..Default::default()
         }
     }
@@ -138,13 +127,9 @@ impl From<CreateContainerRequest> for agent::CreateContainerRequest {
             container_id: from.process_id.container_id(),
             exec_id: from.process_id.exec_id(),
             devices: trans_vec(from.devices),
-            string_user: from_option(from.string_user),
             storages: trans_vec(from.storages),
             OCI: from_option(from.oci),
             sandbox_pidns: from.sandbox_pidns,
-            stdin_port: from.stdin_port.unwrap_or_default(),
-            stdout_port: from.stdout_port.unwrap_or_default(),
-            stderr_port: from.stderr_port.unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -243,11 +228,7 @@ impl From<ExecProcessRequest> for agent::ExecProcessRequest {
         Self {
             container_id: from.process_id.container_id(),
             exec_id: from.process_id.exec_id(),
-            string_user: from_option(from.string_user),
             process: from_option(from.process),
-            stdin_port: from.stdin_port.unwrap_or_default(),
-            stdout_port: from.stdout_port.unwrap_or_default(),
-            stderr_port: from.stderr_port.unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -354,7 +335,6 @@ impl From<CopyFileRequest> for agent::CopyFileRequest {
             path: from.path,
             file_size: from.file_size,
             file_mode: from.file_mode,
-            dir_mode: from.dir_mode,
             uid: from.uid,
             gid: from.gid,
             offset: from.offset,

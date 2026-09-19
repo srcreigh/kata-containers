@@ -21,7 +21,6 @@ extern crate protobuf;
 extern crate slog;
 #[macro_use]
 extern crate scan_fmt;
-extern crate path_absolutize;
 extern crate regex;
 
 pub mod capabilities;

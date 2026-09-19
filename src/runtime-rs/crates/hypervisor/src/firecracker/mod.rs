@@ -10,23 +10,21 @@ mod inner_hypervisor;
 mod mac;
 
 use super::HypervisorState;
-use crate::{device::DeviceType, Hypervisor, HypervisorConfig, VcpuThreadIds};
+use crate::{device::DeviceType, Hypervisor, HypervisorConfig};
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use inner::FcInner;
-use kata_types::capabilities::Capabilities;
 use persist::sandbox_persist::Persist;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 
 #[derive(Debug)]
 pub struct Firecracker {
     inner: Arc<RwLock<FcInner>>,
-    exit_waiter: Mutex<(mpsc::Receiver<()>, i32)>,
+    exit_code: Mutex<i32>,
 }
 
 // Convenience function to set the scope.
@@ -42,11 +40,9 @@ impl Default for Firecracker {
 
 impl Firecracker {
     pub fn new() -> Self {
-        let (exit_notify, exit_waiter) = mpsc::channel(1);
-
         Self {
-            inner: Arc::new(RwLock::new(FcInner::new(exit_notify))),
-            exit_waiter: Mutex::new((exit_waiter, 0)),
+            inner: Arc::new(RwLock::new(FcInner::new())),
+            exit_code: Mutex::new(0),
         }
     }
 
@@ -81,35 +77,26 @@ impl Hypervisor for Firecracker {
 
     async fn wait_vm(&self) -> Result<i32> {
         debug!(sl(), "Wait fc sandbox");
-        let mut waiter = self.exit_waiter.lock().await;
+        let mut waiter = self.exit_code.lock().await;
 
         loop {
             {
                 let inner = self.inner.read().await;
                 match inner.wait_vm().await {
                     Ok(Some(code)) => {
-                        waiter.1 = code;
+                        *waiter = code;
                         return Ok(code);
                     }
                     Ok(None) => {}
-                    Err(_) => return Ok(waiter.1),
+                    Err(_) => return Ok(*waiter),
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 
-    async fn add_device(&self, device: DeviceType) -> Result<DeviceType> {
-        let mut inner = self.inner.write().await;
-        match inner.add_device(device.clone()).await {
-            Ok(_) => Ok(device),
-            Err(err) => Err(err),
-        }
-    }
-
-    async fn remove_device(&self, device: DeviceType) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.remove_device(device).await
+    async fn add_device(&self, device: DeviceType) -> Result<()> {
+        self.inner.write().await.add_device(device).await
     }
 
     async fn get_agent_socket(&self) -> Result<String> {
@@ -122,19 +109,9 @@ impl Hypervisor for Firecracker {
         inner.hypervisor_config()
     }
 
-    async fn get_thread_ids(&self) -> Result<VcpuThreadIds> {
-        let inner = self.inner.read().await;
-        inner.get_thread_ids().await
-    }
-
     async fn cleanup(&self) -> Result<()> {
         let inner = self.inner.read().await;
         inner.cleanup().await
-    }
-
-    async fn get_pids(&self) -> Result<Vec<u32>> {
-        let inner = self.inner.read().await;
-        inner.get_pids().await
     }
 
     async fn get_vmm_master_tid(&self) -> Result<u32> {
@@ -142,18 +119,8 @@ impl Hypervisor for Firecracker {
         inner.get_vmm_master_tid().await
     }
 
-    async fn get_jailer_root(&self) -> Result<String> {
-        let inner = self.inner.read().await;
-        inner.get_jailer_root().await
-    }
-
     async fn save_state(&self) -> Result<HypervisorState> {
         self.save().await
-    }
-
-    async fn capabilities(&self) -> Result<Capabilities> {
-        let inner = self.inner.read().await;
-        inner.capabilities().await
     }
 }
 #[async_trait]
@@ -170,12 +137,11 @@ impl Persist for Firecracker {
         _hypervisor_args: Self::ConstructorArgs,
         hypervisor_state: Self::State,
     ) -> Result<Self> {
-        let (exit_notify, exit_waiter) = mpsc::channel(1);
-        let inner = FcInner::restore(exit_notify, hypervisor_state).await?;
+        let inner = FcInner::restore((), hypervisor_state).await?;
 
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
-            exit_waiter: Mutex::new((exit_waiter, 0)),
+            exit_code: Mutex::new(0),
         })
     }
 }

@@ -17,17 +17,15 @@ const HEALTH_CHECK_TIMER_INTERVAL: u64 = 30;
 const HEALTH_CHECK_STOP_CHANNEL_BUFFER_SIZE: usize = 1;
 
 pub struct HealthCheck {
-    pub keep_alive: bool,
     keep_abnormal: bool,
     stop_tx: mpsc::Sender<()>,
     stop_rx: Arc<Mutex<mpsc::Receiver<()>>>,
 }
 
 impl HealthCheck {
-    pub fn new(keep_alive: bool, keep_abnormal: bool) -> HealthCheck {
+    pub fn new(keep_abnormal: bool) -> HealthCheck {
         let (tx, rx) = mpsc::channel(HEALTH_CHECK_STOP_CHANNEL_BUFFER_SIZE);
         HealthCheck {
-            keep_alive,
             keep_abnormal,
             stop_tx: tx,
             stop_rx: Arc::new(Mutex::new(rx)),
@@ -35,9 +33,6 @@ impl HealthCheck {
     }
 
     pub fn start(&self, id: &str, agent: Arc<dyn Agent>) {
-        if !self.keep_alive {
-            return;
-        }
         let id = id.to_string();
 
         info!(sl!(), "start runtime keep alive");
@@ -91,9 +86,6 @@ impl HealthCheck {
     }
 
     pub async fn stop(&self) {
-        if !self.keep_alive {
-            return;
-        }
         info!(sl!(), "stop runtime keep alive");
         self.stop_tx
             .send(())

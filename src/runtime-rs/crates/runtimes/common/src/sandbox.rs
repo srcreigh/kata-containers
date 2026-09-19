@@ -31,7 +31,6 @@ impl std::fmt::Debug for SandboxNetworkEnv {
 #[async_trait]
 pub trait Sandbox: Send + Sync {
     async fn start(&self) -> Result<()>;
-    async fn start_template(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
     async fn cleanup(&self) -> Result<()>;
     async fn shutdown(&self) -> Result<()>;
@@ -47,10 +46,6 @@ pub trait Sandbox: Send + Sync {
         process_id: ContainerProcess,
         shim_pid: u32,
     ) -> Result<()>;
-
-    // Docker 26+ network rescan: discover interfaces that Docker configured
-    // between the Create and Start RPCs.
-    async fn rescan_network(&self) -> Result<()>;
 
     // metrics function
     async fn agent_metrics(&self) -> Result<String>;

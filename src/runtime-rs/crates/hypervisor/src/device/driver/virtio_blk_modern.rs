@@ -91,8 +91,8 @@ impl Device for BlockDeviceModernHandle {
         Ok(())
     }
 
-    async fn detach(&mut self, h: &dyn hypervisor) -> Result<Option<u64>> {
-        // get the count of device detached, skip detach once it reaches the 0
+    async fn detach(&mut self) -> Result<Option<u64>> {
+        // Keep the drive slot while another attachment still references it.
         if self
             .decrease_attach_count()
             .await
@@ -100,17 +100,15 @@ impl Device for BlockDeviceModernHandle {
         {
             return Ok(None);
         }
-        if let Err(e) = h.remove_device(DeviceType::BlockModern(self.arc())).await {
-            self.increase_attach_count().await?;
-            return Err(e);
-        }
         Ok(Some(self.snapshot_config().await.index))
     }
 
     async fn get_device_info(&self) -> DeviceType {
         DeviceType::BlockModern(self.inner.clone())
     }
+}
 
+impl BlockDeviceModernHandle {
     async fn increase_attach_count(&mut self) -> Result<bool> {
         let mut guard = self.inner.lock().await;
         do_increase_count(&mut guard.attach_count)

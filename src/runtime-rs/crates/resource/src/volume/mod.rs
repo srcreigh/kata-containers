@@ -15,7 +15,7 @@ mod shm_volume;
 pub mod utils;
 
 pub mod direct_volume;
-use crate::volume::{copy_volume::VolumeManager, direct_volume::is_direct_volume};
+use crate::volume::direct_volume::is_direct_volume;
 pub mod direct_volumes;
 
 use std::{sync::Arc, vec::Vec};
@@ -37,15 +37,12 @@ pub struct VolumeContext<'a> {
     pub sid: &'a str,
     pub agent: Arc<dyn Agent>,
     pub emptydir_mode: &'a str,
-    pub fs_sharing_supported: bool,
-    pub block_device_discard_supported: bool,
 }
 
 #[async_trait]
 pub trait Volume: Send + Sync {
     fn get_volume_mount(&self) -> Result<Vec<oci::Mount>>;
     fn get_storage(&self) -> Result<Vec<agent::Storage>>;
-    fn get_device_id(&self) -> Result<Option<String>>;
     async fn cleanup(&self, device_manager: &RwLock<DeviceManager>) -> Result<()>;
 }
 
@@ -58,18 +55,12 @@ pub struct VolumeResourceInner {
 #[derive(Default)]
 pub struct VolumeResource {
     inner: Arc<RwLock<VolumeResourceInner>>,
-    // The core purpose of introducing `volume_manager` to `VolumeResource` is to centralize the management of shared file system volumes.
-    // By creating a single VolumeManager instance within VolumeResource, all shared file volumes are managed by one central entity.
-    // This single volume_manager can accurately track the references of all CopyVolume instances to the shared volumes,
-    // ensuring correct reference counting, proper volume lifecycle management, and preventing issues like volumes being overwritten.
-    volume_manager: Arc<VolumeManager>,
 }
 
 impl VolumeResource {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(VolumeResourceInner::default())),
-            volume_manager: Arc::new(VolumeManager::new()),
         }
     }
 
@@ -82,7 +73,6 @@ impl VolumeResource {
         let d = ctx.d;
         let sid = ctx.sid;
         let emptydir_mode = ctx.emptydir_mode;
-        let fs_sharing_supported = ctx.fs_sharing_supported;
         let mut volumes: Vec<Arc<dyn Volume>> = vec![];
         let oci_mounts = &spec.mounts().clone().unwrap_or_default();
         info!(sl!(), " oci mount is : {:?}", oci_mounts.clone());
@@ -100,21 +90,15 @@ impl VolumeResource {
                         .with_context(|| format!("new ephemeral volume {m:?}"))?,
                 )
             } else if block_emptydir_volume::is_block_emptydir_volume(m, emptydir_mode) {
-                let vol = block_emptydir_volume::BlockEmptyDirVolume::new(
-                    d,
-                    m,
-                    sid,
-                    emptydir_mode,
-                    ctx.block_device_discard_supported,
-                )
-                .await
-                .with_context(|| format!("new block emptydir volume {m:?}"))?;
+                let vol = block_emptydir_volume::BlockEmptyDirVolume::new(d, m, sid)
+                    .await
+                    .with_context(|| format!("new block emptydir volume {m:?}"))?;
                 let vol_arc: Arc<dyn Volume> = Arc::new(vol.clone());
                 let mut inner = self.inner.write().await;
                 inner.ephemeral_disks.push(vol.disk_info);
                 drop(inner);
                 vol_arc
-            } else if need_local_volume(m, fs_sharing_supported, emptydir_mode) {
+            } else if need_local_volume(m, emptydir_mode) {
                 // This branch comes after is_block_emptydir_volume() so
                 // block-encrypted and block-plain emptyDirs are handled as
                 // block devices before falling back to guest-local storage.
@@ -155,18 +139,10 @@ impl VolumeResource {
                 )
             } else if copy_volume::is_copy_volume(m) {
                 Arc::new(
-                    copy_volume::CopyVolume::new(
-                        m,
-                        cid,
-                        ctx.agent.clone(),
-                        self.volume_manager.clone(),
-                    )
-                    .await
-                    .with_context(|| format!("new copied volume {m:?}"))?,
+                    copy_volume::CopyVolume::new(m, cid, ctx.agent.clone())
+                        .await
+                        .with_context(|| format!("new copied volume {m:?}"))?,
                 )
-            } else if is_skip_volume(m) {
-                info!(sl!(), "skip volume {:?}", m);
-                continue;
             } else {
                 Arc::new(
                     default_volume::DefaultVolume::new(m)
@@ -225,15 +201,9 @@ impl VolumeResource {
 ///
 /// Limitation: Local volumes cannot be managed by Kubelet and hence may
 /// starve the host storage.
-fn need_local_volume(m: &oci::Mount, fs_sharing_supported: bool, emptydir_mode: &str) -> bool {
-    !fs_sharing_supported
-        && !block_emptydir_volume::is_block_emptydir_mode(emptydir_mode)
+fn need_local_volume(m: &oci::Mount, emptydir_mode: &str) -> bool {
+    !block_emptydir_volume::is_block_emptydir_mode(emptydir_mode)
         && m.source()
             .as_ref()
             .is_some_and(|src| is_disk_empty_dir(&src.display().to_string()))
-}
-
-fn is_skip_volume(_m: &oci::Mount) -> bool {
-    // TODO: support volume check
-    false
 }

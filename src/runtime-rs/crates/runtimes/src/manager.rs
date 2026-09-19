@@ -12,32 +12,21 @@ use common::{
         SandboxResponse, SandboxStatusInfo, StartSandboxInfo, TaskRequest, TaskResponse,
         DEFAULT_SHM_SIZE,
     },
-    RuntimeHandler, RuntimeInstance, Sandbox, SandboxNetworkEnv,
+    RuntimeInstance, Sandbox, SandboxNetworkEnv,
 };
 
 use containerd_shim_protos::events::task::{TaskCreate, TaskDelete, TaskStart};
-use hypervisor::{
-    utils::{
-        create_dir_all_with_inherit_owner, create_vmm_user, remove_dir_all_if_exists,
-        remove_vmm_user, vmm_user_runtime_dir,
-    },
-    Param,
-};
+use hypervisor::Param;
 use kata_sys_util::{mount::get_mount_path, spec::load_oci_spec};
 use kata_types::{
     annotations::Annotation,
-    config::{
-        default::DEFAULT_GUEST_DNS_FILE, hypervisor::RootlessUser, Hypervisor, TomlConfig,
-        KATA_PATH,
-    },
+    config::{default::DEFAULT_GUEST_DNS_FILE, TomlConfig},
     mount::SHM_DEVICE,
-    prefix_with_rootless_dir,
-    rootless::{is_rootless, rootless_dir, set_rootless},
 };
 
 use logging::FILTER_RULE;
-use netns_rs::{Env, NetNs};
-use nix::{sys::statfs, unistd::User};
+use netns_rs::NetNs;
+use nix::sys::statfs;
 use oci_spec::runtime as oci;
 use persist::sandbox_persist::Persist;
 use protobuf::Message as ProtobufMessage;
@@ -49,9 +38,7 @@ use runtime_spec as spec;
 use shim_interface::shim_mgmt::ERR_NO_SHIM_SERVER;
 use std::{
     collections::HashMap,
-    env,
     ops::Deref,
-    os::unix::fs::{chown, MetadataExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::SystemTime,
@@ -59,7 +46,6 @@ use std::{
 use tokio::fs;
 use tokio::sync::{mpsc::Sender, Mutex, RwLock};
 use tracing::instrument;
-#[cfg(feature = "virt")]
 use virt_container::{
     sandbox::{SandboxRestoreArgs, VirtSandbox},
     sandbox_persist::SandboxState,
@@ -108,14 +94,14 @@ impl std::fmt::Debug for RuntimeHandlerManagerInner {
 }
 
 impl RuntimeHandlerManagerInner {
-    fn new(id: &str, msg_sender: Sender<Message>) -> Result<Self> {
+    fn new(id: &str, msg_sender: Sender<Message>) -> Self {
         let tracer = KataTracer::new();
-        Ok(Self {
+        Self {
             id: id.to_string(),
             msg_sender,
             kata_tracer: Arc::new(Mutex::new(tracer)),
             runtime_instance: None,
-        })
+        }
     }
 
     #[instrument]
@@ -125,22 +111,14 @@ impl RuntimeHandlerManagerInner {
         config: Arc<TomlConfig>,
     ) -> Result<()> {
         info!(sl!(), "new runtime handler {}", &config.runtime.name);
-        let runtime_handler = match config.runtime.name.as_str() {
-            #[cfg(feature = "virt")]
-            name if name == VirtContainer::name() || name.is_empty() => {
-                VirtContainer::new_handler()
-            }
-            _ => return Err(anyhow!("Unsupported runtime: {}", &config.runtime.name)),
-        };
-        let runtime_instance = runtime_handler
-            .new_instance(
-                &self.id,
-                self.msg_sender.clone(),
-                config.clone(),
-                sandbox_config,
-            )
-            .await
-            .context("new runtime instance")?;
+        let runtime_instance = VirtContainer::new_instance(
+            &self.id,
+            self.msg_sender.clone(),
+            config.clone(),
+            sandbox_config,
+        )
+        .await
+        .context("new runtime instance")?;
 
         // initilize the trace subscriber
         if config.runtime.enable_tracing {
@@ -164,57 +142,14 @@ impl RuntimeHandlerManagerInner {
     #[instrument]
     async fn try_init(
         &mut self,
-        mut sandbox_config: SandboxConfig,
+        sandbox_config: SandboxConfig,
         spec: Option<&oci::Spec>,
         options: &Option<Vec<u8>>,
     ) -> Result<()> {
-        #[cfg(feature = "virt")]
         VirtContainer::init().context("init virt container")?;
 
         let mut config =
             load_config(&sandbox_config.annotations, options).context("load config")?;
-
-        let hypervisor_name = &config.runtime.hypervisor_name;
-        let hypervisor = config
-            .hypervisor
-            .get_mut(hypervisor_name)
-            .ok_or_else(|| anyhow!("hypervisor {} not found in config", hypervisor_name))?;
-
-        set_rootless(hypervisor.security_info.rootless);
-        let mut rootless_setup_guard = if is_rootless() {
-            Some(
-                configure_non_root_hypervisor(hypervisor)
-                    .context("configure non-root hypervisor")?,
-            )
-        } else {
-            None
-        };
-
-        if is_rootless() {
-            // When kata-runtime is invoked as rootless by podman with net=none,
-            // the initially created netns (bind-mounted under /var/run/netns) requires root privileges.
-            // This makes it inaccessible to non-root users. We need to create a non-root accessible
-            // netns and replace the original network namespace path in the config.
-            if sandbox_config.network_env.network_created {
-                let ns_name = generate_netns_name();
-                let rootless_raw_netns = NetNs::new_with_env(ns_name, RootlessEnv)?;
-                let path = Some(
-                    PathBuf::from(rootless_raw_netns.path())
-                        .display()
-                        .to_string(),
-                );
-                sandbox_config.network_env.netns = path;
-            }
-        }
-
-        // Sandbox sizing information *may* be provided in two scenarios:
-        //   1. The upper layer runtime (ie, containerd or crio) provide sandbox sizing information as an annotation
-        //	in the 'sandbox container's' spec. This would typically be a scenario where as part of a create sandbox
-        //	request the upper layer runtime receives this information as part of a pod, and makes it available to us
-        //	for sizing purposes.
-        //   2. If this is not a sandbox infrastructure container, but instead a standalone single container (analogous to "docker run..."),
-        //	then the container spec itself will contain appropriate sizing information for the entire sandbox (since it is
-        //	a single container.
 
         let mut initial_size_manager = if let Some(spec) = spec {
             InitialSizeManager::new(spec).context("failed to construct static resource manager")?
@@ -237,24 +172,10 @@ impl RuntimeHandlerManagerInner {
         update_component_log_level(&config);
 
         reject_dan(&config, &self.id)?;
-        // set netns to None if we want no network for the VM
-        if config.runtime.disable_new_netns {
-            sandbox_config.network_env.netns = None;
-        }
-
         self.init_runtime_handler(sandbox_config, Arc::new(config))
             .await
             .context("init runtime handler")?;
 
-        // Rootless resource ownership now passes to the runtime instance and
-        // its normal teardown paths.
-        if let Some(guard) = rootless_setup_guard.as_mut() {
-            guard.disarm();
-        }
-
-        // the sandbox creation can reach here only once and the sandbox is created
-        // so we can safely create the shim management socket right now
-        // the unwrap here is safe because the runtime handler is correctly created
         let shim_mgmt_svr = MgmtServer::new(
             &self.id,
             self.runtime_instance.as_ref().unwrap().sandbox.clone(),
@@ -288,12 +209,10 @@ impl std::fmt::Debug for RuntimeHandlerManager {
 }
 
 impl RuntimeHandlerManager {
-    pub fn new(id: &str, msg_sender: Sender<Message>) -> Result<Self> {
-        Ok(Self {
-            inner: Arc::new(RwLock::new(RuntimeHandlerManagerInner::new(
-                id, msg_sender,
-            )?)),
-        })
+    pub fn new(id: &str, msg_sender: Sender<Message>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(RuntimeHandlerManagerInner::new(id, msg_sender))),
+        }
     }
 
     pub async fn cleanup(&self) -> Result<()> {
@@ -315,8 +234,7 @@ impl RuntimeHandlerManager {
             sender,
         };
         match sandbox_state.sandbox_type.clone() {
-            #[cfg(feature = "virt")]
-            name if name == VirtContainer::name() => {
+            name if name == virt_container::sandbox::VIRTCONTAINER => {
                 if sandbox_args.toml_config.runtime.keep_abnormal {
                     info!(sl!(), "skip cleanup for keep_abnormal");
                     return Ok(());
@@ -677,20 +595,6 @@ impl RuntimeHandlerManager {
                 Ok(TaskResponse::WaitProcess(exit_status))
             }
             TaskRequest::StartProcess(process_id) => {
-                // Docker 26+ configures the veth between the Create and Start
-                // RPCs.  Rescan now so interfaces are wired before the process
-                // starts.  The rescan uses a lightweight netlink probe during
-                // polling and only does the expensive endpoint setup once
-                // interfaces are detected.
-                if process_id.process_type == ProcessType::Container {
-                    if let Err(e) = sandbox.rescan_network().await {
-                        error!(
-                            sl!(),
-                            "network rescan failed; container may lack networking: {:?}", e
-                        );
-                    }
-                }
-
                 let shim_pid = cm
                     .start_process(&process_id)
                     .await
@@ -766,29 +670,8 @@ impl RuntimeHandlerManager {
     }
 }
 
-// RootlessEnv implements netns_rs::Env trait to provide the rootless directory path
-// for creating network namespace in rootless mode.
-#[derive(Copy, Clone, Default, Debug)]
-pub struct RootlessEnv;
-
-impl Env for RootlessEnv {
-    fn persist_dir(&self) -> PathBuf {
-        PathBuf::from(rootless_dir()).join("netns")
-    }
-
-    fn init(&self) -> netns_rs::Result<()> {
-        let persist_dir = self.persist_dir();
-        create_dir_all_with_inherit_owner(&persist_dir, 0o750)
-            .map_err(netns_rs::Error::CreateNsDirError)?;
-        Ok(())
-    }
-}
-
-/// Config override ordering(high to low):
-/// 1. environment variable
-/// 2. shimv2 create task option
-/// 3. If above two are not set, then get default path from DEFAULT_RUNTIME_CONFIGURATIONS
-/// in kata-containers/src/libs/kata-types/src/config/default.rs, in array order.
+/// Config override ordering (highest first): shipped environment path,
+/// containerd shim options, then default config files.
 #[instrument]
 fn load_config(an: &HashMap<String, String>, option: &Option<Vec<u8>>) -> Result<TomlConfig> {
     const KATA_CONF_FILE: &str = "KATA_CONF_FILE";
@@ -939,134 +822,12 @@ fn get_shm_size(spec: &oci::Spec) -> Result<u64> {
     Ok(shm_size)
 }
 
-struct RootlessSetupGuard {
-    user_name: Option<String>,
-    user_tmp_dir: Option<PathBuf>,
-    armed: bool,
-}
-
-impl RootlessSetupGuard {
-    fn new(user_name: String) -> Self {
-        Self {
-            user_name: Some(user_name),
-            user_tmp_dir: None,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for RootlessSetupGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-
-        if let Some(path) = self.user_tmp_dir.as_ref() {
-            if let Err(err) = remove_dir_all_if_exists(path) {
-                warn!(
-                    sl!(),
-                    "failed to remove rootless runtime directory {}: {}",
-                    path.display(),
-                    err
-                );
-            }
-        }
-
-        if let Some(user_name) = self.user_name.as_ref() {
-            if let Err(err) = remove_vmm_user(user_name) {
-                warn!(
-                    sl!(),
-                    "failed to remove rootless user {}: {}", user_name, err
-                );
-            }
-        }
-    }
-}
-
-fn configure_non_root_hypervisor(config: &mut Hypervisor) -> Result<RootlessSetupGuard> {
-    let user_name = create_vmm_user().context("failed to create vmm user")?;
-    let mut guard = RootlessSetupGuard::new(user_name.clone());
-
-    let user = User::from_name(&user_name)?
-        .ok_or_else(|| anyhow!("failed to get user by name {}, user not found", user_name))?;
-
-    let uid = user.uid.as_raw();
-    let gid = user.gid.as_raw();
-
-    let user_tmp_dir = vmm_user_runtime_dir(uid);
-    guard.user_tmp_dir = Some(user_tmp_dir.clone());
-
-    std::fs::create_dir_all(&user_tmp_dir)
-        .with_context(|| format!("create user tmp dir {}", user_tmp_dir.display()))?;
-    chown(&user_tmp_dir, Some(uid), Some(gid))
-        .with_context(|| format!("chown user tmp dir {}", user_tmp_dir.display()))?;
-    info!(
-        sl!(),
-        "chown user tmp dir {} to uid {}, gid {}",
-        user_tmp_dir.display(),
-        uid,
-        gid
-    );
-
-    env::set_var("XDG_RUNTIME_DIR", user_tmp_dir);
-
-    // Establish the rootless runtime hierarchy before VMM and resource setup so
-    // newly created directories inherit the temporary VMM user's ownership.
-    let runtime_root = PathBuf::from(prefix_with_rootless_dir(KATA_PATH));
-    create_dir_all_with_inherit_owner(&runtime_root, 0o750)
-        .with_context(|| format!("create rootless runtime root {}", runtime_root.display()))?;
-
-    // Update the rootless dir prefix for guest_swap_path
-    config.memory_info.guest_swap_path = prefix_with_rootless_dir("/run/kata-containers/swap");
-
-    let kvm_path = PathBuf::from("/dev/kvm");
-    let metadata = std::fs::metadata(&kvm_path)?;
-    let kvm_gid = metadata.gid();
-
-    config.security_info.rootless_user = Some(RootlessUser {
-        uid,
-        gid,
-        groups: vec![kvm_gid],
-        user_name,
-    });
-
-    Ok(guard)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use common::types::ShutdownRequest;
     use rstest::rstest;
     use tokio::sync::mpsc::channel;
-
-    #[rstest]
-    #[case::armed_guard_removes_runtime_dir(false, false)]
-    #[case::disarmed_guard_keeps_runtime_dir(true, true)]
-    fn test_rootless_setup_guard_runtime_dir(
-        #[case] disarm_guard: bool,
-        #[case] runtime_dir_survives: bool,
-    ) {
-        let parent = tempfile::tempdir().unwrap();
-        let runtime_dir = parent.path().join("runtime");
-        std::fs::create_dir_all(&runtime_dir).unwrap();
-
-        let mut guard = RootlessSetupGuard {
-            user_name: None,
-            user_tmp_dir: Some(runtime_dir.clone()),
-            armed: true,
-        };
-        if disarm_guard {
-            guard.disarm();
-        }
-        drop(guard);
-
-        assert_eq!(runtime_dir.exists(), runtime_dir_survives);
-    }
 
     // A ShutdownContainer RPC that arrives before any runtime instance was
     // created (e.g. after a failed CreateContainer) must still drive the shim
@@ -1075,7 +836,7 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_without_runtime_instance_forces_exit() {
         let (sender, mut receiver) = channel::<Message>(8);
-        let manager = RuntimeHandlerManager::new("test-sid", sender).unwrap();
+        let manager = RuntimeHandlerManager::new("test-sid", sender);
 
         let resp = manager
             .handler_task_message(TaskRequest::ShutdownContainer(ShutdownRequest {

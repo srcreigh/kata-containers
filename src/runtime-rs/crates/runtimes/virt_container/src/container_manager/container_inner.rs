@@ -85,11 +85,7 @@ impl ContainerInner {
         self.agent
             .exec_process(agent::ExecProcessRequest {
                 process_id: process.clone().into(),
-                string_user: None,
                 process: Some(exec.oci_process.clone()),
-                stdin_port: None,
-                stdout_port: None,
-                stderr_port: None,
             })
             .await
             .context("exec process")?;
@@ -119,13 +115,13 @@ impl ContainerInner {
 
     pub fn fetch_exit_watcher(&self, process: &ContainerProcess) -> Result<ProcessWatcher> {
         match process.process_type {
-            ProcessType::Container => self.init_process.fetch_exit_watcher(),
+            ProcessType::Container => Ok(self.init_process.fetch_exit_watcher()),
             ProcessType::Exec => {
                 let exec = self
                     .exec_processes
                     .get(&process.exec_id)
                     .ok_or_else(|| Error::ProcessNotFound(process.clone()))?;
-                exec.process.fetch_exit_watcher()
+                Ok(exec.process.fetch_exit_watcher())
             }
         }
     }
@@ -172,7 +168,6 @@ impl ContainerInner {
     pub(crate) async fn cleanup_container(
         &mut self,
         cid: &str,
-        force: bool,
         device_manager: &RwLock<DeviceManager>,
     ) -> Result<()> {
         // wait until the container process
@@ -185,20 +180,12 @@ impl ContainerInner {
             container_id: cid.to_string(),
             ..Default::default()
         };
-        self.agent
-            .remove_container(remove_request)
-            .await
-            .or_else(|e| {
-                if force {
-                    warn!(
-                        self.logger,
-                        "stop container: agent remove container failed: {}", e
-                    );
-                    Ok(agent::Empty::new())
-                } else {
-                    Err(e)
-                }
-            })?;
+        if let Err(e) = self.agent.remove_container(remove_request).await {
+            warn!(
+                self.logger,
+                "stop container: agent remove container failed: {}", e
+            );
+        }
 
         // close the exit channel to wakeup wait service
         // send to notify watchers who are waiting for the process exit
@@ -217,7 +204,6 @@ impl ContainerInner {
     pub(crate) async fn stop_process(
         &mut self,
         process: &ContainerProcess,
-        force: bool,
         device_manager: &RwLock<DeviceManager>,
     ) -> Result<()> {
         let logger = logger_with_process(process);
@@ -261,7 +247,7 @@ impl ContainerInner {
 
         match process.process_type {
             ProcessType::Container => self
-                .cleanup_container(&process.container_id.container_id, force, device_manager)
+                .cleanup_container(&process.container_id.container_id, device_manager)
                 .await
                 .context("stop container")?,
             ProcessType::Exec => {
@@ -300,19 +286,19 @@ impl ContainerInner {
         Ok(())
     }
 
-    pub async fn new_container_io(&self, process: &ContainerProcess) -> Result<ContainerIo> {
-        Ok(ContainerIo::new(self.agent.clone(), process.clone()))
+    pub fn new_container_io(&self, process: &ContainerProcess) -> ContainerIo {
+        ContainerIo::new(self.agent.clone(), process.clone())
     }
 
     pub async fn close_io(&mut self, process: &ContainerProcess) -> Result<()> {
         match process.process_type {
-            ProcessType::Container => self.init_process.close_io(self.agent.clone()).await,
+            ProcessType::Container => self.init_process.close_io(),
             ProcessType::Exec => {
                 let exec = self
                     .exec_processes
                     .get_mut(&process.exec_id)
                     .ok_or_else(|| Error::ProcessNotFound(process.clone()))?;
-                exec.process.close_io(self.agent.clone()).await;
+                exec.process.close_io();
             }
         };
 

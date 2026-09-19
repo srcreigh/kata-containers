@@ -4,9 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use netlink_packet_route::link::{
-    InfoBridge, InfoData, InfoKind, LinkAttribute, LinkInfo, LinkMessage,
-};
+use netlink_packet_route::link::{InfoData, InfoKind, LinkAttribute, LinkInfo, LinkMessage};
 
 use super::{Link, LinkAttrs};
 
@@ -17,12 +15,8 @@ pub fn get_link_from_message(mut msg: LinkMessage) -> Box<dyn Link> {
     let mut base = LinkAttrs {
         index: msg.header.index,
         flags,
-        link_layer_type: u16::from(msg.header.link_layer_type),
         ..Default::default()
     };
-    if flags & libc::IFF_PROMISC as u32 != 0 {
-        base.promisc = 1;
-    }
     let mut link: Option<Box<dyn Link>> = None;
     while let Some(attr) = msg.attributes.pop() {
         match attr {
@@ -37,41 +31,6 @@ pub fn get_link_from_message(mut msg: LinkMessage) -> Box<dyn Link> {
             }
             LinkAttribute::Mtu(m) => {
                 base.mtu = m;
-            }
-            LinkAttribute::Link(l) => {
-                base.parent_index = l;
-            }
-            LinkAttribute::Controller(m) => {
-                base.master_index = m;
-            }
-            LinkAttribute::TxQueueLen(t) => {
-                base.txq_len = t;
-            }
-            LinkAttribute::IfAlias(a) => {
-                base.alias = a;
-            }
-            LinkAttribute::Stats(_s) => {}
-            LinkAttribute::Stats64(_s) => {}
-            LinkAttribute::Xdp(_x) => {}
-            LinkAttribute::OperState(_) => {}
-            LinkAttribute::LinkNetNsId(n) => {
-                base.net_ns_id = n;
-            }
-            LinkAttribute::GsoMaxSize(i) => {
-                base.gso_max_size = i;
-            }
-            LinkAttribute::GsoMaxSegs(e) => {
-                base.gso_max_seqs = e;
-            }
-            LinkAttribute::VfInfoList(_) => {}
-            LinkAttribute::NumTxQueues(t) => {
-                base.num_tx_queues = t;
-            }
-            LinkAttribute::NumRxQueues(r) => {
-                base.num_rx_queues = r;
-            }
-            LinkAttribute::Group(g) => {
-                base.group = g;
             }
             _ => {
                 // skip unused attr
@@ -142,8 +101,8 @@ fn link_info(mut infos: Vec<LinkInfo>) -> Box<dyn Link> {
                 InfoData::Vlan(_) => {
                     link = Some(Box::new(Vlan::default()));
                 }
-                InfoData::Bridge(ibs) => {
-                    link = Some(Box::new(parse_bridge(ibs)));
+                InfoData::Bridge(_) => {
+                    link = Some(Box::new(Bridge::default()));
                 }
                 _ => {
                     link = Some(Box::new(Device::default()));
@@ -163,25 +122,6 @@ fn link_info(mut infos: Vec<LinkInfo>) -> Box<dyn Link> {
         }
     }
     link.unwrap()
-}
-
-fn parse_bridge(mut ibs: Vec<InfoBridge>) -> Bridge {
-    let mut bridge = Bridge::default();
-    while let Some(ib) = ibs.pop() {
-        match ib {
-            InfoBridge::HelloTime(ht) => {
-                bridge.hello_time = ht;
-            }
-            InfoBridge::MulticastSnooping(m) => {
-                bridge.multicast_snooping = m;
-            }
-            InfoBridge::VlanFiltering(v) => {
-                bridge.vlan_filtering = v;
-            }
-            _ => {}
-        }
-    }
-    bridge
 }
 
 macro_rules! impl_network_dev {
@@ -218,12 +158,4 @@ define_and_impl_network_dev!("ipvlan", IpVlan);
 define_and_impl_network_dev!("macvlan", MacVlan);
 define_and_impl_network_dev!("vlan", Vlan);
 
-#[derive(Debug, PartialEq, Eq, Clone, Default)]
-pub struct Bridge {
-    attrs: Option<LinkAttrs>,
-    pub multicast_snooping: bool,
-    pub hello_time: u32,
-    pub vlan_filtering: bool,
-}
-
-impl_network_dev!("bridge", Bridge);
+define_and_impl_network_dev!("bridge", Bridge);

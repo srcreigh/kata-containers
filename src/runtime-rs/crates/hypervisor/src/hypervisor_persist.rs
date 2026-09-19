@@ -8,12 +8,8 @@ use crate::HypervisorConfig;
 use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct HypervisorState {
-    // Type of hypervisor, E.g. dragonball/qemu/firecracker.
+    // Type of hypervisor.
     pub hypervisor_type: String,
-    pub pid: Option<i32>,
-    pub uuid: String,
-    // clh sepcific: refer to 'virtcontainers/clh.go:CloudHypervisorState'
-    pub api_socket: String,
     /// sandbox id
     pub id: String,
     /// vm path

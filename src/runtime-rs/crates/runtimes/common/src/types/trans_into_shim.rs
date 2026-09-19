@@ -161,7 +161,6 @@ impl From<ProcessStatus> for api::Status {
             ProcessStatus::Running => api::Status::RUNNING,
             ProcessStatus::Stopped => api::Status::STOPPED,
             ProcessStatus::Paused => api::Status::PAUSED,
-            ProcessStatus::Pausing => api::Status::PAUSING,
         }
     }
 }
@@ -274,11 +273,9 @@ impl TryFrom<TaskResponse> for api::StatsResponse {
         let mut response = api::StatsResponse::new();
         match from {
             TaskResponse::StatsContainer(resp) => {
-                if let Some(value) = resp.value {
-                    any.type_url = value.type_url;
-                    any.value = value.value;
-                    response.set_stats(any);
-                }
+                any.type_url = resp.type_url;
+                any.value = resp.value;
+                response.set_stats(any);
                 Ok(response)
             }
             _ => Err(anyhow!(Error::UnexpectedResponse(

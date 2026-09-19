@@ -6,7 +6,7 @@
 
 pub mod sandbox_persist;
 use anyhow::{anyhow, Context, Ok, Result};
-use kata_types::{config::KATA_PATH, prefix_with_rootless_dir};
+use kata_types::config::KATA_PATH;
 use serde::de;
 use std::{fs::File, io::BufReader};
 
@@ -16,12 +16,11 @@ use safe_path::scoped_join;
 
 pub fn to_disk<T: serde::Serialize>(value: &T, sid: &str, jailer_path: &str) -> Result<()> {
     verify_id(sid).context("failed to verify sid")?;
-    // FIXME: handle jailed case
-    let mut path = match jailer_path {
-        "" => scoped_join(prefix_with_rootless_dir(KATA_PATH), sid)?,
-        _ => scoped_join(jailer_path, "root")?,
-    };
-    //let mut path = scoped_join(KATA_PATH, sid)?;
+    anyhow::ensure!(
+        !jailer_path.is_empty(),
+        "kata-fc: jailed persistence path is required"
+    );
+    let mut path = scoped_join(jailer_path, "root")?;
     if path.exists() {
         path.push(PERSIST_FILE);
         let f = File::create(path)
@@ -39,7 +38,7 @@ where
     T: de::DeserializeOwned,
 {
     verify_id(sid).context("failed to verify sid")?;
-    let mut path = scoped_join(prefix_with_rootless_dir(KATA_PATH), sid)?;
+    let mut path = scoped_join(KATA_PATH, sid)?;
     if path.exists() {
         path.push(PERSIST_FILE);
         let file = File::open(path).context("failed to open the file")?;
@@ -51,40 +50,23 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{from_disk, to_disk, KATA_PATH};
-    use serde::{Deserialize, Serialize};
-    use std::fs::DirBuilder;
-    use std::{fs, result::Result::Ok};
-    #[test]
-    fn test_to_from_disk() {
-        #[derive(Serialize, Deserialize, Debug)]
-        struct Kata {
-            name: String,
-            key: u8,
-        }
-        let data = Kata {
-            name: "kata".to_string(),
-            key: 1,
-        };
-        // invalid sid
-        assert!(to_disk(&data, "..3", "").is_err());
-        assert!(to_disk(&data, "../../../3", "").is_err());
-        assert!(to_disk(&data, "a/b/c", "").is_err());
-        assert!(to_disk(&data, ".#cdscd.", "").is_err());
+    use super::*;
 
-        let sid = "aadede";
-        let sandbox_dir = [KATA_PATH, sid].join("/");
-        if DirBuilder::new()
-            .recursive(true)
-            .create(&sandbox_dir)
-            .is_ok()
-        {
-            assert!(to_disk(&data, sid, "").is_ok());
-            if let Ok(result) = from_disk::<Kata>(sid) {
-                assert_eq!(result.name, data.name);
-                assert_eq!(result.key, data.key);
-            }
-            assert!(fs::remove_dir_all(&sandbox_dir).is_ok());
+    #[test]
+    fn persistence_requires_valid_id_and_jail_and_writes_inside_root() {
+        let jail = tempfile::tempdir().unwrap();
+        let jail_path = jail.path().to_str().unwrap();
+        let data = serde_json::json!({"name":"kata","key":1});
+        for sid in ["..3", "../../../3", "a/b/c", ".#cdscd."] {
+            assert!(to_disk(&data, sid, jail_path).is_err());
         }
+        assert!(to_disk(&data, "sandbox", "").is_err());
+        assert!(to_disk(&data, "sandbox", jail_path).is_err());
+        std::fs::create_dir(jail.path().join("root")).unwrap();
+        to_disk(&data, "sandbox", jail_path).unwrap();
+        let file = File::open(jail.path().join("root/state.json")).unwrap();
+        let restored: serde_json::Value = serde_json::from_reader(file).unwrap();
+        assert_eq!(restored, data);
+        assert!(!jail.path().join("state.json").exists());
     }
 }

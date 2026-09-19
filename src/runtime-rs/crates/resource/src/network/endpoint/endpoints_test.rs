@@ -19,7 +19,7 @@ mod tests {
         network_model::{
             self,
             tc_filter_model::{fetch_index, TcFilterModel},
-            NetworkModelType, TC_FILTER_NET_MODEL_STR,
+            TC_FILTER_NET_MODEL_STR,
         },
         network_pair::{NetworkInterface, NetworkPair, TapInterface},
         utils::link::net_test_utils::delete_link,
@@ -96,7 +96,6 @@ mod tests {
                             net_pair: NetworkPair {
                                 tap: TapInterface {
                                     id: String::from("uniqueTestID_kata"),
-                                    name: format!("br{}_kata", idx),
                                     tap_iface: NetworkInterface {
                                         name: tap_iface_name.clone(),
                                         ..Default::default()
@@ -108,7 +107,6 @@ mod tests {
                                     ..Default::default()
                                 },
                                 model: Arc::new(TcFilterModel::new().unwrap()), // impossible to panic
-                                network_qos: false,
                                 network_queues: 5,
                             },
                         };
@@ -119,7 +117,6 @@ mod tests {
 
                         // check the integrity by compare all variables
                         assert_eq!(manual.net_pair.tap.id, result.net_pair.tap.id);
-                        assert_eq!(manual.net_pair.tap.name, result.net_pair.tap.name);
                         assert_eq!(
                             manual.net_pair.tap.tap_iface.name,
                             result.net_pair.tap.tap_iface.name
@@ -129,10 +126,6 @@ mod tests {
                             result.net_pair.tap.tap_iface.hard_addr
                         );
                         assert_eq!(
-                            manual.net_pair.tap.tap_iface.addrs,
-                            result.net_pair.tap.tap_iface.addrs
-                        );
-                        assert_eq!(
                             manual.net_pair.virt_iface.name,
                             result.net_pair.virt_iface.name
                         );
@@ -140,16 +133,6 @@ mod tests {
                             manual.net_pair.virt_iface.hard_addr,
                             result.net_pair.virt_iface.hard_addr
                         );
-                        // using match branch to avoid deriving PartialEq trait
-                        match manual.net_pair.model.model_type() {
-                            NetworkModelType::TcFilter => {} // ok
-                            _ => unreachable!(),
-                        }
-                        match result.net_pair.model.model_type() {
-                            NetworkModelType::TcFilter => {}
-                            _ => unreachable!(),
-                        }
-                        assert_eq!(manual.net_pair.network_qos, result.net_pair.network_qos);
                         assert_eq!(
                             manual.net_pair.network_queues,
                             result.net_pair.network_queues
@@ -231,7 +214,6 @@ mod tests {
                             net_pair: NetworkPair {
                                 tap: TapInterface {
                                     id: String::from("uniqueTestID_kata"),
-                                    name: format!("br{}_kata", idx),
                                     tap_iface: NetworkInterface {
                                         name: tap_iface_name.clone(),
                                         ..Default::default()
@@ -244,7 +226,6 @@ mod tests {
                                 },
                                 model: network_model::new(model_str)
                                     .expect("failed to create new network model"),
-                                network_qos: false,
                                 network_queues: 5,
                             },
                         };
@@ -255,7 +236,6 @@ mod tests {
 
                         // check the integrity by compare all variables
                         assert_eq!(manual.net_pair.tap.id, result.net_pair.tap.id);
-                        assert_eq!(manual.net_pair.tap.name, result.net_pair.tap.name);
                         assert_eq!(
                             manual.net_pair.tap.tap_iface.name,
                             result.net_pair.tap.tap_iface.name
@@ -265,10 +245,6 @@ mod tests {
                             result.net_pair.tap.tap_iface.hard_addr
                         );
                         assert_eq!(
-                            manual.net_pair.tap.tap_iface.addrs,
-                            result.net_pair.tap.tap_iface.addrs
-                        );
-                        assert_eq!(
                             manual.net_pair.virt_iface.name,
                             result.net_pair.virt_iface.name
                         );
@@ -276,17 +252,7 @@ mod tests {
                             manual.net_pair.virt_iface.hard_addr,
                             result.net_pair.virt_iface.hard_addr
                         );
-                        // using match branch to avoid deriving PartialEq trait
                         // TcFilter model is hard-coded "model_str" variable
-                        match manual.net_pair.model.model_type() {
-                            NetworkModelType::TcFilter => {} // ok
-                            _ => unreachable!(),
-                        }
-                        match result.net_pair.model.model_type() {
-                            NetworkModelType::TcFilter => {}
-                            _ => unreachable!(),
-                        }
-                        assert_eq!(manual.net_pair.network_qos, result.net_pair.network_qos);
                         assert_eq!(
                             manual.net_pair.network_queues,
                             result.net_pair.network_queues
@@ -343,7 +309,6 @@ mod tests {
                         net_pair: NetworkPair {
                             tap: TapInterface {
                                 id: String::from("uniqueTestID_kata"),
-                                name: format!("br{}_kata", idx),
                                 tap_iface: NetworkInterface {
                                     name: tap_iface_name.clone(),
                                     ..Default::default()
@@ -355,7 +320,6 @@ mod tests {
                                 ..Default::default()
                             },
                             model: Arc::new(TcFilterModel::new().unwrap()), // impossible to panic
-                            network_qos: false,
                             network_queues: 1,
                         },
                     };
@@ -366,7 +330,6 @@ mod tests {
 
                     // check the integrity by compare all variables
                     assert_eq!(manual.net_pair.tap.id, result.net_pair.tap.id);
-                    assert_eq!(manual.net_pair.tap.name, result.net_pair.tap.name);
                     assert_eq!(
                         manual.net_pair.tap.tap_iface.name,
                         result.net_pair.tap.tap_iface.name
@@ -376,10 +339,6 @@ mod tests {
                         result.net_pair.tap.tap_iface.hard_addr
                     );
                     assert_eq!(
-                        manual.net_pair.tap.tap_iface.addrs,
-                        result.net_pair.tap.tap_iface.addrs
-                    );
-                    assert_eq!(
                         manual.net_pair.virt_iface.name,
                         result.net_pair.virt_iface.name
                     );
@@ -387,16 +346,6 @@ mod tests {
                         manual.net_pair.virt_iface.hard_addr,
                         result.net_pair.virt_iface.hard_addr
                     );
-                    // using match branch to avoid deriving PartialEq trait
-                    match manual.net_pair.model.model_type() {
-                        NetworkModelType::TcFilter => {} // ok
-                        _ => unreachable!(),
-                    }
-                    match result.net_pair.model.model_type() {
-                        NetworkModelType::TcFilter => {}
-                        _ => unreachable!(),
-                    }
-                    assert_eq!(manual.net_pair.network_qos, result.net_pair.network_qos);
                     assert_eq!(
                         manual.net_pair.network_queues,
                         result.net_pair.network_queues

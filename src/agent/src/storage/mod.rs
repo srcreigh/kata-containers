@@ -13,7 +13,6 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use kata_sys_util::mount::{create_mount_destination, parse_mount_options};
 use kata_types::device::{DRIVER_BLK_MMIO_TYPE, DRIVER_EPHEMERAL_TYPE, DRIVER_LOCAL_TYPE};
-use kata_types::mount::KATA_SHAREDFS_GUEST_PREMOUNT_TAG;
 use nix::unistd::{Gid, Uid};
 use protocols::agent::Storage;
 use protocols::types::FSGroupChangePolicy;
@@ -138,6 +137,10 @@ async fn update_storage_device(
 pub fn validate_storages(storages: &[Storage]) -> Result<()> {
     for storage in storages {
         anyhow::ensure!(
+            storage.source != kata_types::mount::KATA_SHAREDFS_GUEST_PREMOUNT_TAG,
+            "kata-fc: shared-filesystem premounts are unsupported"
+        );
+        anyhow::ensure!(
             matches!(
                 storage.driver.as_str(),
                 DRIVER_BLK_MMIO_TYPE | DRIVER_EPHEMERAL_TYPE | DRIVER_LOCAL_TYPE
@@ -234,22 +237,10 @@ pub(crate) fn common_storage_handler(logger: &Logger, storage: &Storage) -> Resu
 fn mount_storage(logger: &Logger, storage: &Storage) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "mount"));
 
-    // There's a special mechanism to create mountpoint from a `sharedfs` instance before
-    // starting the kata-agent. Check for such cases.
-    if storage.source == KATA_SHAREDFS_GUEST_PREMOUNT_TAG && is_mounted(&storage.mount_point)? {
-        warn!(
-            logger,
-            "{} already mounted on {}, ignoring...",
-            KATA_SHAREDFS_GUEST_PREMOUNT_TAG,
-            &storage.mount_point
-        );
-        return Ok(());
-    }
-
     let (flags, options) = parse_mount_options(&storage.options)?;
     let mount_path = Path::new(&storage.mount_point);
     let src_path = Path::new(&storage.source);
-    create_mount_destination(src_path, mount_path, "", &storage.fstype)
+    create_mount_destination(src_path, mount_path, &storage.fstype)
         .context("Could not create mountpoint")?;
 
     info!(logger, "mounting storage";
@@ -370,6 +361,20 @@ pub fn recursive_ownership_change(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_shared_filesystem_premounts_for_all_retained_drivers() {
+        for driver in [
+            DRIVER_BLK_MMIO_TYPE,
+            DRIVER_EPHEMERAL_TYPE,
+            DRIVER_LOCAL_TYPE,
+        ] {
+            let mut storage = Storage::default();
+            storage.driver = driver.into();
+            storage.source = kata_types::mount::KATA_SHAREDFS_GUEST_PREMOUNT_TAG.into();
+            assert!(validate_storages(&[storage]).is_err());
+        }
+    }
+
     use super::*;
     use anyhow::Error;
     use nix::mount::MsFlags;

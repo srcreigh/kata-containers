@@ -8,11 +8,8 @@ compile_error!("kata-fc-minimal supports only x86_64 Linux");
 
 #[macro_use]
 extern crate lazy_static;
-extern crate capctl;
 extern crate prometheus;
 extern crate protocols;
-extern crate regex;
-extern crate scan_fmt;
 extern crate serde_json;
 
 #[macro_use]

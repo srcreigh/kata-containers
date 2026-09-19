@@ -31,13 +31,6 @@ pub struct FSGroup {
     pub group_change_policy: FSGroupChangePolicy,
 }
 
-#[derive(PartialEq, Clone, Default)]
-pub struct StringUser {
-    pub uid: String,
-    pub gid: String,
-    pub additional_gids: Vec<String>,
-}
-
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct Storage {
     pub driver: String,
@@ -100,14 +93,9 @@ pub struct Routes {
 pub struct CreateContainerRequest {
     pub devices: Vec<Device>,
     pub process_id: ContainerProcessID,
-    pub string_user: Option<StringUser>,
     pub storages: Vec<Storage>,
     pub oci: Option<oci::Spec>,
     pub sandbox_pidns: bool,
-    pub rootfs_mounts: Vec<oci::Mount>,
-    pub stdin_port: Option<u32>,
-    pub stdout_port: Option<u32>,
-    pub stderr_port: Option<u32>,
 }
 
 #[derive(PartialEq, Clone, Default)]
@@ -185,7 +173,6 @@ pub struct WaitProcessRequest {
 pub struct UpdateContainerRequest {
     pub container_id: String,
     pub resources: Option<oci::LinuxResources>,
-    pub mounts: Vec<oci::Mount>,
 }
 
 #[derive(PartialEq, Clone, Default)]
@@ -197,11 +184,7 @@ pub struct WriteStreamRequest {
 #[derive(PartialEq, Clone, Default)]
 pub struct ExecProcessRequest {
     pub process_id: ContainerProcessID,
-    pub string_user: Option<StringUser>,
     pub process: Option<oci::Process>,
-    pub stdin_port: Option<u32>,
-    pub stdout_port: Option<u32>,
-    pub stderr_port: Option<u32>,
 }
 
 #[derive(PartialEq, Clone, Default)]
@@ -260,7 +243,6 @@ pub struct CopyFileRequest {
     pub path: String,
     pub file_size: i64,
     pub file_mode: u32,
-    pub dir_mode: u32,
     pub uid: i32,
     pub gid: i32,
     pub offset: i64,

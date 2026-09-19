@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct CgroupState {
     pub path: Option<String>,
-    pub overhead_path: Option<String>,
+    // Retained only to reject unsupported modes in older saved state.
+    // New state always writes true/false respectively.
     pub sandbox_cgroup_only: bool,
     pub enable_vcpus_pinning: bool,
 }

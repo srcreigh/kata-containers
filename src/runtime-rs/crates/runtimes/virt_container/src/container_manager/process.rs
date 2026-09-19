@@ -23,10 +23,7 @@ use super::logger_with_process;
 /// UnknownExitStatus constant.
 const UNKNOWN_EXIT_STATUS: i32 = 255;
 
-pub type ProcessWatcher = (
-    Option<watch::Receiver<bool>>,
-    Arc<RwLock<ProcessExitStatus>>,
-);
+pub type ProcessWatcher = (watch::Receiver<bool>, Arc<RwLock<ProcessExitStatus>>);
 
 #[derive(Debug, PartialEq)]
 enum StdIoType {
@@ -72,7 +69,7 @@ pub struct Process {
     pub status: Arc<RwLock<ProcessStatus>>,
 
     pub exit_status: Arc<RwLock<ProcessExitStatus>>,
-    pub exit_watcher_rx: Option<watch::Receiver<bool>>,
+    pub exit_watcher_rx: watch::Receiver<bool>,
     pub exit_watcher_tx: Option<watch::Sender<bool>>,
     // io streams using vsock fd passthrough feature
 }
@@ -129,7 +126,7 @@ impl Process {
             width: 0,
             status: Arc::new(RwLock::new(ProcessStatus::Created)),
             exit_status: Arc::new(RwLock::new(ProcessExitStatus::new())),
-            exit_watcher_rx: Some(receiver),
+            exit_watcher_rx: receiver,
             exit_watcher_tx: Some(sender),
         }
     }
@@ -345,8 +342,8 @@ impl Process {
         Ok(())
     }
 
-    pub fn fetch_exit_watcher(&self) -> Result<ProcessWatcher> {
-        Ok((self.exit_watcher_rx.clone(), self.exit_status.clone()))
+    pub fn fetch_exit_watcher(&self) -> ProcessWatcher {
+        (self.exit_watcher_rx.clone(), self.exit_status.clone())
     }
 
     pub async fn state(&self) -> Result<ProcessStateInfo> {
@@ -372,7 +369,7 @@ impl Process {
     }
 
     /// Close the stdin of the process in container.
-    pub async fn close_io(&mut self, _agent: Arc<dyn Agent>) {
+    pub fn close_io(&mut self) {
         // Close the stdin writer keeper so that
         // the end signal could be received in the read side
         self.stdin_w.take();

@@ -12,8 +12,8 @@ use kata_types::config::hypervisor::BlockDeviceInfo;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    BlockConfigModern, BlockDeviceModernHandle, HybridVsockDevice, Hypervisor, NetworkDevice,
-    KATA_MMIO_BLK_DEV_TYPE, VIRTIO_BLOCK_MMIO,
+    BlockConfigModern, BlockDeviceModernHandle, Hypervisor, NetworkDevice, KATA_MMIO_BLK_DEV_TYPE,
+    VIRTIO_BLOCK_MMIO,
 };
 
 use super::{
@@ -102,24 +102,14 @@ impl DeviceManager {
     pub async fn try_remove_device(&mut self, device_id: &str) -> Result<()> {
         if let Some(dev) = self.devices.get(device_id) {
             let mut device_guard = dev.lock().await;
-            let result = match device_guard.detach(self.hypervisor.as_ref()).await {
-                Ok(index) => {
-                    if let Some(i) = index {
-                        // release the declared device index
-                        self.shared_info.release_device_index(i);
-                    }
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            };
-
-            // if detach success, remove it from device manager
-            if result.is_ok() {
+            if let Some(index) = device_guard.detach().await? {
+                // Other containers may still refer to the same drive. Release
+                // the slot and its lookup entry only after the last reference.
+                self.shared_info.release_device_index(index);
                 drop(device_guard);
                 self.devices.remove(device_id);
             }
-
-            return result;
+            return Ok(());
         }
 
         Err(anyhow!(
@@ -152,9 +142,6 @@ impl DeviceManager {
                     if device.lock().await.config.path_on_host == host_path {
                         return Some(device_id.to_string());
                     }
-                }
-                DeviceType::HybridVsock(_) => {
-                    continue;
                 }
             }
         }
@@ -199,11 +186,6 @@ impl DeviceManager {
                 }
 
                 Arc::new(Mutex::new(NetworkDevice::new(device_id.clone(), config)))
-            }
-
-            DeviceConfig::HybridVsockCfg(hvconfig) => {
-                // No need to do find device for hybrid vsock device.
-                Arc::new(Mutex::new(HybridVsockDevice::new(&device_id, hvconfig)))
             }
         };
 
@@ -296,7 +278,7 @@ mod tests {
     use crate::{
         device::{device_manager::get_block_device_info, DeviceConfig, DeviceType},
         firecracker::Firecracker,
-        BlockConfigModern, KATA_MMIO_BLK_DEV_TYPE,
+        BlockConfigModern, KATA_MMIO_BLK_DEV_TYPE, VIRTIO_BLOCK_MMIO,
     };
     use anyhow::{Context, Result};
     use std::sync::Arc;
@@ -358,6 +340,31 @@ mod tests {
         } else {
             panic!("expected an MMIO block device")
         }
+    }
+
+    #[tokio::test]
+    async fn shared_block_device_remains_registered_until_last_detach() {
+        let dm = new_device_manager().await.unwrap();
+        let mut dm = dm.write().await;
+        let id = dm
+            .new_device(&DeviceConfig::BlockCfgModern(BlockConfigModern {
+                path_on_host: "/dev/shared-test".into(),
+                driver_option: VIRTIO_BLOCK_MMIO.into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let DeviceType::BlockModern(device) = dm.get_device_info(&id).await.unwrap() else {
+            panic!("expected block device");
+        };
+        device.lock().await.attach_count = 2;
+        dm.try_remove_device(&id).await.unwrap();
+        assert!(dm.get_device_info(&id).await.is_ok());
+        assert_eq!(device.lock().await.attach_count, 1);
+        assert_eq!(dm.shared_info.declare_device_index().unwrap(), 1);
+        dm.try_remove_device(&id).await.unwrap();
+        assert!(dm.get_device_info(&id).await.is_err());
+        assert_eq!(dm.shared_info.declare_device_index().unwrap(), 0);
     }
 
     #[tokio::test]

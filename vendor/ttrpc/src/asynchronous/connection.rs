@@ -10,7 +10,7 @@ use tokio::io::split;
 use tokio::{io::ReadHalf, select, task};
 
 use crate::error::Error;
-use crate::proto::{GenMessage, GenMessageError, MessageHeader};
+use crate::proto::{GenMessage, GenMessageError};
 
 use super::{stream::SendingMessage, transport::Socket};
 
@@ -34,7 +34,6 @@ pub trait ReaderDelegate {
     async fn disconnect(&self, e: Error, task: &mut task::JoinHandle<()>);
     async fn exit(&self);
     async fn handle_msg(&self, msg: GenMessage);
-    async fn handle_err(&self, header: MessageHeader, e: Error);
 }
 
 pub struct Connection<B: Builder> {
@@ -90,11 +89,6 @@ where
                             trace!("Got Message {:?}", msg);
                             reader_delegate.handle_msg(msg).await;
                         }
-                        Err(GenMessageError::ReturnError(header, e)) => {
-                            trace!("Read msg err (can be return): {:?}", e);
-                            reader_delegate.handle_err(header, e).await;
-                        }
-
                         Err(GenMessageError::InternalError(e)) => {
                             trace!("Read msg err: {:?}", e);
                             reader_delegate.disconnect(e, &mut writer_task).await;

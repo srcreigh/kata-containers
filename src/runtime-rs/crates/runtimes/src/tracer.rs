@@ -32,8 +32,6 @@ lazy_static! {
 /// The tracer wrapper for kata-containers
 /// The fields and member methods should ALWAYS be PRIVATE and be exposed in a safe
 /// way to other modules
-unsafe impl Send for KataTracer {}
-unsafe impl Sync for KataTracer {}
 pub struct KataTracer {
     subscriber: Arc<dyn Subscriber + Send + Sync>,
     enabled: bool,

@@ -19,7 +19,6 @@ use hypervisor::{
 use kata_types::fs::VM_ROOTFS_FILESYSTEM_XFS;
 use kata_types::mount::Mount;
 use nix::sys::stat::{self, SFlag};
-use oci_spec::runtime as oci;
 use tokio::sync::RwLock;
 
 const BLOCKFILE_ROOTFS_FLAG: &str = "loop";
@@ -27,8 +26,7 @@ const BLOCKFILE_ROOTFS_FLAG: &str = "loop";
 pub(crate) struct BlockRootfs {
     guest_path: String,
     device_id: String,
-    mount: oci::Mount,
-    storage: Option<agent::Storage>,
+    storage: agent::Storage,
 }
 
 impl BlockRootfs {
@@ -86,8 +84,7 @@ impl BlockRootfs {
         Ok(Self {
             guest_path: container_path.clone(),
             device_id,
-            mount: oci::Mount::default(),
-            storage: Some(storage),
+            storage,
         })
     }
 }
@@ -98,16 +95,8 @@ impl Rootfs for BlockRootfs {
         Ok(self.guest_path.clone())
     }
 
-    async fn get_rootfs_mount(&self) -> Result<Vec<oci::Mount>> {
-        Ok(vec![self.mount.clone()])
-    }
-
-    async fn get_storage(&self) -> Option<Vec<Storage>> {
-        self.storage.clone().map(|s| vec![s])
-    }
-
-    async fn get_device_id(&self) -> Result<Option<String>> {
-        Ok(Some(self.device_id.clone()))
+    async fn get_storage(&self) -> Vec<Storage> {
+        vec![self.storage.clone()]
     }
 
     async fn cleanup(&self, device_manager: &RwLock<DeviceManager>) -> Result<()> {

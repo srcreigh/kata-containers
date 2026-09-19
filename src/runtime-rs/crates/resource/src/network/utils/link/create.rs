@@ -77,19 +77,8 @@ const DEVICE_PATH: &str = "/dev/net/tun";
 ioctl_write_ptr!(tun_set_iff, b'T', 202, libc::c_int);
 ioctl_write_ptr!(tun_set_persist, b'T', 203, libc::c_int);
 
-#[derive(Clone, Copy, Debug)]
-pub enum LinkType {
-    #[allow(dead_code)]
-    Tun,
-    Tap,
-}
-
-pub fn create_link(name: &str, link_type: LinkType, queues: usize) -> Result<()> {
-    let mut flags = libc::IFF_VNET_HDR;
-    flags |= match link_type {
-        LinkType::Tun => libc::IFF_TUN,
-        LinkType::Tap => libc::IFF_TAP,
-    };
+pub fn create_tap(name: &str, queues: usize) -> Result<()> {
+    let mut flags = libc::IFF_VNET_HDR | libc::IFF_TAP;
 
     let queues = if queues == 0 { 1 } else { queues };
     if queues > 1 {
@@ -160,7 +149,6 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_create_link() {
-        let name_tun = "___test_tun";
         let name_tap = "___test_tap";
 
         // tests should be taken under root
@@ -174,15 +162,11 @@ mod tests {
                 thread_handler.abort();
             });
 
-            assert!(create_link(name_tun, LinkType::Tun, 2).is_ok());
-            assert!(create_link(name_tap, LinkType::Tap, 2).is_ok());
+            assert!(create_tap(name_tap, 2).is_ok());
             assert!(get_link_by_name(&handle, name_tap).await.is_ok());
-            assert!(get_link_by_name(&handle, name_tun).await.is_ok());
-            assert!(delete_link(&handle, name_tun).await.is_ok());
             assert!(delete_link(&handle, name_tap).await.is_ok());
 
             // link does not present
-            assert!(get_link_by_name(&handle, name_tun).await.is_err());
             assert!(get_link_by_name(&handle, name_tap).await.is_err());
         }
     }

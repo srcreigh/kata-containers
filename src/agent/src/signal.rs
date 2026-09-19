@@ -6,7 +6,6 @@
 
 use crate::sandbox::Sandbox;
 use anyhow::{anyhow, Result};
-use capctl::prctl::set_subreaper;
 use nix::sys::wait::WaitPidFlag;
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd;
@@ -41,8 +40,8 @@ async fn handle_sigchild(logger: Logger, sandbox: Arc<Mutex<Sandbox>>) -> Result
     info!(logger, "handling signal"; "signal" => "SIGCHLD");
 
     loop {
-        // Avoid reaping the undesirable child's signal, e.g., execute_hook's
-        // The lock should be released immediately.
+        // Container launch and filesystem creation wait for their own children.
+        // Coordinate with them so the PID-1 reaper does not consume those exits.
         let _locker = rustjail::container::WAIT_PID_LOCKER.lock().await;
         let result = wait::waitpid(
             Some(Pid::from_raw(-1)),
@@ -104,9 +103,6 @@ pub async fn setup_signal_handler(
     mut shutdown: Receiver<bool>,
 ) -> Result<()> {
     let logger = logger.new(o!("subsystem" => "signals"));
-
-    set_subreaper(true)
-        .map_err(|err| anyhow!(err).context("failed to setup agent as a child subreaper"))?;
 
     let mut sigchild_stream = signal(SignalKind::child())?;
 

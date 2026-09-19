@@ -25,9 +25,8 @@ use containerd_shim_protos::sandbox_async;
 const MESSAGE_BUFFER_SIZE: usize = 8;
 
 pub struct ServiceManager {
-    receiver: Option<Receiver<Message>>,
-    handler: Arc<RuntimeHandlerManager>,
-    server: Option<Server>,
+    receiver: Receiver<Message>,
+    server: Server,
     binary: String,
     address: String,
     namespace: String,
@@ -39,7 +38,6 @@ impl std::fmt::Debug for ServiceManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceManager")
             .field("receiver", &self.receiver)
-            .field("server.is_some()", &self.server.is_some())
             .field("binary", &self.binary)
             .field("address", &self.address)
             .field("namespace", &self.namespace)
@@ -60,18 +58,23 @@ impl ServiceManager {
         logging::register_subsystem_logger("runtimes", "service");
 
         let (sender, receiver) = channel::<Message>(MESSAGE_BUFFER_SIZE);
-        let rt_mgr = RuntimeHandlerManager::new(id, sender).context("new runtime handler")?;
+        let rt_mgr = RuntimeHandlerManager::new(id, sender);
         let handler = Arc::new(rt_mgr);
+        let sandbox_service: Arc<dyn sandbox_async::Sandbox + Send + Sync> =
+            Arc::new(SandboxService::new(handler.clone()));
+        let task_service: Arc<dyn shim_async::Task + Send + Sync> =
+            Arc::new(TaskService::new(handler.clone()));
         // SAFETY: containerd passes a valid unix listener fd when starting the shim.
-        let server = unsafe { Server::new().add_unix_listener(task_server_fd)? };
+        let server = unsafe { Server::new().add_unix_listener(task_server_fd)? }
+            .register_service(sandbox_async::create_sandbox(sandbox_service))
+            .register_service(shim_async::create_task(task_service));
         let event_publisher = new_event_publisher(namespace)
             .await
             .context("new event publisher")?;
 
         Ok(Self {
-            receiver: Some(receiver),
-            handler,
-            server: Some(server),
+            receiver,
+            server,
             binary: containerd_binary.to_string(),
             address: address.to_string(),
             namespace: namespace.to_string(),
@@ -81,35 +84,21 @@ impl ServiceManager {
 
     pub async fn run(mut self) -> Result<()> {
         info!(sl!(), "begin to run service");
-        self.registry_service().context("registry service")?;
-        self.start_service().await.context("start service")?;
+        self.server.start().await.context("start service")?;
 
         info!(sl!(), "wait server message");
-        let mut rx = self.receiver.take();
-        if let Some(rx) = rx.as_mut() {
-            while let Some(r) = rx.recv().await {
-                info!(sl!(), "receive action {:?}", &r.action);
-                let result = match r.action {
-                    Action::Start => self.start_service().await.context("start listen"),
-                    Action::Stop => self.stop_service().await.context("stop listen"),
-                    Action::Shutdown => {
-                        self.stop_service().await.context("stop listen")?;
-                        break;
+        while let Some(r) = self.receiver.recv().await {
+            info!(sl!(), "receive action {:?}", &r.action);
+            match r.action {
+                Action::Shutdown => {
+                    self.server.stop_listen().await;
+                    break;
+                }
+                Action::Event(event) => {
+                    info!(sl!(), "get event {:?}", &event);
+                    if let Err(err) = self.event_publisher.forward(event).await {
+                        error!(sl!(), "failed to forward event: {:?}", err);
                     }
-                    Action::Event(event) => {
-                        info!(sl!(), "get event {:?}", &event);
-                        self.event_publisher
-                            .forward(event)
-                            .await
-                            .context("forward event")
-                    }
-                };
-
-                if let Some(ref sender) = r.resp_sender {
-                    if let Err(err) = result.as_ref() {
-                        error!(sl!(), "failed to process action {:?}", err);
-                    }
-                    sender.send(result).await.context("send response")?;
                 }
             }
         }
@@ -119,9 +108,9 @@ impl ServiceManager {
         Ok(())
     }
 
-    pub async fn cleanup(sid: &str) -> Result<()> {
+    pub async fn cleanup(sid: &str) {
         let (sender, _receiver) = channel::<Message>(MESSAGE_BUFFER_SIZE);
-        let handler = RuntimeHandlerManager::new(sid, sender).context("new runtime handler")?;
+        let handler = RuntimeHandlerManager::new(sid, sender);
         if let Err(e) = handler.cleanup().await {
             warn!(sl!(), "failed to clean up runtime state, {}", e);
         }
@@ -133,35 +122,5 @@ impl ServiceManager {
                 warn!(sl!(), "failed to clean up sandbox tmp dir, {}", e);
             }
         }
-
-        Ok(())
-    }
-
-    fn registry_service(&mut self) -> Result<()> {
-        if let Some(s) = self.server.take() {
-            let sandbox_service: Arc<dyn sandbox_async::Sandbox + Send + Sync> =
-                Arc::new(SandboxService::new(self.handler.clone()));
-            let s = s.register_service(sandbox_async::create_sandbox(sandbox_service));
-
-            let task_service: Arc<dyn shim_async::Task + Send + Sync> =
-                Arc::new(TaskService::new(self.handler.clone()));
-            let s = s.register_service(shim_async::create_task(task_service));
-            self.server = Some(s);
-        }
-        Ok(())
-    }
-
-    async fn start_service(&mut self) -> Result<()> {
-        if let Some(s) = self.server.as_mut() {
-            s.start().await.context("task server start")?;
-        }
-        Ok(())
-    }
-
-    async fn stop_service(&mut self) -> Result<()> {
-        if let Some(s) = self.server.as_mut() {
-            s.stop_listen().await;
-        }
-        Ok(())
     }
 }

@@ -177,7 +177,6 @@ pub struct GenMessage {
 #[derive(Debug, PartialEq)]
 pub enum GenMessageError {
     InternalError(Error),
-    ReturnError(MessageHeader, Error),
 }
 
 impl From<Error> for GenMessageError {
@@ -353,7 +352,7 @@ where
         let message = GenMessage::read_from(reader)
             .await
             .map_err(|error| match error {
-                GenMessageError::InternalError(e) | GenMessageError::ReturnError(_, e) => e,
+                GenMessageError::InternalError(e) => e,
             })?;
         let payload =
             C::decode(message.payload).map_err(err_to_others_err!(e, "Decode payload failed."))?;

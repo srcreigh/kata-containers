@@ -23,7 +23,7 @@ const FS_GID: &str = "fsgid";
 #[derive(Debug)]
 pub(crate) struct LocalStorage {
     mounts: Vec<oci::Mount>,
-    storage: Option<agent::Storage>,
+    storage: agent::Storage,
 }
 
 impl LocalStorage {
@@ -91,7 +91,7 @@ impl LocalStorage {
 
         Ok(Self {
             mounts,
-            storage: Some(local_storage),
+            storage: local_storage,
         })
     }
 }
@@ -103,21 +103,12 @@ impl Volume for LocalStorage {
     }
 
     fn get_storage(&self) -> Result<Vec<agent::Storage>> {
-        let s = if let Some(s) = self.storage.as_ref() {
-            vec![s.clone()]
-        } else {
-            vec![]
-        };
-        Ok(s)
+        Ok(vec![self.storage.clone()])
     }
 
     async fn cleanup(&self, _device_manager: &RwLock<DeviceManager>) -> Result<()> {
         // TODO: Clean up LocalStorage
         warn!(sl!(), "Cleaning up LocalStorage is no need.");
         Ok(())
-    }
-
-    fn get_device_id(&self) -> Result<Option<String>> {
-        Ok(None)
     }
 }

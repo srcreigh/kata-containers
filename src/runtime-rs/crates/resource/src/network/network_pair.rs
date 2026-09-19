@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::{convert::TryFrom, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use futures::stream::TryStreamExt;
@@ -12,7 +12,7 @@ use rtnetlink::LinkUnspec;
 
 use super::{
     network_model,
-    utils::{self, address::Address, link},
+    utils::{self, link},
 };
 
 const TAP_SUFFIX: &str = "_kata";
@@ -21,13 +21,11 @@ const TAP_SUFFIX: &str = "_kata";
 pub struct NetworkInterface {
     pub name: String,
     pub hard_addr: String,
-    pub addrs: Vec<Address>,
 }
 
 #[derive(Default, Debug)]
 pub struct TapInterface {
     pub id: String,
-    pub name: String,
     pub tap_iface: NetworkInterface,
 }
 #[derive(Debug)]
@@ -35,7 +33,6 @@ pub struct NetworkPair {
     pub tap: TapInterface,
     pub virt_iface: NetworkInterface,
     pub model: Arc<dyn network_model::NetworkModel>,
-    pub network_qos: bool,
     /// Number of virtio queue pairs (each pair = 1 RX + 1 TX).
     /// Derived from `network_queues` in the hypervisor TOML config.
     pub network_queues: usize,
@@ -66,18 +63,6 @@ impl NetworkPair {
         let virt_link = get_link_by_name(handle, virt_iface_name.as_str())
             .await
             .context("get link by name")?;
-
-        let mut virt_addr_msg_list = handle
-            .address()
-            .get()
-            .set_link_index_filter(virt_link.attrs().index)
-            .execute();
-
-        let mut virt_address = vec![];
-        while let Some(addr_msg) = virt_addr_msg_list.try_next().await? {
-            let addr = Address::try_from(addr_msg).context("get address from msg")?;
-            virt_address.push(addr);
-        }
 
         // Save the veth MAC address to the TAP so that it can later be used
         // to build the hypervisor command line. This MAC address has to be
@@ -118,7 +103,6 @@ impl NetworkPair {
         let net_pair = NetworkPair {
             tap: TapInterface {
                 id: String::from(&unique_id),
-                name: format!("br{idx}{TAP_SUFFIX}"),
                 tap_iface: NetworkInterface {
                     name: tap_iface_name,
                     hard_addr: tap_hard_addr,
@@ -128,10 +112,8 @@ impl NetworkPair {
             virt_iface: NetworkInterface {
                 name: virt_iface_name,
                 hard_addr: virt_hard_addr,
-                addrs: virt_address,
             },
             model,
-            network_qos: false,
             network_queues: queues,
         };
 
@@ -156,25 +138,12 @@ pub async fn create_link(
     name: &str,
     queues: usize,
 ) -> Result<Box<dyn link::Link>> {
-    link::create_link(name, link::LinkType::Tap, queues)?;
+    link::create_tap(name, queues)?;
 
     let link = get_link_by_name(handle, name)
         .await
         .context("get link by name")?;
 
-    let base = link.attrs();
-    if base.master_index != 0 {
-        handle
-            .link()
-            .set(
-                LinkUnspec::new_with_index(base.index)
-                    .controller(base.master_index)
-                    .build(),
-            )
-            .execute()
-            .await
-            .context("set index")?;
-    }
     Ok(link)
 }
 

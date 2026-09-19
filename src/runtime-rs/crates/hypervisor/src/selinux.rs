@@ -3,19 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use nix::unistd::gettid;
-
-/// Check if SELinux is enabled on the system
-pub fn is_selinux_enabled() -> bool {
-    fs::read_to_string("/proc/mounts")
-        .map(|buf| buf.contains("selinuxfs"))
-        .unwrap_or_default()
-}
 
 pub fn set_exec_label(label: &str) -> Result<()> {
     let mut attr_path = Path::new("/proc/thread-self/attr/exec").to_path_buf();
@@ -41,6 +34,13 @@ pub fn set_exec_label(label: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Check if SELinux is enabled on the system
+    fn is_selinux_enabled() -> bool {
+        std::fs::read_to_string("/proc/mounts")
+            .map(|buf| buf.contains("selinuxfs"))
+            .unwrap_or_default()
+    }
 
     const TEST_LABEL: &str = "system_u:system_r:unconfined_t:s0";
 

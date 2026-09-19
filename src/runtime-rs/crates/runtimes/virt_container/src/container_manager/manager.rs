@@ -264,19 +264,12 @@ impl ContainerManager for VirtContainerManager {
         let c = containers
             .get(container_id)
             .ok_or_else(|| Error::ContainerNotFound(container_id.clone()))?;
-        let (watcher, status) = c.wait_process(process).await.context("wait")?;
+        let (mut watcher, status) = c.wait_process(process).await.context("wait")?;
         drop(containers);
 
-        match watcher {
-            Some(mut watcher) => {
-                info!(logger, "begin wait exit");
-                while watcher.changed().await.is_ok() {}
-                info!(logger, "end wait exited");
-            }
-            None => {
-                warn!(logger, "failed to find watcher for wait process");
-            }
-        }
+        info!(logger, "begin wait exit");
+        while watcher.changed().await.is_ok() {}
+        info!(logger, "end wait exited");
 
         let status = status.read().await;
 

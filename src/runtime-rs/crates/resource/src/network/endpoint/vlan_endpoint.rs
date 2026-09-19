@@ -11,11 +11,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use hypervisor::device::device_manager::DeviceManager;
 use hypervisor::device::driver::NetworkConfig;
-use hypervisor::device::DeviceType;
-use hypervisor::{Hypervisor, NetworkDevice};
 use tokio::sync::RwLock;
 
-use super::endpoint_persist::{EndpointState, VlanEndpointState};
 use super::{attach_network_device, Endpoint};
 use crate::network::network_model::TC_FILTER_NET_MODEL_STR;
 use crate::network::{utils, NetworkPair};
@@ -55,10 +52,7 @@ impl VlanEndpoint {
 
         Ok(NetworkConfig {
             host_dev_name: iface.name.clone(),
-            virt_iface_name: self.net_pair.virt_iface.name.clone(),
             guest_mac: Some(guest_mac),
-            queue_num: self.net_pair.network_queues,
-            queue_size: 256,
             ..Default::default()
         })
     }
@@ -66,10 +60,6 @@ impl VlanEndpoint {
 
 #[async_trait]
 impl Endpoint for VlanEndpoint {
-    async fn name(&self) -> String {
-        self.net_pair.virt_iface.name.clone()
-    }
-
     async fn hardware_addr(&self) -> String {
         self.net_pair.tap.tap_iface.hard_addr.clone()
     }
@@ -86,32 +76,10 @@ impl Endpoint for VlanEndpoint {
             .context("do handle network Vlan endpoint device failed.")
     }
 
-    async fn detach(&self, h: &dyn Hypervisor) -> Result<()> {
+    async fn detach(&self) -> Result<()> {
         self.net_pair
             .del_network_model()
             .await
-            .context("delete network model failed.")?;
-
-        let config = self
-            .get_network_config()
-            .context("get network config failed.")?;
-        h.remove_device(DeviceType::Network(NetworkDevice {
-            config,
-            ..Default::default()
-        }))
-        .await
-        .context("remove Vlan endpoint device by hypervisor failed.")?;
-
-        Ok(())
-    }
-
-    async fn save(&self) -> Option<EndpointState> {
-        Some(EndpointState {
-            vlan_endpoint: Some(VlanEndpointState {
-                if_name: self.net_pair.virt_iface.name.clone(),
-                network_qos: self.net_pair.network_qos,
-            }),
-            ..Default::default()
-        })
+            .context("remove tc filters")
     }
 }

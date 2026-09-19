@@ -339,12 +339,6 @@ impl ReaderDelegate for ClientReader {
 
     async fn exit(&self) {}
 
-    async fn handle_err(&self, header: MessageHeader, e: Error) {
-        if let Some(tx) = get_resp_tx(self.streams.clone(), &header).await {
-            let _ = tx.try_send(Err(e));
-        }
-    }
-
     async fn handle_msg(&self, msg: GenMessage) {
         let id = msg.header.stream_id;
         if let Some(tx) = get_resp_tx(self.streams.clone(), &msg.header).await {

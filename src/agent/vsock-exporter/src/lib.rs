@@ -15,20 +15,12 @@
 #![allow(unknown_lints)]
 
 use async_trait::async_trait;
-use byteorder::{ByteOrder, NetworkEndian};
 use opentelemetry::sdk::export::trace::{ExportResult, SpanData, SpanExporter};
 use opentelemetry::sdk::export::ExportError;
 use slog::{error, info, o, Logger};
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
 use tokio_vsock::VsockStream;
-
-const ANY_CID: &str = "any";
-
-// Must match the value of the variable of the same name in the trace forwarder.
-const HEADER_SIZE_BYTES: u64 = std::mem::size_of::<u64>() as u64;
 
 // By default, the VSOCK exporter should talk "out" to the host where the
 // forwarder is running.
@@ -39,16 +31,16 @@ const DEFAULT_PORT: u32 = 10240;
 
 #[derive(Debug)]
 pub struct Exporter {
-    port: u32,
-    cid: u32,
-    conn: Option<Arc<Mutex<VsockStream>>>,
+    conn: Option<VsockStream>,
     logger: Logger,
 }
 
 impl Exporter {
-    /// Create a new exporter builder.
-    pub fn builder() -> Builder {
-        Builder::default()
+    pub fn new(logger: &Logger) -> Self {
+        Self {
+            conn: None,
+            logger: logger.new(o!("cid" => DEFAULT_CID, "port" => DEFAULT_PORT)),
+        }
     }
 }
 
@@ -56,8 +48,6 @@ impl Exporter {
 pub enum Error {
     #[error("connection error: {0}")]
     ConnectionError(String),
-    #[error("serialisation error: {0}")]
-    SerialisationError(#[from] serde_json::Error),
     #[error("I/O error: {0}")]
     IOError(#[from] std::io::Error),
 }
@@ -68,39 +58,22 @@ impl ExportError for Error {
     }
 }
 
-fn make_io_error(desc: String) -> std::io::Error {
-    std::io::Error::other(desc)
-}
-
 // Send a trace span to the forwarder running on the host.
-async fn write_span(
-    writer: Arc<Mutex<VsockStream>>,
-    span: &SpanData,
-) -> Result<(), std::io::Error> {
-    let mut writer = writer.lock().await;
-
-    let encoded_payload: Vec<u8> =
-        serde_json::to_vec(span).map_err(|e| make_io_error(e.to_string()))?;
-    let payload_len: u64 = encoded_payload.len() as u64;
-
-    let mut payload_len_as_bytes: [u8; HEADER_SIZE_BYTES as usize] =
-        [0; HEADER_SIZE_BYTES as usize];
-
-    // Encode the header
-    NetworkEndian::write_u64(&mut payload_len_as_bytes, payload_len);
-
-    // Send the header
-    writer.write_all(&payload_len_as_bytes).await?;
-
+async fn write_span(writer: &mut VsockStream, span: &SpanData) -> std::io::Result<()> {
+    let encoded_payload = serde_json::to_vec(span).map_err(std::io::Error::other)?;
+    // The forwarder expects an eight-byte network-order payload length.
+    writer
+        .write_all(&(encoded_payload.len() as u64).to_be_bytes())
+        .await?;
     writer.write_all(&encoded_payload).await
 }
 
 async fn handle_batch(
-    writer: Arc<Mutex<VsockStream>>,
+    writer: &mut VsockStream,
     batch: Vec<SpanData>,
 ) -> Result<(), std::io::Error> {
     for span_data in batch {
-        write_span(writer.clone(), &span_data).await?;
+        write_span(writer, &span_data).await?;
     }
 
     Ok(())
@@ -110,15 +83,15 @@ async fn handle_batch(
 impl SpanExporter for Exporter {
     async fn export(&mut self, batch: Vec<SpanData>) -> ExportResult {
         if self.conn.is_none() {
-            let conn = connect_vsock(self.cid, self.port).await.map(|e| {
+            let conn = connect_vsock().await.map_err(|e| {
                 error!(self.logger, "failed to obtain connection"; "error" => format!("{:?}", e));
                 e
             })?;
 
-            self.conn = Some(Arc::new(Mutex::new(conn)));
+            self.conn = Some(conn);
         }
 
-        handle_batch(self.conn.as_ref().unwrap().clone(), batch)
+        handle_batch(self.conn.as_mut().unwrap(), batch)
             .await
             .map_err(|e| {
                 error!(self.logger, "handle_batch error: {:?}", e);
@@ -136,61 +109,8 @@ impl SpanExporter for Exporter {
     }
 }
 
-#[derive(Debug)]
-pub struct Builder {
-    port: u32,
-    cid: u32,
-    logger: Logger,
-}
-
-impl Default for Builder {
-    fn default() -> Self {
-        let logger = Logger::root(slog::Discard, o!());
-
-        Builder {
-            cid: DEFAULT_CID,
-            port: DEFAULT_PORT,
-            logger,
-        }
-    }
-}
-
-impl Builder {
-    pub fn with_cid(self, cid: u32) -> Self {
-        Builder { cid, ..self }
-    }
-
-    pub fn with_port(self, port: u32) -> Self {
-        Builder { port, ..self }
-    }
-
-    pub fn with_logger(self, logger: &Logger) -> Self {
-        Builder {
-            logger: logger.new(o!()),
-            ..self
-        }
-    }
-
-    pub fn init(self) -> Exporter {
-        let Builder { port, cid, logger } = self;
-
-        let cid_str: String = if self.cid == libc::VMADDR_CID_ANY {
-            ANY_CID.to_string()
-        } else {
-            format!("{}", self.cid)
-        };
-
-        Exporter {
-            port,
-            cid,
-            conn: None,
-            logger: logger.new(o!("cid" => cid_str, "port" => port)),
-        }
-    }
-}
-
-async fn connect_vsock(cid: u32, port: u32) -> Result<VsockStream, Error> {
-    match VsockStream::connect(cid, port).await {
+async fn connect_vsock() -> Result<VsockStream, Error> {
+    match VsockStream::connect(DEFAULT_CID, DEFAULT_PORT).await {
         Ok(conn) => Ok(conn),
         Err(e) => Err(Error::ConnectionError(e.to_string())),
     }

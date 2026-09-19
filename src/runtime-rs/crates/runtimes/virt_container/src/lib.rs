@@ -21,8 +21,7 @@ use std::sync::Arc;
 
 use agent::{kata::KataAgent, AGENT_KATA};
 use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait;
-use common::{message::Message, types::SandboxConfig, RuntimeHandler, RuntimeInstance};
+use common::{message::Message, types::SandboxConfig, RuntimeInstance};
 use hypervisor::Hypervisor;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use hypervisor::{firecracker::Firecracker, HYPERVISOR_FIRECRACKER};
@@ -33,18 +32,14 @@ use kata_types::config::FirecrackerConfig;
 use kata_types::config::{hypervisor::register_hypervisor_plugin, TomlConfig};
 
 use resource::ResourceManager;
-use sandbox::VIRTCONTAINER;
 use tokio::sync::mpsc::Sender;
 use tracing::instrument;
 
-unsafe impl Send for VirtContainer {}
-unsafe impl Sync for VirtContainer {}
 #[derive(Debug)]
 pub struct VirtContainer {}
 
-#[async_trait]
-impl RuntimeHandler for VirtContainer {
-    fn init() -> Result<()> {
+impl VirtContainer {
+    pub fn init() -> Result<()> {
         // Before start logging with virt-container, regist it
         logging::register_subsystem_logger("runtimes", "virt-container");
 
@@ -59,17 +54,8 @@ impl RuntimeHandler for VirtContainer {
         Ok(())
     }
 
-    fn name() -> String {
-        VIRTCONTAINER.to_string()
-    }
-
-    fn new_handler() -> Arc<dyn RuntimeHandler> {
-        Arc::new(VirtContainer {})
-    }
-
     #[instrument]
-    async fn new_instance(
-        &self,
+    pub async fn new_instance(
         sid: &str,
         msg_sender: Sender<Message>,
         config: Arc<TomlConfig>,
@@ -105,11 +91,6 @@ impl RuntimeHandler for VirtContainer {
             sandbox: Arc::new(sandbox),
             container_manager: Arc::new(container_manager),
         })
-    }
-
-    fn cleanup(&self, _id: &str) -> Result<()> {
-        // TODO
-        Ok(())
     }
 }
 

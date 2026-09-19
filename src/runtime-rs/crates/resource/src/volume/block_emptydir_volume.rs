@@ -19,7 +19,7 @@ use hypervisor::{
     BlockConfigModern,
 };
 use kata_sys_util::k8s::is_disk_empty_dir;
-use kata_types::config::{EMPTYDIR_MODE_BLOCK_ENCRYPTED, EMPTYDIR_MODE_BLOCK_PLAIN};
+use kata_types::config::EMPTYDIR_MODE_BLOCK_PLAIN;
 use kata_types::mount::{
     add_volume_mount_info, is_volume_mounted, DirectVolumeMountInfo,
     DEFAULT_KATA_GUEST_SANDBOX_DIR, KATA_BLOCK_VOLUME_CREATE_FS,
@@ -31,12 +31,8 @@ use tokio::sync::RwLock;
 use crate::volume::utils::KATA_MOUNT_BIND_TYPE;
 
 const DISK_IMG: &str = "disk.img";
-const ENCRYPTION_KEY_DRIVER_OPTION: &str = "encryption_key";
-const ENCRYPTION_KEY_VALUE: &str = "ephemeral";
 const METADATA_CREATE_FILESYSTEM: &str = "createFilesystem";
-const METADATA_ENCRYPTION_KEY: &str = "encryptionKey";
 const METADATA_FS_GROUP: &str = "fsGroup";
-const DISCARD_MOUNT_OPTION: &str = "discard";
 
 /// Information about an ephemeral disk created on the host, needed for
 /// sandbox-level cleanup.
@@ -48,23 +44,13 @@ pub(crate) struct EphemeralDiskInfo {
 
 #[derive(Clone)]
 pub(crate) struct BlockEmptyDirVolume {
-    storage: Option<agent::Storage>,
+    storage: agent::Storage,
     mount: oci::Mount,
-    device_id: String,
     pub(crate) disk_info: EphemeralDiskInfo,
 }
 
 impl BlockEmptyDirVolume {
-    pub(crate) async fn new(
-        d: &RwLock<DeviceManager>,
-        m: &oci::Mount,
-        sid: &str,
-        emptydir_mode: &str,
-        block_device_discard_supported: bool,
-    ) -> Result<Self> {
-        let encrypted = emptydir_mode == EMPTYDIR_MODE_BLOCK_ENCRYPTED;
-        let discard_unmap =
-            emptydir_mode == EMPTYDIR_MODE_BLOCK_PLAIN && block_device_discard_supported;
+    pub(crate) async fn new(d: &RwLock<DeviceManager>, m: &oci::Mount, sid: &str) -> Result<Self> {
         let source = m
             .source()
             .as_ref()
@@ -94,8 +80,8 @@ impl BlockEmptyDirVolume {
                 volume_type: "blk".to_string(),
                 device: disk_path.display().to_string(),
                 fs_type: "ext4".to_string(),
-                metadata: block_emptydir_metadata(encrypted, dir_gid),
-                options: block_emptydir_mount_options(discard_unmap),
+                metadata: block_emptydir_metadata(dir_gid),
+                options: Vec::new(),
             };
 
             add_volume_mount_info(&source, &mount_info)
@@ -113,7 +99,7 @@ impl BlockEmptyDirVolume {
             .await
             .context("plug block emptyDir block device")?;
 
-        let (storage, mut mount, device_id) = crate::volume::utils::handle_block_volume(
+        let (storage, mut mount, _device_id) = crate::volume::utils::handle_block_volume(
             device_info,
             m,
             false,
@@ -129,7 +115,7 @@ impl BlockEmptyDirVolume {
         mount.set_typ(Some("bind".to_string()));
 
         let mut storage = storage;
-        configure_block_emptydir_storage(&mut storage, encrypted, discard_unmap);
+        configure_block_emptydir_storage(&mut storage);
 
         // Mirror the Go runtime's handleBlkOCIMounts: the agent mounts the
         // block device at $(spath)/$(b64_device_id) which genpolicy expands to
@@ -159,54 +145,26 @@ impl BlockEmptyDirVolume {
         };
 
         Ok(Self {
-            storage: Some(storage),
+            storage: storage,
             mount,
-            device_id,
             disk_info,
         })
     }
 }
 
-fn block_emptydir_metadata(encrypted: bool, dir_gid: u32) -> HashMap<String, String> {
+fn block_emptydir_metadata(dir_gid: u32) -> HashMap<String, String> {
     let mut metadata = HashMap::new();
     metadata.insert(METADATA_CREATE_FILESYSTEM.to_string(), true.to_string());
-    if encrypted {
-        metadata.insert(
-            METADATA_ENCRYPTION_KEY.to_string(),
-            ENCRYPTION_KEY_VALUE.to_string(),
-        );
-    }
     if dir_gid != 0 {
         metadata.insert(METADATA_FS_GROUP.to_string(), dir_gid.to_string());
     }
     metadata
 }
 
-fn block_emptydir_mount_options(discard_unmap: bool) -> Vec<String> {
-    if discard_unmap {
-        vec![DISCARD_MOUNT_OPTION.to_string()]
-    } else {
-        vec![]
-    }
-}
-
-fn configure_block_emptydir_storage(
-    storage: &mut agent::Storage,
-    encrypted: bool,
-    discard_unmap: bool,
-) {
-    if encrypted {
-        storage.driver_options.push(format!(
-            "{}={}",
-            ENCRYPTION_KEY_DRIVER_OPTION, ENCRYPTION_KEY_VALUE
-        ));
-    }
+fn configure_block_emptydir_storage(storage: &mut agent::Storage) {
     storage
         .driver_options
         .push(KATA_BLOCK_VOLUME_CREATE_FS.to_string());
-    if discard_unmap {
-        storage.options.push(DISCARD_MOUNT_OPTION.to_string());
-    }
     storage.shared = true;
 }
 
@@ -217,22 +175,13 @@ impl Volume for BlockEmptyDirVolume {
     }
 
     fn get_storage(&self) -> Result<Vec<agent::Storage>> {
-        let s = if let Some(s) = self.storage.as_ref() {
-            vec![s.clone()]
-        } else {
-            vec![]
-        };
-        Ok(s)
+        Ok(vec![self.storage.clone()])
     }
 
     async fn cleanup(&self, _device_manager: &RwLock<DeviceManager>) -> Result<()> {
         // Cleanup is deferred to sandbox teardown because the storage is shared
         // across all containers in the pod.
         Ok(())
-    }
-
-    fn get_device_id(&self) -> Result<Option<String>> {
-        Ok(Some(self.device_id.clone()))
     }
 }
 
@@ -256,7 +205,7 @@ pub(crate) fn is_block_emptydir_volume(m: &oci::Mount, emptydir_mode: &str) -> b
 }
 
 pub(crate) fn is_block_emptydir_mode(emptydir_mode: &str) -> bool {
-    emptydir_mode == EMPTYDIR_MODE_BLOCK_ENCRYPTED || emptydir_mode == EMPTYDIR_MODE_BLOCK_PLAIN
+    emptydir_mode == EMPTYDIR_MODE_BLOCK_PLAIN
 }
 
 fn get_filesystem_capacity(path: &Path) -> Result<u64> {
@@ -273,75 +222,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn block_plain_emptydir_requests_filesystem_creation_and_discard() {
-        let metadata = block_emptydir_metadata(false, 0);
-
+    fn block_plain_storage_preserves_creation_sharing_and_group() {
+        let metadata = block_emptydir_metadata(1000);
         assert_eq!(
             metadata.get(METADATA_CREATE_FILESYSTEM).map(String::as_str),
             Some("true")
         );
-        assert!(!metadata.contains_key(METADATA_ENCRYPTION_KEY));
-        assert!(!metadata.contains_key(METADATA_FS_GROUP));
         assert_eq!(
-            block_emptydir_mount_options(true),
-            vec![DISCARD_MOUNT_OPTION.to_string()]
+            metadata.get(METADATA_FS_GROUP).map(String::as_str),
+            Some("1000")
         );
-
+        assert_eq!(metadata.len(), 2);
         let mut storage = agent::Storage::default();
-
-        configure_block_emptydir_storage(&mut storage, false, true);
-
-        assert_eq!(
-            storage.driver_options,
-            vec![KATA_BLOCK_VOLUME_CREATE_FS.to_string()]
-        );
-        assert_eq!(storage.options, vec![DISCARD_MOUNT_OPTION.to_string()]);
-        assert!(storage.shared);
-    }
-
-    #[test]
-    fn block_plain_emptydir_skips_discard_when_hypervisor_cannot_expose_it() {
-        assert!(block_emptydir_mount_options(false).is_empty());
-
-        let mut storage = agent::Storage::default();
-
-        configure_block_emptydir_storage(&mut storage, false, false);
-
+        configure_block_emptydir_storage(&mut storage);
         assert_eq!(
             storage.driver_options,
             vec![KATA_BLOCK_VOLUME_CREATE_FS.to_string()]
         );
         assert!(storage.options.is_empty());
         assert!(storage.shared);
-    }
-
-    #[test]
-    fn block_encrypted_emptydir_requests_encryption_and_filesystem_creation() {
-        let metadata = block_emptydir_metadata(true, 0);
-
-        assert_eq!(
-            metadata.get(METADATA_CREATE_FILESYSTEM).map(String::as_str),
-            Some("true")
-        );
-        assert_eq!(
-            metadata.get(METADATA_ENCRYPTION_KEY).map(String::as_str),
-            Some(ENCRYPTION_KEY_VALUE)
-        );
-        assert!(!metadata.contains_key(METADATA_FS_GROUP));
-        assert!(block_emptydir_mount_options(false).is_empty());
-
-        let mut storage = agent::Storage::default();
-
-        configure_block_emptydir_storage(&mut storage, true, false);
-
-        assert_eq!(
-            storage.driver_options,
-            vec![
-                format!("{}={}", ENCRYPTION_KEY_DRIVER_OPTION, ENCRYPTION_KEY_VALUE),
-                KATA_BLOCK_VOLUME_CREATE_FS.to_string(),
-            ]
-        );
-        assert!(storage.options.is_empty());
-        assert!(storage.shared);
+        assert!(is_block_emptydir_mode("block-plain"));
+        assert!(!is_block_emptydir_mode("block-encrypted"));
     }
 }

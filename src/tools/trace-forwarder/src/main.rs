@@ -138,7 +138,6 @@ fn main() -> Result<()> {
     for connection in listener.incoming() {
         let result = (|| -> Result<()> {
             let mut stream = connection?;
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
             while let Some(span) = read_span(
                 &mut FrameReader {
                     stream: &mut stream,

@@ -76,8 +76,6 @@ struct Driver {
 
 #[derive(Debug, Clone)]
 pub struct DriverInfo {
-    #[allow(dead_code)]
-    pub driver: String,
     pub bus_info: String,
 }
 
@@ -97,7 +95,6 @@ pub fn get_driver_info(name: &str) -> Result<DriverInfo> {
     // fd will be automatically closed when it goes out of scope (OwnedFd RAII)
     unsafe { ioctl_ethtool(fd.as_fd().as_raw_fd(), &mut req).context("ioctl ethtool")? };
     Ok(DriverInfo {
-        driver: get_name!(ereq.driver).context("get driver name")?,
         bus_info: get_name!(ereq.bus_info).context("get bus info name")?,
     })
 }

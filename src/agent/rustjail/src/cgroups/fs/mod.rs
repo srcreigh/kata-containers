@@ -39,8 +39,6 @@ use std::sync::{Arc, RwLock};
 
 use super::DevicesCgroupInfo;
 
-const INIT_SUBCGROUP: &str = "/init/";
-
 // Convenience function to obtain the scope logger.
 fn sl() -> slog::Logger {
     slog_scope::logger().new(o!("subsystem" => "cgroups"))
@@ -77,7 +75,7 @@ impl CgroupManager for Manager {
     fn apply(&self, pid: pid_t) -> Result<()> {
         let cgroup_pid = CgroupPid::from(pid as u64);
         if cgroup_has_init_subcgroup(&self.cpath) {
-            let cpath = self.cgroup_path_with_subcgroup(INIT_SUBCGROUP);
+            let cpath = self.init_cgroup_path();
             load_cgroup(Box::new(cgroups::hierarchies::V2::new()), &cpath)
                 .add_task_by_tgid(cgroup_pid)
                 .with_context(|| format!("add task {} to cgroup {}", pid, cpath))?;
@@ -117,7 +115,7 @@ impl CgroupManager for Manager {
 
         // set block_io resources
         if let Some(blkio) = &r.block_io() {
-            set_block_io_resources(&self.cgroup, blkio, res);
+            set_block_io_resources(blkio, res);
         }
 
         // set hugepages resources
@@ -128,7 +126,7 @@ impl CgroupManager for Manager {
         // set devices resources
         if !self.devcg_allowed_all {
             if let Some(devices) = r.devices() {
-                set_devices_resources(&self.cgroup, devices, res, pod_res);
+                set_devices_resources(devices, res, pod_res);
             }
         }
         debug!(
@@ -164,7 +162,6 @@ impl CgroupManager for Manager {
         let pids_stats = get_pids_stats(&self.cgroup);
 
         // BlkioStats
-        // note that virtiofs has no blkio stats
         let blkio_stats = get_blkio_stats(&self.cgroup);
 
         // HugetlbStats
@@ -275,7 +272,6 @@ pub fn validate_resources(resources: &LinuxResources) -> Result<()> {
 }
 
 fn set_devices_resources(
-    _cg: &cgroups::Cgroup,
     device_resources: &[LinuxDeviceCgroup],
     res: &mut cgroups::Resources,
     pod_res: &mut cgroups::Resources,
@@ -324,11 +320,7 @@ fn set_hugepages_resources(
     res.hugepages.limits = limits;
 }
 
-fn set_block_io_resources(
-    _cg: &cgroups::Cgroup,
-    blkio: &LinuxBlockIo,
-    res: &mut cgroups::Resources,
-) {
+fn set_block_io_resources(blkio: &LinuxBlockIo, res: &mut cgroups::Resources) {
     info!(sl(), "cgroup manager set block io");
 
     res.blkio.weight = blkio.weight();
@@ -842,13 +834,8 @@ impl Manager {
         })
     }
 
-    fn cgroup_path_with_subcgroup(&self, subcgroup: &str) -> String {
-        let subcgroup = subcgroup.trim_matches('/');
-        if subcgroup.is_empty() {
-            self.cpath.clone()
-        } else {
-            Path::new(&self.cpath).join(subcgroup).display().to_string()
-        }
+    fn init_cgroup_path(&self) -> String {
+        Path::new(&self.cpath).join("init").display().to_string()
     }
 
     fn setup_allowed_all_mode(cgroup: &cgroups::Cgroup) -> Result<()> {
@@ -1043,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cgroup_path_with_subcgroup_preserves_absolute_cpath() {
+    fn test_init_cgroup_path_preserves_absolute_cpath() {
         let manager = Manager {
             cpath: "/docker.slice/docker-containers.slice/container".to_string(),
             cgroup: load_cgroup(Box::new(cgroups::hierarchies::V2::new()), "/"),
@@ -1052,12 +1039,8 @@ mod tests {
         };
 
         assert_eq!(
-            manager.cgroup_path_with_subcgroup("/init/"),
+            manager.init_cgroup_path(),
             "/docker.slice/docker-containers.slice/container/init"
-        );
-        assert_eq!(
-            manager.cgroup_path_with_subcgroup("/"),
-            "/docker.slice/docker-containers.slice/container"
         );
     }
 

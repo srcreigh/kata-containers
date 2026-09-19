@@ -28,25 +28,10 @@ impl fmt::Debug for Address {
 
 #[derive(Clone, Debug, Default)]
 pub struct NetworkConfig {
-    /// for detach, now it's default value 0.
-    pub index: u64,
-
-    /// Host level path for the guest network interface.
+    /// Host TAP interface opened by Firecracker.
     pub host_dev_name: String,
-    /// Guest iface name for the guest network interface.
-    pub virt_iface_name: String,
-    /// Guest MAC address.
+    /// MAC address presented to the guest.
     pub guest_mac: Option<Address>,
-    /// Virtio queue size
-    pub queue_size: usize,
-    /// Virtio queue num
-    pub queue_num: usize,
-    /// Use shared irq
-    pub use_shared_irq: Option<bool>,
-    /// Use generic irq
-    pub use_generic_irq: Option<bool>,
-    /// Allow duplicate mac
-    pub allow_duplicate_mac: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -71,39 +56,19 @@ impl NetworkDevice {
 #[async_trait]
 impl Device for NetworkDevice {
     async fn attach(&mut self, h: &dyn hypervisor) -> Result<()> {
-        let updated = h
-            .add_device(DeviceType::Network(self.clone()))
+        h.add_device(DeviceType::Network(self.clone()))
             .await
             .context("add network device.")?;
-
-        if let DeviceType::Network(net) = updated {
-            self.config = net.config;
-        }
 
         Ok(())
     }
 
-    async fn detach(&mut self, h: &dyn hypervisor) -> Result<Option<u64>> {
-        h.remove_device(DeviceType::Network(self.clone()))
-            .await
-            .context("remove network device.")?;
-
-        Ok(Some(self.config.index))
+    async fn detach(&mut self) -> Result<Option<u64>> {
+        // Network cleanup removes tc filters; it never releases a block-drive slot.
+        Ok(None)
     }
 
     async fn get_device_info(&self) -> DeviceType {
         DeviceType::Network(self.clone())
-    }
-
-    async fn increase_attach_count(&mut self) -> Result<bool> {
-        // network devices will not be attached multiple times, Just return Ok(false)
-
-        Ok(false)
-    }
-
-    async fn decrease_attach_count(&mut self) -> Result<bool> {
-        // network devices will not be detached multiple times, Just return Ok(false)
-
-        Ok(false)
     }
 }

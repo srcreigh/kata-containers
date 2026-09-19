@@ -390,16 +390,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
-name = "bitmask-enum"
-version = "2.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6cbbb8f56245b5a479b30a62cdc86d26e2f35c2b9f594bc4671654b03851380"
-dependencies = [
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "bitvec"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1715,39 +1705,22 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes 1.11.1",
- "crossbeam-channel",
- "futures",
- "go-flag",
  "http-body-util",
  "hyper 1.10.1",
  "hyper-util",
  "hyperlocal",
- "hypervisor",
  "kata-sys-util",
  "kata-types",
- "libc",
  "logging",
  "nix 0.31.3",
- "once_cell",
- "path-clean",
  "persist",
- "protocols",
- "rand 0.10.1",
- "regex",
- "rstest",
  "rust-ini",
- "safe-path",
- "seccompiler",
  "serde",
  "serde_json",
- "serial_test 2.0.0",
  "slog",
  "slog-scope",
  "tempfile",
- "test-utils",
  "tokio",
- "tracing",
- "ttrpc",
 ]
 
 [[package]]
@@ -2030,7 +2003,6 @@ dependencies = [
  "anyhow",
  "async-recursion 0.3.2",
  "async-trait",
- "capctl",
  "cgroups-rs",
  "clap",
  "derivative",
@@ -2053,16 +2025,14 @@ dependencies = [
  "prometheus",
  "protobuf",
  "protocols",
- "regex",
  "rstest",
  "rtnetlink",
  "rustjail",
  "safe-path",
- "scan_fmt",
  "scopeguard",
  "serde",
  "serde_json",
- "serial_test 0.10.0",
+ "serial_test",
  "slog",
  "slog-scope",
  "slog-stdlog",
@@ -2096,8 +2066,6 @@ dependencies = [
  "oci-spec 0.10.0",
  "rand 0.10.1",
  "rstest",
- "serde",
- "serde_json",
  "slog",
  "slog-scope",
  "tempfile",
@@ -2127,9 +2095,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "bitmask-enum",
  "byte-unit",
- "glob",
  "lazy_static",
  "nix 0.31.3",
  "num_cpus",
@@ -2264,7 +2230,6 @@ dependencies = [
  "slog-journald",
  "slog-json",
  "slog-scope",
- "slog-term",
  "tempfile",
 ]
 
@@ -2745,30 +2710,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "path-absolutize"
-version = "3.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4af381fe79fa195b4909485d99f73a80792331df0625188e707854f0b3383f5"
-dependencies = [
- "path-dedot",
-]
-
-[[package]]
-name = "path-clean"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17359afc20d7ab31fdb42bb844c8b3bb1dabd7dcf7e68428492da7f16966fcef"
-
-[[package]]
-name = "path-dedot"
-version = "3.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07ba0ad7e047712414213ff67533e6dd477af0a4e1d14fb52343e53d30ea9397"
-dependencies = [
- "once_cell",
-]
-
-[[package]]
 name = "pathrs"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2803,6 +2744,7 @@ dependencies = [
  "safe-path",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3504,7 +3446,6 @@ dependencies = [
  "resource",
  "rstest",
  "runtime-spec",
- "serde_json",
  "shim-interface",
  "slog",
  "slog-scope",
@@ -3602,7 +3543,6 @@ dependencies = [
  "libseccomp",
  "nix 0.31.3",
  "oci-spec 0.10.0",
- "path-absolutize",
  "protobuf",
  "protocols",
  "regex",
@@ -3612,7 +3552,7 @@ dependencies = [
  "scan_fmt",
  "scopeguard",
  "serde_json",
- "serial_test 0.10.0",
+ "serial_test",
  "slog",
  "slog-scope",
  "tempfile",
@@ -3678,29 +3618,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
-name = "seccompiler"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
-
-[[package]]
-name = "sendfd"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b183bfd5b1bc64ab0c1ef3ee06b008a9ef1b68a7d3a99ba566fbfe7a7c6d745b"
-dependencies = [
- "libc",
- "tokio",
-]
 
 [[package]]
 name = "serde"
@@ -3806,21 +3727,7 @@ dependencies = [
  "lazy_static",
  "log",
  "parking_lot",
- "serial_test_derive 0.10.0",
-]
-
-[[package]]
-name = "serial_test"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e56dd856803e253c8f298af3f4d7eb0ae5e23a737252cd90bb4f3b435033b2d"
-dependencies = [
- "dashmap",
- "futures",
- "lazy_static",
- "log",
- "parking_lot",
- "serial_test_derive 2.0.0",
+ "serial_test_derive",
 ]
 
 [[package]]
@@ -3832,17 +3739,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "serial_test_derive"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91d129178576168c589c9ec973feedf7d3126c01ac2bf08795109aa35b69fb8f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -3935,7 +3831,7 @@ dependencies = [
  "oci-spec 0.10.0",
  "protobuf",
  "runtime-spec",
- "serial_test 0.10.0",
+ "serial_test",
  "service",
  "sha2 0.11.0",
  "slog",
@@ -4767,7 +4663,6 @@ version = "1.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
- "getrandom 0.4.2",
  "js-sys",
  "serde_core",
  "wasm-bindgen",
@@ -4812,7 +4707,6 @@ dependencies = [
  "protobuf",
  "resource",
  "safe-path",
- "sendfd",
  "serde",
  "serde_json",
  "slog",
@@ -4823,7 +4717,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
- "uuid 1.23.1",
 ]
 
 [[package]]
@@ -4851,7 +4744,6 @@ name = "vsock-exporter"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "byteorder",
  "libc",
  "opentelemetry 0.17.0",
  "serde_json",

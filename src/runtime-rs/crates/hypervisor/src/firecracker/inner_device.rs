@@ -5,24 +5,16 @@
 //SPDX-License-Identifier: Apache-2.0
 
 use super::FcInner;
-use crate::firecracker::{
-    inner_hypervisor::{FC_AGENT_SOCKET_NAME, ROOT},
-    sl,
-};
-use crate::VmmState;
-use crate::{device::DeviceType, HybridVsockConfig};
+use crate::firecracker::sl;
+use crate::{device::DeviceType, VmmState};
 use anyhow::{Context, Result};
-use serde_json::json;
 
 impl FcInner {
     pub(crate) async fn add_device(&mut self, device: DeviceType) -> Result<()> {
-        if self.state == VmmState::NotReady {
-            info!(sl(), "VMM not ready, queueing device {}", device);
-
-            self.pending_devices.insert(0, device);
-
-            return Ok(());
-        }
+        anyhow::ensure!(
+            self.state != VmmState::NotReady,
+            "kata-fc: cannot attach a device before preparing the VMM"
+        );
 
         debug!(sl(), "Add Device {} ", &device);
 
@@ -37,9 +29,6 @@ impl FcInner {
                 .add_net_device(&network.config, network.device_id)
                 .await
                 .context("add net device"),
-            DeviceType::HybridVsock(hvsock) => {
-                self.add_hvsock(&hvsock.config).await.context("add vsock")
-            }
         }
     }
 
@@ -51,24 +40,19 @@ impl FcInner {
         }
         Ok(())
     }
+}
 
-    pub(crate) async fn remove_device(&mut self, device: DeviceType) -> Result<()> {
-        info!(sl(), "Remove Device {} ", device);
-        Ok(())
-    }
-
-    pub(crate) async fn add_hvsock(&mut self, config: &HybridVsockConfig) -> Result<()> {
-        let body_vsock: String = json!({
-            "vsock_id": String::from(ROOT),
-            "guest_cid": config.guest_cid,
-            "uds_path": FC_AGENT_SOCKET_NAME,
-        })
-        .to_string();
-
-        info!(sl(), "HybridVsock configure: {:?}", &body_vsock);
-
-        self.request_with_retry(hyper::Method::PUT, "/vsock", body_vsock)
-            .await?;
-        Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn device_attachment_requires_prepared_vmm() {
+        let mut fc = FcInner::new();
+        let error = fc
+            .add_device(DeviceType::Network(Default::default()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("before preparing the VMM"));
+        assert!(fc.pid.is_none());
     }
 }

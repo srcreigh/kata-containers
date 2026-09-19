@@ -40,12 +40,6 @@
 //!     - the path returned by [`PinnedPathBuf::as_path()`] is always a symlink.
 //!     - the filesystem object referenced by the symlink [`PinnedPathBuf::as_path()`] never changes.
 //!     - the value of [`PinnedPathBuf::target()`] never changes.
-//! - [struct ScopedDirBuilder](crate::ScopedDirBuilder): safe version of `DirBuilder` to protect
-//!   from symlink race and TOCTOU style of attacks, which enhances security by:
-//!     - ensuring the new directories are created under a specified `root` directory.
-//!     - avoiding symlink race attacks during making directories.
-//!     - returning a [PinnedPathBuf] for the last level of directory, so it could be used for other
-//!       operations safely.
 //!
 //! The work is inspired by:
 //! - [`filepath-securejoin`](https://github.com/cyphar/filepath-securejoin): secure_join() written
@@ -57,9 +51,6 @@
 
 mod pinned_path_buf;
 pub use pinned_path_buf::PinnedPathBuf;
-
-mod scoped_dir_builder;
-pub use scoped_dir_builder::ScopedDirBuilder;
 
 mod scoped_path_resolver;
 pub use scoped_path_resolver::{scoped_join, scoped_resolve};

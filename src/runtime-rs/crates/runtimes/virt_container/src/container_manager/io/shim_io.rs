@@ -4,15 +4,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::{
-    io,
-    os::unix::{
-        fs::{FileTypeExt, OpenOptionsExt},
-        io::RawFd,
-        prelude::AsRawFd,
-    },
-    pin::Pin,
-    task::{Context as TaskContext, Poll},
+use std::os::unix::{
+    fs::{FileTypeExt, OpenOptionsExt},
+    io::RawFd,
+    prelude::AsRawFd,
 };
 
 use anyhow::{Context, Result};
@@ -138,7 +133,7 @@ impl ShimIo {
                 if url.scheme() == "fifo" {
                     let path = url.path();
                     match open_fifo_write(path) {
-                        Ok(f) => return Some(Box::new(ShimIoWrite::File(f))),
+                        Ok(f) => return Some(Box::new(f)),
                         Err(err) => error!(sl!(), "failed to open fifo {} error {:?}", path, err),
                     }
                 } else {
@@ -148,7 +143,6 @@ impl ShimIo {
             None
         };
 
-        let stdout_url = get_url(stdout);
         let stderr_url = get_url(stderr);
 
         Ok(Self {
@@ -157,35 +151,5 @@ impl ShimIo {
             stderr: get_fd(&stderr_url),
             binary_logger: None,
         })
-    }
-}
-
-#[derive(Debug)]
-enum ShimIoWrite {
-    File(File),
-    // TODO: support other type
-}
-
-impl AsyncWrite for ShimIoWrite {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match &mut *self {
-            ShimIoWrite::File(f) => Pin::new(f).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        match &mut *self {
-            ShimIoWrite::File(f) => Pin::new(f).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        match &mut *self {
-            ShimIoWrite::File(f) => Pin::new(f).poll_shutdown(cx),
-        }
     }
 }

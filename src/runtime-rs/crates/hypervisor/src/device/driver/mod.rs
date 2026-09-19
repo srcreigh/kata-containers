@@ -6,11 +6,9 @@
 
 pub mod virtio_blk_modern;
 mod virtio_net;
-mod virtio_vsock;
 
 pub use kata_types::device::DRIVER_BLK_MMIO_TYPE as KATA_MMIO_BLK_DEV_TYPE;
 pub use virtio_blk_modern::{
     BlockConfigModern, BlockDeviceModern, BlockDeviceModernHandle, VIRTIO_BLOCK_MMIO,
 };
 pub use virtio_net::{Address, NetworkConfig, NetworkDevice};
-pub use virtio_vsock::{HybridVsockConfig, HybridVsockDevice, DEFAULT_GUEST_VSOCK_CID};

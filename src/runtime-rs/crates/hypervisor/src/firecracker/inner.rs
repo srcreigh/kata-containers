@@ -4,8 +4,8 @@
 //SPDX-License-Identifier: Apache-2.0
 
 use crate::firecracker::{inner_hypervisor::FC_API_SOCKET_NAME, sl};
+use crate::VmmState;
 use crate::HYPERVISOR_FIRECRACKER;
-use crate::{device::DeviceType, VmmState};
 use crate::{selinux, HypervisorState};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -14,16 +14,12 @@ use http_body_util::Full;
 use hyper_util::client::legacy::Client;
 use hyperlocal::{UnixClientExt, UnixConnector};
 use kata_sys_util::guest_io::{read_line, RateLimit};
-use kata_types::{
-    capabilities::{Capabilities, CapabilityBits},
-    config::hypervisor::Hypervisor as HypervisorConfig,
-};
+use kata_types::config::hypervisor::Hypervisor as HypervisorConfig;
 use nix::sched::{setns, CloneFlags};
 use persist::sandbox_persist::Persist;
 use std::process::Stdio;
 use tokio::io::BufReader;
 use tokio::process::{Child, ChildStderr, Command};
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 unsafe impl Send for FcInner {}
@@ -41,17 +37,11 @@ pub struct FcInner {
     pub(crate) client: Client<UnixConnector, Full<Bytes>>,
     pub(crate) jailer_root: String,
     pub(crate) run_dir: String,
-    pub(crate) pending_devices: Vec<DeviceType>,
-    pub(crate) capabilities: Capabilities,
     pub(crate) fc_process: Mutex<Option<Child>>,
-    pub(crate) exit_notify: Option<mpsc::Sender<()>>,
 }
 
 impl FcInner {
-    pub fn new(exit_notify: mpsc::Sender<()>) -> FcInner {
-        let mut capabilities = Capabilities::new();
-        capabilities.set(CapabilityBits::BlockDeviceSupport | CapabilityBits::HybridVsockSupport);
-
+    pub fn new() -> FcInner {
         FcInner {
             id: String::default(),
             asock_path: String::default(),
@@ -63,10 +53,7 @@ impl FcInner {
             client: Client::unix(),
             jailer_root: String::default(),
             run_dir: String::default(),
-            pending_devices: vec![],
-            capabilities,
             fc_process: Mutex::new(None),
-            exit_notify: Some(exit_notify),
         }
     }
 
@@ -120,11 +107,7 @@ impl FcInner {
         let mut child = cmd.stderr(Stdio::piped()).spawn()?;
 
         let stderr = child.stderr.take().unwrap();
-        let exit_notify = self
-            .exit_notify
-            .take()
-            .ok_or_else(|| anyhow!("no exit notify"))?;
-        tokio::spawn(log_fc_stderr(stderr, exit_notify));
+        tokio::spawn(log_fc_stderr(stderr));
 
         match child.id() {
             Some(id) => {
@@ -160,6 +143,10 @@ impl FcInner {
 
 pub(super) fn validate_jailer_config(config: &HypervisorConfig) -> Result<()> {
     anyhow::ensure!(
+        !config.security_info.rootless,
+        "kata-fc: rootless saved VMs are unsupported"
+    );
+    anyhow::ensure!(
         !config.jailer_path.is_empty(),
         "kata-fc: Firecracker jailer is required"
     );
@@ -170,7 +157,7 @@ pub(super) fn validate_jailer_config(config: &HypervisorConfig) -> Result<()> {
     Ok(())
 }
 
-async fn log_fc_stderr(stderr: ChildStderr, exit_notify: mpsc::Sender<()>) -> Result<()> {
+async fn log_fc_stderr(stderr: ChildStderr) -> Result<()> {
     info!(sl!(), "starting reading fc stderr");
 
     let mut stderr_reader = BufReader::new(stderr);
@@ -200,9 +187,6 @@ async fn log_fc_stderr(stderr: ChildStderr, exit_notify: mpsc::Sender<()>) -> Re
         }
     }
 
-    // Notfiy the waiter the process exit.
-    let _ = exit_notify.try_send(());
-
     info!(sl!(), "finished reading fc stderr");
     Ok(())
 }
@@ -210,7 +194,7 @@ async fn log_fc_stderr(stderr: ChildStderr, exit_notify: mpsc::Sender<()>) -> Re
 #[async_trait]
 impl Persist for FcInner {
     type State = HypervisorState;
-    type ConstructorArgs = mpsc::Sender<()>;
+    type ConstructorArgs = ();
 
     async fn save(&self) -> Result<Self::State> {
         Ok(HypervisorState {
@@ -225,7 +209,7 @@ impl Persist for FcInner {
             ..Default::default()
         })
     }
-    async fn restore(exit_notify: mpsc::Sender<()>, hypervisor_state: Self::State) -> Result<Self> {
+    async fn restore(_: (), hypervisor_state: Self::State) -> Result<Self> {
         anyhow::ensure!(
             hypervisor_state.jailed,
             "kata-fc: unjailed saved VMs are unsupported"
@@ -241,11 +225,8 @@ impl Persist for FcInner {
             pid: None,
             jailer_root: hypervisor_state.jailer_root,
             client: Client::unix(),
-            pending_devices: vec![],
             run_dir: hypervisor_state.run_dir,
-            capabilities: Capabilities::new(),
             fc_process: Mutex::new(None),
-            exit_notify: Some(exit_notify),
         })
     }
 }
@@ -257,40 +238,26 @@ mod minimal_tests {
     async fn restore_requires_jailed_seccomp_enabled_state() {
         let mut state = HypervisorState::default();
         state.config.jailer_path = "/usr/bin/jailer".into();
-        let (tx, _) = mpsc::channel(1);
-        assert!(FcInner::restore(tx, state.clone()).await.is_err());
+        assert!(FcInner::restore((), state.clone()).await.is_err());
 
         state.jailed = true;
         state.config.security_info.disable_seccomp = true;
-        let (tx, _) = mpsc::channel(1);
-        assert!(FcInner::restore(tx, state.clone()).await.is_err());
+        assert!(FcInner::restore((), state.clone()).await.is_err());
 
         state.config.security_info.disable_seccomp = false;
         state.config.jailer_path.clear();
-        let (tx, _) = mpsc::channel(1);
-        assert!(FcInner::restore(tx, state.clone()).await.is_err());
+        assert!(FcInner::restore((), state.clone()).await.is_err());
 
         state.config.jailer_path = "/usr/bin/jailer".into();
-        let (tx, _) = mpsc::channel(1);
-        let restored = FcInner::restore(tx, state).await.unwrap();
+        let restored = FcInner::restore((), state).await.unwrap();
         assert!(restored.save().await.unwrap().jailed);
     }
 
     #[tokio::test]
     async fn prepare_rejects_missing_jailer_before_side_effects() {
-        let (tx, _) = mpsc::channel(1);
-        let mut fc = FcInner::new(tx);
+        let mut fc = FcInner::new();
         assert!(fc.prepare_vm("unsupported", None, None).await.is_err());
         assert!(fc.vm_path.is_empty());
         assert!(fc.pid.is_none());
-    }
-
-    #[test]
-    fn firecracker_requires_hybrid_vsock() {
-        let (tx, _) = mpsc::channel(1);
-        let fc = FcInner::new(tx);
-        assert!(fc.capabilities.is_hybrid_vsock_supported());
-        assert!(fc.capabilities.is_block_device_supported());
-        assert!(!fc.capabilities.is_fs_sharing_supported());
     }
 }

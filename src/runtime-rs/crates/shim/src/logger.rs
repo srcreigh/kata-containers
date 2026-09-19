@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 
-pub(crate) fn set_logger(_path: &str, sid: &str, is_debug: bool) -> Result<slog_async::AsyncGuard> {
+pub(crate) fn set_logger(sid: &str, is_debug: bool) -> Result<slog_async::AsyncGuard> {
     let level = if is_debug {
         slog::Level::Debug
     } else {

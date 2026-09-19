@@ -33,7 +33,7 @@ const NODEV: &str = "nodev";
 // container hugepage
 pub(crate) struct Hugepage {
     // storage info
-    storage: Option<Storage>,
+    storage: Storage,
     // mount info
     mount: oci::Mount,
 }
@@ -79,7 +79,7 @@ impl Hugepage {
             ..Default::default()
         };
         Ok(Self {
-            storage: Some(storage),
+            storage: storage,
             mount,
         })
     }
@@ -92,20 +92,11 @@ impl Volume for Hugepage {
     }
 
     fn get_storage(&self) -> Result<Vec<agent::Storage>> {
-        let s = if let Some(s) = self.storage.as_ref() {
-            vec![s.clone()]
-        } else {
-            vec![]
-        };
-        Ok(s)
+        Ok(vec![self.storage.clone()])
     }
 
     async fn cleanup(&self, _device_manager: &RwLock<DeviceManager>) -> Result<()> {
         Ok(())
-    }
-
-    fn get_device_id(&self) -> Result<Option<String>> {
-        Ok(None)
     }
 }
 
