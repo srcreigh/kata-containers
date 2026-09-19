@@ -24,6 +24,9 @@ opentelemetry = { version = "0.18.0", features = [
     "trace",
     "rt-tokio",
 ] }
+# Jaeger uses Hyper 0.14, independently of the runtime's Hyper 1.x.
+# Without http1 it sends HTTP/2 prior knowledge to an HTTP/1 collector.
+hyper-jaeger = { package = "hyper", version = "0.14", default-features = false, features = ["http1"] }
 opentelemetry-jaeger = { version = "0.17.0", features = [
     "rt-tokio",
     "hyper_collector_client",
@@ -61,3 +64,6 @@ virt_container = { workspace = true, optional = true }
 [features]
 default = ["virt"]
 virt = ["virt_container"]
+
+[package.metadata.cargo-machete]
+ignored = ["hyper-jaeger"]

@@ -411,6 +411,13 @@ impl ResourceManagerInner {
             let is_readonly =
                 device_cgroup_access_is_readonly(linux, LinuxDeviceType::B, d.major(), d.minor())
                     || block_device_node_is_readonly(d.major(), d.minor());
+            // FC's pre-created drive slots are read-write; PATCH cannot change
+            // is_read_only. Do not silently expose a requested read-only raw disk
+            // as writable (guest cgroup v2 does not enforce device access here).
+            anyhow::ensure!(
+                !is_readonly,
+                "kata-fc: read-only raw block devices are unsupported by the Firecracker drive pool"
+            );
             let dev_info = DeviceConfig::BlockCfgModern(BlockConfigModern {
                 major: d.major(),
                 minor: d.minor(),

@@ -170,3 +170,50 @@ fn verify_jaeger_config(endpoint: &str, username: &str, passwd: &str) -> Result<
 
     Ok(endpt)
 }
+
+#[cfg(test)]
+mod restoration_tests {
+    use super::*;
+    use opentelemetry::trace::TraceContextExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_spans_have_context_and_reach_collector() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/api/traces", listener.local_addr().unwrap());
+        let mut tracer = KataTracer::new();
+        tracer.trace_setup("trace-test", &endpoint, "", "").unwrap();
+        {
+            let span = tracing::info_span!("restored-tracing-test");
+            assert!(span.context().span().span_context().is_valid());
+        }
+        let (mut stream, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+                .await
+                .expect("no trace export")
+                .unwrap();
+        let mut bytes = Vec::new();
+        while !bytes.ends_with(b"\r\n\r\n") {
+            bytes.push(stream.read_u8().await.unwrap());
+            assert!(bytes.len() < 8192);
+        }
+        let header = String::from_utf8_lossy(&bytes);
+        assert!(header.contains("POST /api/traces"));
+        let length: usize = header
+            .lines()
+            .find_map(|line| {
+                line.to_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(|s| s.parse().unwrap())
+            })
+            .unwrap();
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("restored-tracing-test"));
+        stream
+            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    }
+}

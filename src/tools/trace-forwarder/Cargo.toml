@@ -13,3 +13,6 @@ serde_json.workspace = true
 opentelemetry = { workspace = true, features = ["serialize"] }
 opentelemetry-jaeger = "0.16.0"
 nix = { workspace = true, features = ["user"] }
+
+[dev-dependencies]
+tempfile.workspace = true

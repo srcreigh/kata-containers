@@ -59,6 +59,7 @@ impl KataAgent {
     }
 
     // No handwritten framing or status parser: ttrpc validates the envelope.
+    #[tracing::instrument(skip_all, fields(rpc.service = service, rpc.method = method))]
     async fn request<M: Message>(
         &self,
         service: &str,

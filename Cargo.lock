@@ -2452,6 +2452,7 @@ dependencies = [
  "opentelemetry 0.17.0",
  "opentelemetry-jaeger 0.16.0",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3978,6 +3979,7 @@ dependencies = [
  "common",
  "containerd-shim-protos",
  "http-body-util",
+ "hyper 0.14.32",
  "hyper 1.10.1",
  "hyper-util",
  "hypervisor",

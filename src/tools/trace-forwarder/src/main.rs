@@ -5,7 +5,9 @@ use anyhow::{ensure, Context, Result};
 use clap::Parser;
 use opentelemetry::sdk::export::trace::{SpanData, SpanExporter};
 use std::io::{ErrorKind, Read};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
+use std::path::Path;
 
 const MAX_SPAN_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -46,11 +48,28 @@ fn read_span(reader: &mut impl Read) -> Result<Option<SpanData>> {
     ))
 }
 
+fn bind_socket(path: &str) -> Result<UnixListener> {
+    // Never unlink an existing socket belonging to a running forwarder.
+    // Full sandbox paths exceed sockaddr_un's 108-byte limit. Bind through
+    // an opened parent directory without changing process cwd or unlinking files.
+    let socket = Path::new(&path);
+    let parent = socket
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let directory = std::fs::File::open(parent)?;
+    let short_path = Path::new("/proc/self/fd")
+        .join(directory.as_raw_fd().to_string())
+        .join(socket.file_name().context("missing socket name")?);
+    let listener = UnixListener::bind(short_path).with_context(|| format!("bind {path}"))?;
+    drop(directory);
+    Ok(listener)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let path = format!("{}_10240", args.socket_path);
-    // Never unlink an existing socket belonging to a running forwarder.
-    let listener = UnixListener::bind(&path).with_context(|| format!("bind {path}"))?;
+    let listener = bind_socket(&path)?;
     if nix::unistd::geteuid().is_root() {
         let user = nix::unistd::User::from_name("nobody")?.context("missing nobody user")?;
         nix::unistd::setgroups(&[])?;
@@ -81,6 +100,16 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn binds_long_sandbox_paths_without_replacing_existing_sockets() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("a".repeat(100));
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("kata.hvsock_10240");
+        let _listener = bind_socket(path.to_str().unwrap()).unwrap();
+        assert!(path.exists());
+        assert!(bind_socket(path.to_str().unwrap()).is_err());
+    }
     #[test]
     fn rejects_invalid_frames_without_panicking() {
         assert!(read_span(&mut &b""[..]).unwrap().is_none());
