@@ -48,6 +48,22 @@ pub(crate) struct ResourceManagerInner {
     pub cgroups_resource: CgroupsResource,
 }
 
+// Namespace changes stay on a dedicated OS thread. Await its blocking join so
+// Tokio can drive tasks that the namespace thread depends on, including an
+// existing Firecracker API connection owned by the outer runtime.
+async fn run_network_thread<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(move || {
+        thread::spawn(work)
+            .join()
+            .map_err(|e| anyhow!("{:?}", e))
+            .context("Couldn't join on the associated thread")?
+    })
+    .await
+    .context("Couldn't await the network thread join")?
+}
+
 impl ResourceManagerInner {
     pub(crate) async fn new(
         sid: &str,
@@ -120,7 +136,7 @@ impl ResourceManagerInner {
         // The solution is to block the future on the current thread, it is enabled by spawn an os thread, create a
         // tokio runtime, and block the task on it.
         let device_manager = self.device_manager.clone();
-        let network = thread::spawn(move || -> Result<Arc<dyn Network>> {
+        let network = run_network_thread(move || -> Result<Arc<dyn Network>> {
             let rt = runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
@@ -130,9 +146,7 @@ impl ResourceManagerInner {
             rt.block_on(d.setup()).context("setup network")?;
             Ok(d)
         })
-        .join()
-        .map_err(|e| anyhow!("{:?}", e))
-        .context("Couldn't join on the associated thread")?
+        .await
         .context("failed to set up network")?;
         self.network = Some(network);
         Ok(())
@@ -642,5 +656,53 @@ mod tests {
             MAJOR,
             MINOR
         ));
+    }
+}
+
+#[cfg(test)]
+mod network_thread_tests {
+    use super::run_network_thread;
+    use anyhow::{anyhow, Context, Result};
+    use std::{sync::mpsc, thread, time::Duration};
+
+    // One scheduler thread makes an inline blocking join fail deterministically:
+    // the OS thread cannot receive until that scheduler runs the pending task.
+    #[tokio::test(flavor = "current_thread")]
+    async fn network_thread_wait_allows_runtime_progress() {
+        let runtime = tokio::runtime::Handle::current();
+        let value = tokio::spawn(async move {
+            let runtime_thread = thread::current().id();
+            run_network_thread(move || {
+                assert_ne!(thread::current().id(), runtime_thread);
+                let (sender, receiver) = mpsc::channel();
+                runtime.spawn(async move {
+                    let _ = sender.send(42);
+                });
+                // Bound the failure case independently of Tokio's blocked timer.
+                receiver
+                    .recv_timeout(Duration::from_secs(5))
+                    .context("outer runtime did not make progress")
+            })
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[tokio::test]
+    async fn network_thread_preserves_errors_and_panics() {
+        let error = run_network_thread(|| -> Result<()> { Err(anyhow!("setup failed")) })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "setup failed");
+
+        let error = run_network_thread(|| -> Result<()> { panic!("network thread panic") })
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Couldn't join on the associated thread"));
     }
 }
